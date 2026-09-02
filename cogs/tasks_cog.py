@@ -1077,9 +1077,16 @@ class TasksCog(commands.Cog):
         conn.commit()
         conn.close()
 
+        clan_members = sum(
+            1
+            for member in guild.members
+            if not member.bot
+        )
+
         response = (
             f"**Novus Sync Complete**\n\n"
-            f"Linked members checked: **{checked}**\n"
+            f"Clan members: **{clan_members}**\n"
+            f"Linked primary members: **{checked}**\n"
             f"Members changed: **{changed}**\n"
             f"Skipped: **{len(skipped_members)}**\n"
             f"Failed: **{len(failed_members)}**\n"

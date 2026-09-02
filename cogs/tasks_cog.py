@@ -46,6 +46,11 @@ NOVUS_TENURE_ROLES = {
     "paladin",
 }
 
+# Trial Member in WOM/in-game. Trials are not yet on the tenure ladder.
+NOVUS_TRIAL_WOM_RANKS = {
+    "gnome_child",
+}
+
 # Known WOM ranks intentionally left unmanaged by Novus Sync.
 # These should not appear as routine skipped-sync noise.
 IGNORED_WOM_RANKS = {
@@ -1252,6 +1257,7 @@ class TasksCog(commands.Cog):
         skipped_primary_not_found = 0
         skipped_special_tenure_role = 0
         special_missing_tenure_members = []
+        trial_members_excluded = 0
         checked_tenure_members = 0
 
         now = datetime.datetime.now(
@@ -1326,14 +1332,19 @@ class TasksCog(commands.Cog):
                 ).lower()
             )
 
+            # Trial Members are not yet on the tenure ladder.
+            if current_rank in NOVUS_TRIAL_WOM_RANKS:
+                trial_members_excluded += 1
+                continue
+
             # Regular members expose their tenure rank directly in WOM.
             if current_rank in TENURE_RANK_ORDER:
                 current_tenure_rank = current_rank
 
             else:
-                # Any non-tenure WOM rank is treated as a special/status rank.
-                # Special ranks replace the visible tenure rank in WOM, but
-                # every Novus member still keeps a Discord tenure role.
+                # Any other non-tenure WOM rank is treated as a special/status
+                # rank. Special ranks replace the visible tenure rank in WOM,
+                # but every full Novus member still keeps a Discord tenure role.
                 #
                 # This intentionally avoids hardcoding every special rank so
                 # future staff/achievement/status ranks work automatically.
@@ -1470,6 +1481,12 @@ class TasksCog(commands.Cog):
             f"Promotions due: "
             f"**{len(overdue_members)}**"
         )
+
+        if trial_members_excluded:
+            summary += (
+                f"\nTrial members excluded: "
+                f"**{trial_members_excluded}**"
+            )
 
         if skipped_special_tenure_role:
             summary += (

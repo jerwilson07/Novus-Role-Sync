@@ -1077,10 +1077,8 @@ class TasksCog(commands.Cog):
         conn.commit()
         conn.close()
 
-        clan_members = sum(
-            1
-            for member in guild.members
-            if not member.bot
+        clan_members = len(
+            group_data.get("memberships", [])
         )
 
         response = (

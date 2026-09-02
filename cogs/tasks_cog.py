@@ -1229,10 +1229,28 @@ class TasksCog(commands.Cog):
 
         primary_links = c.fetchall()
 
+        # Map Discord tenure role IDs back to their WOM tenure-rank names.
+        # This lets staff keep progressing through the normal tenure ladder
+        # even though WOM displays their staff rank instead.
+        c.execute(
+            """
+            SELECT wom_role, discord_role_id
+            FROM role_mappings
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+
+        tenure_rank_by_role_id = {
+            discord_role_id: wom_role.lower()
+            for wom_role, discord_role_id in c.fetchall()
+            if wom_role.lower() in NOVUS_TENURE_ROLES
+        }
+
         overdue_members = []
         skipped_missing_join_date = 0
         skipped_primary_not_found = 0
-        skipped_staff = 0
+        skipped_special_tenure_role = 0
         checked_tenure_members = 0
 
         now = datetime.datetime.now(
@@ -1307,14 +1325,34 @@ class TasksCog(commands.Cog):
                 ).lower()
             )
 
-            # Staff are excluded because their WOM staff rank replaces
-            # the underlying tenure rank.
-            if current_rank in NOVUS_STAFF_WOM_ROLES:
-                skipped_staff += 1
-                continue
+            # Regular members expose their tenure rank directly in WOM.
+            if current_rank in TENURE_RANK_ORDER:
+                current_tenure_rank = current_rank
 
-            if current_rank not in TENURE_RANK_ORDER:
-                continue
+            else:
+                # Any non-tenure WOM rank is treated as a special/status rank.
+                # Special ranks replace the visible tenure rank in WOM, but
+                # every Novus member still keeps a Discord tenure role.
+                #
+                # This intentionally avoids hardcoding every special rank so
+                # future staff/achievement/status ranks work automatically.
+                discord_tenure_ranks = [
+                    tenure_rank_by_role_id[role.id]
+                    for role in member.roles
+                    if role.id in tenure_rank_by_role_id
+                ]
+
+                if not discord_tenure_ranks:
+                    skipped_special_tenure_role += 1
+                    continue
+
+                # There should normally be exactly one tenure role. If an
+                # accidental duplicate exists, use the highest one to avoid
+                # falsely reporting a lower-level promotion.
+                current_tenure_rank = max(
+                    discord_tenure_ranks,
+                    key=lambda rank: TENURE_RANK_ORDER[rank]
+                )
 
             checked_tenure_members += 1
 
@@ -1340,7 +1378,7 @@ class TasksCog(commands.Cog):
             )
 
             current_level = TENURE_RANK_ORDER[
-                current_rank
+                current_tenure_rank
             ]
 
             expected_level = TENURE_RANK_ORDER[
@@ -1401,7 +1439,7 @@ class TasksCog(commands.Cog):
                 {
                     "member": member,
                     "rsn": current_rsn,
-                    "current": current_rank,
+                    "current": current_tenure_rank,
                     "expected": expected_rank,
                     "joined": joined_at,
                     "eligible": eligible_at,
@@ -1428,10 +1466,10 @@ class TasksCog(commands.Cog):
             f"**{len(overdue_members)}**"
         )
 
-        if skipped_staff:
+        if skipped_special_tenure_role:
             summary += (
-                f"\nStaff excluded: "
-                f"**{skipped_staff}**"
+                f"\nSpecial-rank members missing tenure role: "
+                f"**{skipped_special_tenure_role}**"
             )
 
         if skipped_missing_join_date:

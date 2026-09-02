@@ -1,0 +1,26 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+wom_multi.db
+
+# Backups
+backups/
+
+# Private keys
+nginx/nginx.key
+nginx/nginx.crt
+
+# Environment variables
+.env
+secrets.json
+config.py
+
+# Gemini
+GEMINI.md
+config.env

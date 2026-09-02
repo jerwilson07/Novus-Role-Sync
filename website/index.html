@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WOM Role Sync</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="icon.jpg" type="image/jpeg">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <div class="nav-left">
+                <a href="index.html"><img src="icon.jpg" alt="Bot Logo" class="logo"></a>
+                <h1><a href="index.html" class="home-link">WOM Role Sync</a></h1>
+            </div>
+            <div class="nav-right">
+                <a href="faq.html" class="button">FAQ</a>
+                <a href="https://discord.gg/T6j59QC2kh" target="_blank" class="button">Support Discord</a>
+            </div>
+        </div>
+    </nav>
+
+    <header>
+        <div class="container">
+            <h2>The Easiest Way to Sync Your<br>OSRS Clan Ranks with Discord</h2>
+            <p>Automate your clan's role management with a few simple commands</p>
+            <a href="https://discord.com/oauth2/authorize?client_id=1457156737340670157" target="_blank" class="button">Invite the Bot</a>
+        </div>
+    </header>
+
+    <main class="container">
+        <section id="statistics">
+            <div class="card">
+                <div class="stats">
+                    <div class="stat">
+                        <p>Servers Joined</p>
+                        <h4 id="servers">...</h4>
+                    </div>
+                    <div class="stat">
+                        <p>WOM Groups Synced</p>
+                        <h4 id="groups">...</h4>
+                    </div>
+                    <div class="stat">
+                        <p>Clan Members Linked</p>
+                        <h4 id="users">...</h4>
+                    </div>
+                </div>
+                <div class="last-sync">
+                    <h4>Last Global Sync: <span id="last-sync-time">N/A</span></h4>
+                </div>
+            </div>
+        </section>
+
+        <section id="instructions">
+            <h3>How It Works</h3>
+            <div class="steps">
+                <div class="step">
+                    <img src="assets/group-id.jpg" alt="Set WOM Group ID">
+                    <h4>1. Set Group ID</h4>
+                    <p>Use <code>/groupid</code> to link your server to your WOM group.</p>
+                </div>
+                <div class="step">
+                    <img src="assets/link-role.jpg" alt="Link Roles">
+                    <h4>2. Link Roles</h4>
+                    <p>Use <code>/linkrole</code> to map group ranks to Discord roles.</p>
+                </div>
+                <div class="step">
+                    <img src="assets/link-user.jpg" alt="Link Users">
+                    <h4>3. Link Users</h4>
+                    <p>Use <code>/linkuser</code> to connect members to their RSNs.</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="use-cases">
+            <h3>Why Use WOM Role Sync?</h3>
+            <div class="use-case">
+                <img src="assets/linked-roles.jpg" alt="Automated Role Management">
+                <div class="text">
+                    <h4>Automated & Effortless</h4>
+                    <p>Keep your Discord roles perfectly in sync with your Wise Old Man group roles without any manual effort. The bot checks for updates every hour, ensuring your server always reflects your clan's latest hierarchy.</p>
+                </div>
+            </div>
+            <div class="use-case reverse">
+                <img src="assets/help-menu.jpg" alt="Easy Configuration">
+                <div class="text">
+                    <h4>Simple & Intuitive</h4>
+                    <p>A few simple slash commands are all it takes to get your server set up. The intuitive <code>/help</code> command will guide you through every step of the process, making configuration a breeze.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2026 WOM Role Sync</p>
+            <a href="https://github.com/GamerGuyD3/WOM-Role-Sync-Bot" target="_blank" class="button">View Source Code</a>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>

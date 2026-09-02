@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FAQ - WOM Role Sync</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="faq.css">
+    <link rel="icon" href="icon.jpg" type="image/jpeg">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <div class="nav-left">
+                <a href="index.html"><img src="icon.jpg" alt="Bot Logo" class="logo"></a>
+                <h1><a href="index.html" class="home-link">WOM Role Sync</a></h1>
+            </div>
+            <div class="nav-right">
+                <a href="index.html" class="button">Home</a>
+                <a href="https://discord.gg/T6j59QC2kh" target="_blank" class="button">Support Discord</a>
+            </div>
+        </div>
+    </nav>
+
+    <header class="faq-header">
+        <div class="container">
+            <h2>Frequently Asked Questions</h2>
+            <p>Find answers to common questions about the WOM Role Sync bot.</p>
+        </div>
+    </header>
+
+    <main class="container">
+        <section id="faq-content">
+            <div class="faq-item">
+                <button class="faq-question">
+                    <span>What is the WOM Role Sync bot?</span>
+                    <span class="faq-icon">+</span>
+                </button>
+                <div class="faq-answer">
+                    <p>The WOM Role Sync bot is a Discord bot that automatically synchronizes roles between a Wise Old Man (WOM) group and a Discord server. It periodically checks for updates in WOM group memberships and assigns or removes Discord roles based on a user's role within the WOM group.</p>
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <button class="faq-question">
+                    <span>How do I set up the bot?</span>
+                    <span class="faq-icon">+</span>
+                </button>
+                <div class="faq-answer">
+                    <p>
+                        1. Invite the bot to your server.<br>
+                        2. Set your Wise Old Man Group ID with <code>/groupid [your_group_id]</code>.<br>
+                        3. Map WOM roles to Discord roles with <code>/linkrole [wom_role] [@discord_role]</code>.<br>
+                        4. Link Discord users to their RuneScape names with <code>/linkuser [@user] [runescape_name]</code>.<br>
+                        For a more detailed guide, please refer to the bot's <code>/help</code> menu.
+                    </p>
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <button class="faq-question">
+                    <span>How often does the bot sync roles?</span>
+                    <span class="faq-icon">+</span>
+                </button>
+                <div class="faq-answer">
+                    <p>The bot runs an automatic role synchronization task every hour on the hour for all configured servers.</p>
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <button class="faq-question">
+                    <span>Why aren't my clan members' ranks updating?</span>
+                    <span class="faq-icon">+</span>
+                </button>
+                <div class="faq-answer">
+                    <p>
+                        There are a few things to check:<br>
+                        - Ensure the bot's role is placed higher than the roles it needs to assign in your Discord server's role hierarchy.<br>
+                        - Make sure the members are correctly linked with their RSNs using <code>/linkuser</code>.<br>
+                        - Verify that your WOM group page is up-to-date. You may need to have a clan member with the WOM plugin sync the group from in-game.
+                    </p>
+                </div>
+            </div>
+
+            <div class="faq-item">
+                <button class="faq-question">
+                    <span>Where can I get more help and/or make suggestions?</span>
+                    <span class="faq-icon">+</span>
+                </button>
+                <div class="faq-answer">
+                    <p>Join our <a href="https://discord.gg/T6j59QC2kh" target="_blank">Support Discord</a>!</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2026 WOM Role Sync</p>
+            <a href="https://github.com/GamerGuyD3/WOM-Role-Sync-Bot" target="_blank" class="button">View Source</a>
+        </div>
+    </footer>
+
+    <script src="faq.js"></script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks, commands
+from zoneinfo import ZoneInfo
 import sqlite3
 import datetime
 import logging
@@ -1082,10 +1083,8 @@ class TasksCog(commands.Cog):
         conn.commit()
         conn.close()
 
-        clan_members = sum(
-            1
-            for member in guild.members
-            if not member.bot
+        clan_members = len(
+            group_data.get("memberships", [])
         )
 
         response = (
@@ -1918,7 +1917,13 @@ class TasksCog(commands.Cog):
     # DAILY SYNC LOOP
     # ========================================================
 
-    @tasks.loop(hours=24)
+    @tasks.loop(
+        time=datetime.time(
+            hour=17,
+            minute=0,
+            tzinfo=ZoneInfo("America/New_York")
+        )
+    )
     async def sync_roles_loop(self):
         await self.bot.wait_until_ready()
 

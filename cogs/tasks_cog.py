@@ -46,6 +46,13 @@ NOVUS_TENURE_ROLES = {
     "paladin",
 }
 
+# Known WOM ranks intentionally left unmanaged by Novus Sync.
+# These should not appear as routine skipped-sync noise.
+IGNORED_WOM_RANKS = {
+    "owner",
+    "gnome_child",
+}
+
 # Promotion thresholds measured from the in-game clan join date.
 #
 # Squire is the initial Full Member rank.
@@ -595,6 +602,15 @@ class TasksCog(commands.Cog):
         # ----------------------------------------------------
 
         else:
+            if current_wom_role in IGNORED_WOM_RANKS:
+                return {
+                    "status": "ignored_rank",
+                    "rsn": current_rsn,
+                    "wom_role": current_wom_role,
+                    "verified_alts": verified_alts,
+                    "missing_alts": missing_alts,
+                }
+
             return {
                 "status": "unsupported_rank",
                 "rsn": current_rsn,
@@ -758,6 +774,15 @@ class TasksCog(commands.Cog):
         conn.close()
 
         status = result["status"]
+
+        if status == "ignored_rank":
+            await interaction.followup.send(
+                f"`{result['rsn']}` has WOM rank "
+                f"`{result['wom_role']}`. That rank is intentionally "
+                f"unmanaged by Novus Sync, so no Discord roles were changed.",
+                ephemeral=True
+            )
+            return
 
         if status == "not_linked":
             await interaction.followup.send(
@@ -1007,6 +1032,9 @@ class TasksCog(commands.Cog):
                 group_data,
                 c
             )
+
+            if result["status"] == "ignored_rank":
+                continue
 
             if result["status"] == "success":
                 if (
@@ -1554,6 +1582,9 @@ class TasksCog(commands.Cog):
                 group_data,
                 c
             )
+
+            if result["status"] == "ignored_rank":
+                continue
 
             if result["status"] == "primary_not_found":
                 unfound_rsns.append(

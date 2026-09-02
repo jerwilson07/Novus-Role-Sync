@@ -1077,8 +1077,10 @@ class TasksCog(commands.Cog):
         conn.commit()
         conn.close()
 
-        clan_members = len(
-            group_data.get("memberships", [])
+        clan_members = sum(
+            1
+            for member in guild.members
+            if not member.bot
         )
 
         response = (
@@ -1249,6 +1251,7 @@ class TasksCog(commands.Cog):
         skipped_missing_join_date = 0
         skipped_primary_not_found = 0
         skipped_special_tenure_role = 0
+        special_missing_tenure_members = []
         checked_tenure_members = 0
 
         now = datetime.datetime.now(
@@ -1342,6 +1345,10 @@ class TasksCog(commands.Cog):
 
                 if not discord_tenure_ranks:
                     skipped_special_tenure_role += 1
+                    special_missing_tenure_members.append(
+                        f"- {member.mention} (`{current_rsn}`) "
+                        f"- WOM rank `{current_rank}`"
+                    )
                     continue
 
                 # There should normally be exactly one tenure role. If an
@@ -1480,6 +1487,12 @@ class TasksCog(commands.Cog):
             summary += (
                 f"\nPrimary RSN not found in WOM: "
                 f"**{skipped_primary_not_found}**"
+            )
+
+        if special_missing_tenure_members:
+            summary += (
+                "\n\n**Special-Rank Members Missing Tenure Role**\n"
+                + "\n".join(special_missing_tenure_members)
             )
 
         if not overdue_members:

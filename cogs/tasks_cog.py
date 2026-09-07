@@ -28,6 +28,7 @@ TRIAL_MOD_ROLE_ID = 1533587986204069908
 NOVUS_COMMAND_ROLE_IDS = {
     COUNCIL_ROLE_ID,
     MODERATOR_ROLE_ID,
+    TRIAL_MOD_ROLE_ID,
 }
 
 # WOM staff rank -> Discord staff role
@@ -696,8 +697,7 @@ class TasksCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Moderator or Council member "
-                "to use this command.",
+                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
                 ephemeral=True
             )
             return
@@ -941,8 +941,7 @@ class TasksCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Moderator or Council member "
-                "to use this command.",
+                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
                 ephemeral=True
             )
             return
@@ -1142,8 +1141,7 @@ class TasksCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Moderator or Council member "
-                "to use this command.",
+                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
                 ephemeral=True
             )
             return

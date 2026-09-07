@@ -5,6 +5,25 @@ import sqlite3
 import datetime
 from typing import List
 
+
+# Novus staff command access
+COUNCIL_ROLE_ID = 1532830356875513906
+MODERATOR_ROLE_ID = 1532830960062693396
+TRIAL_MOD_ROLE_ID = 1533587986204069908
+
+NOVUS_COMMAND_ROLE_IDS = {
+    COUNCIL_ROLE_ID,
+    MODERATOR_ROLE_ID,
+    TRIAL_MOD_ROLE_ID,
+}
+
+
+def has_novus_command_permission(member: discord.Member) -> bool:
+    return any(
+        role.id in NOVUS_COMMAND_ROLE_IDS
+        for role in member.roles
+    )
+
 class PlayerListView(discord.ui.View):
     def __init__(self, interaction: discord.Interaction, links: List[tuple], guild_name: str, group_id: int):
         super().__init__(timeout=180)
@@ -126,8 +145,14 @@ class GeneralCog(commands.Cog):
 
     @app_commands.command(name="checkuser", description="Check the RSN linked to a Discord user")
     @app_commands.describe(user="The user to check")
-    @app_commands.checks.has_permissions(administrator=True)
     async def checkuser(self, interaction: discord.Interaction, user: discord.Member):
+        if not has_novus_command_permission(interaction.user):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                ephemeral=True
+            )
+            return
+
         conn = sqlite3.connect('wom_multi.db')
         c = conn.cursor()
         c.execute("SELECT rsn FROM links WHERE guild_id = ? AND discord_id = ?", (interaction.guild_id, user.id))
@@ -140,8 +165,14 @@ class GeneralCog(commands.Cog):
             await interaction.response.send_message(f"🤔 {user.mention} is not linked to any RSN in this server.", ephemeral=True)
 
     @app_commands.command(name="info", description="View configuration and sync status")
-    @app_commands.checks.has_permissions(administrator=True)
     async def info(self, interaction: discord.Interaction):
+        if not has_novus_command_permission(interaction.user):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                ephemeral=True
+            )
+            return
+
         conn = sqlite3.connect('wom_multi.db')
         c = conn.cursor()
         c.execute("SELECT group_id, last_sync FROM guild_configs WHERE guild_id = ?", (interaction.guild_id,))

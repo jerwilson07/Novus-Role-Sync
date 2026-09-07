@@ -18,12 +18,14 @@ logger = logging.getLogger("WOMBot")
 
 COUNCIL_ROLE_ID = 1532830356875513906
 MODERATOR_ROLE_ID = 1532830960062693396
+TRIAL_MOD_ROLE_ID = 1533587986204069908
 GUEST_ROLE_ID = 1532905619412226199
 CLAN_FRIEND_ROLE_ID = 1534581044274270388
 
 NOVUS_COMMAND_ROLE_IDS = {
     COUNCIL_ROLE_ID,
     MODERATOR_ROLE_ID,
+    TRIAL_MOD_ROLE_ID,
 }
 
 NON_CLAN_ROLE_IDS = {
@@ -166,12 +168,21 @@ class ConfigCog(commands.Cog):
     @app_commands.describe(
         channel="The channel to send log messages in. Leave blank to disable."
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def set_log_channel(
         self,
         interaction: discord.Interaction,
         channel: discord.TextChannel = None
     ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member "
+                "to use this command.",
+                ephemeral=True
+            )
+            return
+
         if not interaction.guild:
             await interaction.response.send_message(
                 "This command can only be used in a server.",
@@ -261,12 +272,21 @@ class ConfigCog(commands.Cog):
         name="groupid",
         description="Set the WOM Group ID."
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def set_group_id(
         self,
         interaction: discord.Interaction,
         group_id: int
     ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member "
+                "to use this command.",
+                ephemeral=True
+            )
+            return
+
         conn = sqlite3.connect(
             "wom_multi.db"
         )
@@ -316,13 +336,22 @@ class ConfigCog(commands.Cog):
         ),
         discord_role="The Discord role Novus Sync should manage."
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def linkrole(
         self,
         interaction: discord.Interaction,
         wom_role: str,
         discord_role: discord.Role
     ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member "
+                "to use this command.",
+                ephemeral=True
+            )
+            return
+
         if interaction.guild is None:
             await interaction.response.send_message(
                 "This command can only be used in a server.",
@@ -495,12 +524,21 @@ class ConfigCog(commands.Cog):
     @app_commands.autocomplete(
         wom_role=role_autocomplete
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def unlinkrole(
         self,
         interaction: discord.Interaction,
         wom_role: str
     ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member "
+                "to use this command.",
+                ephemeral=True
+            )
+            return
+
         conn = sqlite3.connect(
             "wom_multi.db"
         )
@@ -546,13 +584,22 @@ class ConfigCog(commands.Cog):
         user="The Discord member to link.",
         rsn="Main RSN first, followed by optional alts separated by | or /"
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def linkuser(
         self,
         interaction: discord.Interaction,
         user: discord.Member,
         rsn: str
     ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member "
+                "to use this command.",
+                ephemeral=True
+            )
+            return
+
         conn = sqlite3.connect(
             "wom_multi.db"
         )
@@ -709,7 +756,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Moderator or Council member "
+                "You must be a Trial Moderator, Moderator, or Council member "
                 "to use this command.",
                 ephemeral=True
             )
@@ -1306,7 +1353,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Moderator or Council member "
+                "You must be a Trial Moderator, Moderator, or Council member "
                 "to use this command.",
                 ephemeral=True
             )
@@ -1705,7 +1752,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Moderator or Council member "
+                "You must be a Trial Moderator, Moderator, or Council member "
                 "to use this command.",
                 ephemeral=True
             )
@@ -1979,7 +2026,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Moderator or Council member "
+                "You must be a Trial Moderator, Moderator, or Council member "
                 "to use this command.",
                 ephemeral=True
             )
@@ -2045,7 +2092,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Moderator or Council member "
+                "You must be a Trial Moderator, Moderator, or Council member "
                 "to use this command.",
                 ephemeral=True
             )
@@ -2240,12 +2287,21 @@ class ConfigCog(commands.Cog):
         name="unlinkuser",
         description="Unlink a user and all of their RuneScape accounts."
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def unlinkuser(
         self,
         interaction: discord.Interaction,
         user: discord.Member
     ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member "
+                "to use this command.",
+                ephemeral=True
+            )
+            return
+
         conn = sqlite3.connect(
             "wom_multi.db"
         )
@@ -2321,12 +2377,21 @@ class ConfigCog(commands.Cog):
             ),
         ]
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def nickname(
         self,
         interaction: discord.Interaction,
         state: app_commands.Choice[str]
     ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member "
+                "to use this command.",
+                ephemeral=True
+            )
+            return
+
         guild_id = interaction.guild_id
 
         new_state = (
@@ -2400,12 +2465,21 @@ class ConfigCog(commands.Cog):
             ),
         ]
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def reminder(
         self,
         interaction: discord.Interaction,
         interval: app_commands.Choice[str]
     ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member "
+                "to use this command.",
+                ephemeral=True
+            )
+            return
+
         interval_map = {
             "off": 0,
             "3d": 3,
@@ -2475,12 +2549,21 @@ class ConfigCog(commands.Cog):
             ),
         ]
     )
-    @app_commands.checks.has_permissions(administrator=True)
     async def notifyplayers(
         self,
         interaction: discord.Interaction,
         state: app_commands.Choice[str]
     ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member "
+                "to use this command.",
+                ephemeral=True
+            )
+            return
+
         new_state = (
             1
             if state.value == "on"

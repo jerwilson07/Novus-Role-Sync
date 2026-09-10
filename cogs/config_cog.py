@@ -2035,10 +2035,10 @@ class ConfigCog(commands.Cog):
         response = (
             "**Novus Sync Staff Commands**\n\n"
             "**/syncuser @member**\n"
-            "Sync one linked member's WOM rank to Discord.\n\n"
+            "Sync one linked member using tenure-based promotion rules and WOM staff data.\n\n"
 
             "**/syncall**\n"
-            "Sync all currently linked Novus members.\n\n"
+            "Sync all linked members. Tenure can promote automatically but never demotes.\n\n"
 
             "**/accounts @member**\n"
             "Show a member's primary RSN, alts, WOM IDs, and current WOM rank.\n\n"
@@ -2049,6 +2049,9 @@ class ConfigCog(commands.Cog):
             "**/promotions**\n"
             "Show linked primary accounts that are overdue "
             "for a tenure promotion.\n\n"
+
+            "**/trials**\n"
+            "Show current Trial Members and how many days remain in their 30-day trial.\n\n"
 
             "**/unmatched**\n"
             "Show current WOM clan accounts that are not "

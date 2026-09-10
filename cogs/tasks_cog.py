@@ -4,6 +4,7 @@ from discord.ext import tasks, commands
 from zoneinfo import ZoneInfo
 import sqlite3
 import datetime
+import calendar
 import logging
 import asyncio
 import os
@@ -83,6 +84,9 @@ TENURE_RANK_ORDER = {
     "paladin": 5,
 }
 
+TRIAL_PERIOD_DAYS = 30
+TRIAL_ENDING_SOON_DAYS = 7
+
 
 # ============================================================
 # HELPERS
@@ -155,6 +159,55 @@ def parse_wom_datetime(value):
 
     except Exception:
         return None
+
+
+def get_membership_joined_at(membership: dict):
+    """Return WOM clientSyncJoinedAt from either membership or player data."""
+    player = membership.get("player", {})
+
+    joined_value = membership.get("clientSyncJoinedAt")
+
+    if joined_value is None:
+        joined_value = player.get("clientSyncJoinedAt")
+
+    return parse_wom_datetime(joined_value)
+
+
+def add_calendar_months(start: datetime.datetime, months: int) -> datetime.datetime:
+    """Add whole calendar months while safely clamping end-of-month dates."""
+    month_index = start.month - 1 + months
+    year = start.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(
+        start.day,
+        calendar.monthrange(year, month)[1]
+    )
+
+    return start.replace(
+        year=year,
+        month=month,
+        day=day
+    )
+
+
+def tenure_eligible_at(joined_at: datetime.datetime, rank: str):
+    """Return the date/time a member becomes eligible for a tenure rank."""
+    required_months = next(
+        (
+            months
+            for role_name, months in PROMOTION_THRESHOLDS
+            if role_name == rank
+        ),
+        None
+    )
+
+    if required_months is None:
+        return None
+
+    return add_calendar_months(
+        joined_at,
+        required_months
+    )
 
 
 # Sync result categories used by both automatic and manual sync reports.
@@ -357,9 +410,10 @@ class TasksCog(commands.Cog):
         cursor
     ):
         """
-        Sync one Discord member.
+        Sync one linked Discord member.
 
-        Only the primary RSN determines their Discord rank.
+        Tenure roles are based on WOM clientSyncJoinedAt, not the visible WOM
+        clan rank. Tenure may move upward automatically, but never downward.
         """
 
         cursor.execute(
@@ -395,8 +449,7 @@ class TasksCog(commands.Cog):
         }
 
         wom_by_username = {
-            membership["player"]["username"].lower():
-                membership
+            membership["player"]["username"].lower(): membership
             for membership in memberships
         }
 
@@ -420,16 +473,25 @@ class TasksCog(commands.Cog):
                 "rsn": rsn
             }
 
-        current_rsn = (
-            membership["player"]["username"]
+        player = membership.get(
+            "player",
+            {}
         )
 
-        current_wom_id = (
-            membership["player"]["id"]
+        current_rsn = player.get(
+            "username",
+            rsn
+        )
+
+        current_wom_id = player.get(
+            "id"
         )
 
         current_wom_role = (
-            membership["role"].lower()
+            membership.get(
+                "role",
+                ""
+            ).lower()
         )
 
         # Keep database current if WOM ID or RSN changed.
@@ -466,6 +528,18 @@ class TasksCog(commands.Cog):
             )
         )
 
+        # Trials and the owner rank intentionally stay outside the tenure
+        # synchronization engine. Trial timing is handled separately.
+        if current_wom_role in IGNORED_WOM_RANKS:
+            return {
+                "status": "ignored_rank",
+                "rsn": current_rsn,
+                "wom_role": current_wom_role,
+                "joined_at": get_membership_joined_at(membership),
+                "verified_alts": verified_alts,
+                "missing_alts": missing_alts,
+            }
+
         # ----------------------------------------------------
         # DISCORD ROLE CONFIG
         # ----------------------------------------------------
@@ -480,54 +554,47 @@ class TasksCog(commands.Cog):
         )
 
         configured_map = {
-            wom_role.lower():
-                guild.get_role(discord_role_id)
-            for wom_role, discord_role_id
-            in cursor.fetchall()
+            wom_role.lower(): guild.get_role(discord_role_id)
+            for wom_role, discord_role_id in cursor.fetchall()
             if guild.get_role(discord_role_id)
         }
 
-        tenure_roles = {
-            role
-            for wom_role, role
-            in configured_map.items()
+        tenure_role_by_id = {
+            role.id: wom_role
+            for wom_role, role in configured_map.items()
             if wom_role in NOVUS_TENURE_ROLES
             and role is not None
         }
 
         staff_roles = {
             guild.get_role(role_id)
-            for role_id
-            in NOVUS_STAFF_WOM_ROLES.values()
+            for role_id in NOVUS_STAFF_WOM_ROLES.values()
             if guild.get_role(role_id)
         }
 
         member_roles = set(member.roles)
 
-        roles_to_add = []
-        roles_to_remove = []
-
-        target_role = None
-        sync_type = None
+        tenure_roles_to_add = []
+        tenure_roles_to_remove = []
+        staff_roles_to_add = []
+        staff_roles_to_remove = []
 
         # ----------------------------------------------------
-        # STAFF ACCOUNT
+        # STAFF ROLE SYNC
         # ----------------------------------------------------
+
+        staff_target_role = None
 
         if current_wom_role in NOVUS_STAFF_WOM_ROLES:
-            sync_type = "staff"
+            staff_role_id = NOVUS_STAFF_WOM_ROLES[
+                current_wom_role
+            ]
 
-            staff_role_id = (
-                NOVUS_STAFF_WOM_ROLES[
-                    current_wom_role
-                ]
-            )
-
-            target_role = guild.get_role(
+            staff_target_role = guild.get_role(
                 staff_role_id
             )
 
-            if target_role is None:
+            if staff_target_role is None:
                 return {
                     "status": "staff_role_missing",
                     "rsn": current_rsn,
@@ -537,110 +604,184 @@ class TasksCog(commands.Cog):
                     "missing_alts": missing_alts,
                 }
 
-            # Give correct staff role.
-            if target_role not in member_roles:
-                roles_to_add.append(
-                    target_role
+            if staff_target_role not in member_roles:
+                staff_roles_to_add.append(
+                    staff_target_role
                 )
 
-            # Remove other Novus staff roles.
             for role in staff_roles:
                 if (
-                    role != target_role
+                    role != staff_target_role
                     and role in member_roles
                 ):
-                    roles_to_remove.append(
+                    staff_roles_to_remove.append(
                         role
                     )
-
-            # IMPORTANT:
-            # We intentionally leave Squire-Paladin alone.
-            #
-            # A staff WOM rank replaces the normal clan rank in WOM,
-            # so WOM no longer tells us what the member's underlying
-            # tenure rank should be.
-
-        # ----------------------------------------------------
-        # NORMAL TENURE ACCOUNT
-        # ----------------------------------------------------
 
         elif current_wom_role in NOVUS_TENURE_ROLES:
-            sync_type = "tenure"
-
-            target_role = configured_map.get(
-                current_wom_role
-            )
-
-            if target_role is None:
-                return {
-                    "status": "tenure_not_mapped",
-                    "rsn": current_rsn,
-                    "wom_role": current_wom_role,
-                    "verified_alts": verified_alts,
-                    "missing_alts": missing_alts,
-                }
-
-            # Correct tenure role.
-            if target_role not in member_roles:
-                roles_to_add.append(
-                    target_role
-                )
-
-            # Remove incorrect tenure roles.
-            for role in tenure_roles:
-                if (
-                    role != target_role
-                    and role in member_roles
-                ):
-                    roles_to_remove.append(
-                        role
-                    )
-
-            # If WOM no longer says they're staff,
-            # remove old Novus staff roles.
+            # A normal tenure WOM rank means WOM no longer identifies this
+            # account as staff, so stale Novus staff roles can be removed.
             for role in staff_roles:
                 if role in member_roles:
-                    roles_to_remove.append(
+                    staff_roles_to_remove.append(
                         role
                     )
 
+        # Specialty/status WOM ranks are deliberately left alone. They do not
+        # cause specialty Discord roles or existing staff roles to be changed.
+
         # ----------------------------------------------------
-        # OTHER WOM RANK
+        # TENURE SYNC - PROMOTIONS ONLY
         # ----------------------------------------------------
 
-        else:
-            if current_wom_role in IGNORED_WOM_RANKS:
-                return {
-                    "status": "ignored_rank",
-                    "rsn": current_rsn,
-                    "wom_role": current_wom_role,
-                    "verified_alts": verified_alts,
-                    "missing_alts": missing_alts,
-                }
+        joined_at = get_membership_joined_at(
+            membership
+        )
 
-            return {
-                "status": "unsupported_rank",
-                "rsn": current_rsn,
-                "wom_role": current_wom_role,
-                "verified_alts": verified_alts,
-                "missing_alts": missing_alts,
-            }
+        expected_rank = None
+        expected_role = None
+        current_discord_tenure_rank = None
+        tenure_status = "missing_join_date"
+        tenure_ahead_eligible_at = None
+
+        discord_tenure_ranks = [
+            tenure_role_by_id[role.id]
+            for role in member.roles
+            if role.id in tenure_role_by_id
+        ]
+
+        if discord_tenure_ranks:
+            current_discord_tenure_rank = max(
+                discord_tenure_ranks,
+                key=lambda rank: TENURE_RANK_ORDER[rank]
+            )
+
+        if joined_at is not None:
+            expected_rank = expected_tenure_rank(
+                joined_at
+            )
+
+            expected_role = configured_map.get(
+                expected_rank
+            )
+
+            if expected_role is None:
+                tenure_status = "not_mapped"
+            else:
+                expected_level = TENURE_RANK_ORDER[
+                    expected_rank
+                ]
+
+                if current_discord_tenure_rank is None:
+                    tenure_roles_to_add.append(
+                        expected_role
+                    )
+                    tenure_status = "promoted"
+
+                else:
+                    current_level = TENURE_RANK_ORDER[
+                        current_discord_tenure_rank
+                    ]
+
+                    if current_level < expected_level:
+                        # Safe upward movement: add the rank supported by tenure
+                        # and remove only lower tenure roles being replaced.
+                        if expected_role not in member_roles:
+                            tenure_roles_to_add.append(
+                                expected_role
+                            )
+
+                        for role in member.roles:
+                            mapped_rank = tenure_role_by_id.get(
+                                role.id
+                            )
+
+                            if (
+                                mapped_rank is not None
+                                and TENURE_RANK_ORDER[mapped_rank] < expected_level
+                            ):
+                                tenure_roles_to_remove.append(
+                                    role
+                                )
+
+                        tenure_status = "promoted"
+
+                    elif current_level == expected_level:
+                        # If duplicate lower tenure roles exist, safely clean
+                        # them up without moving the member backward.
+                        for role in member.roles:
+                            mapped_rank = tenure_role_by_id.get(
+                                role.id
+                            )
+
+                            if (
+                                mapped_rank is not None
+                                and TENURE_RANK_ORDER[mapped_rank] < expected_level
+                            ):
+                                tenure_roles_to_remove.append(
+                                    role
+                                )
+
+                        tenure_status = (
+                            "duplicate_cleanup"
+                            if tenure_roles_to_remove
+                            else "current"
+                        )
+
+                    else:
+                        # Never demote. A Discord rank ahead of the tenure date
+                        # is only flagged for staff review.
+                        tenure_status = "ahead"
+                        tenure_ahead_eligible_at = tenure_eligible_at(
+                            joined_at,
+                            current_discord_tenure_rank
+                        )
+
+        wom_tenure_mismatch = False
+        wom_tenure_direction = None
+
+        if (
+            expected_rank is not None
+            and current_wom_role in TENURE_RANK_ORDER
+            and current_wom_role != expected_rank
+        ):
+            wom_tenure_mismatch = True
+
+            if (
+                TENURE_RANK_ORDER[current_wom_role]
+                > TENURE_RANK_ORDER[expected_rank]
+            ):
+                wom_tenure_direction = "ahead"
+            else:
+                wom_tenure_direction = "behind"
+
+        roles_to_add = list(dict.fromkeys(
+            tenure_roles_to_add
+            + staff_roles_to_add
+        ))
+
+        roles_to_remove = list(dict.fromkeys(
+            tenure_roles_to_remove
+            + staff_roles_to_remove
+        ))
 
         # ----------------------------------------------------
         # APPLY DISCORD CHANGES
         # ----------------------------------------------------
 
         try:
-            if roles_to_remove:
-                await member.remove_roles(
-                    *roles_to_remove,
-                    reason="Novus WOM role synchronization"
-                )
-
+            # Add the new/higher role first. If Discord rejects the add, the
+            # member keeps their existing tenure role instead of losing it.
             if roles_to_add:
                 await member.add_roles(
                     *roles_to_add,
-                    reason="Novus WOM role synchronization"
+                    reason="Novus role synchronization"
+                )
+
+            if roles_to_remove:
+                await member.remove_roles(
+                    *roles_to_remove,
+                    reason="Novus role synchronization"
                 )
 
         except discord.Forbidden:
@@ -648,7 +789,7 @@ class TasksCog(commands.Cog):
                 "status": "forbidden",
                 "rsn": current_rsn,
                 "wom_role": current_wom_role,
-                "target_role": target_role,
+                "expected_tenure_rank": expected_rank,
             }
 
         except Exception as e:
@@ -661,15 +802,26 @@ class TasksCog(commands.Cog):
                 "status": "error",
                 "rsn": current_rsn,
                 "wom_role": current_wom_role,
-                "target_role": target_role,
+                "expected_tenure_rank": expected_rank,
             }
 
         return {
             "status": "success",
             "rsn": current_rsn,
             "wom_role": current_wom_role,
-            "target_role": target_role,
-            "sync_type": sync_type,
+            "joined_at": joined_at,
+            "expected_tenure_rank": expected_rank,
+            "expected_tenure_role": expected_role,
+            "current_discord_tenure_rank": current_discord_tenure_rank,
+            "tenure_status": tenure_status,
+            "tenure_ahead_eligible_at": tenure_ahead_eligible_at,
+            "wom_tenure_mismatch": wom_tenure_mismatch,
+            "wom_tenure_direction": wom_tenure_direction,
+            "staff_target_role": staff_target_role,
+            "tenure_roles_added": tenure_roles_to_add,
+            "tenure_roles_removed": tenure_roles_to_remove,
+            "staff_roles_added": staff_roles_to_add,
+            "staff_roles_removed": staff_roles_to_remove,
             "roles_added": roles_to_add,
             "roles_removed": roles_to_remove,
             "verified_alts": verified_alts,
@@ -711,8 +863,7 @@ class TasksCog(commands.Cog):
 
         if guild is None:
             await interaction.followup.send(
-                "This command can only be used "
-                "inside the Novus server.",
+                "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
             return
@@ -735,33 +886,24 @@ class TasksCog(commands.Cog):
 
         if not config or not config[0]:
             conn.close()
-
             await interaction.followup.send(
                 "No Wise Old Man group is configured.",
                 ephemeral=True
             )
             return
 
-        group_id = config[0]
-
-        group_data, status = (
-            await self.get_wom_group(
-                group_id
-            )
+        group_data, api_status = await self.get_wom_group(
+            config[0]
         )
 
         if group_data is None:
             conn.close()
 
-            if status:
-                message = (
-                    f"Wise Old Man returned "
-                    f"API error `{status}`."
-                )
-            else:
-                message = (
-                    "The Wise Old Man API request failed."
-                )
+            message = (
+                f"Wise Old Man returned API error `{api_status}`."
+                if api_status
+                else "The Wise Old Man API request failed."
+            )
 
             await interaction.followup.send(
                 message,
@@ -782,26 +924,62 @@ class TasksCog(commands.Cog):
         status = result["status"]
 
         if status == "ignored_rank":
-            await interaction.followup.send(
-                f"`{result['rsn']}` has WOM rank "
-                f"`{result['wom_role']}`. That rank is intentionally "
-                f"unmanaged by Novus Sync, so no Discord roles were changed.",
-                ephemeral=True
-            )
+            if result.get("wom_role") in NOVUS_TRIAL_WOM_RANKS:
+                joined_at = result.get("joined_at")
+
+                trial_text = ""
+                if joined_at:
+                    trial_end = joined_at + datetime.timedelta(
+                        days=TRIAL_PERIOD_DAYS
+                    )
+                    days_remaining = (
+                        trial_end.date()
+                        - datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).date()
+                    ).days
+
+                    if days_remaining > 0:
+                        trial_text = (
+                            f"\nTrial ends: `{trial_end.date()}` "
+                            f"({days_remaining} day(s) remaining)"
+                        )
+                    elif days_remaining == 0:
+                        trial_text = (
+                            f"\nTrial ends: `{trial_end.date()}` (today)"
+                        )
+                    else:
+                        trial_text = (
+                            f"\nTrial ended: `{trial_end.date()}` "
+                            f"({abs(days_remaining)} day(s) overdue)"
+                        )
+
+                await interaction.followup.send(
+                    f"`{result['rsn']}` is still a Trial Member "
+                    f"(`{result['wom_role']}`). No tenure role was changed."
+                    f"{trial_text}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"`{result['rsn']}` has WOM rank "
+                    f"`{result['wom_role']}`. That rank is intentionally "
+                    f"unmanaged by Novus Sync, so no Discord roles were changed.",
+                    ephemeral=True
+                )
             return
 
         if status == "not_linked":
             await interaction.followup.send(
-                f"{member.mention} is not linked yet. "
-                f"Use `/linkuser` first.",
+                f"{member.mention} is not linked yet. Use `/linkuser` first.",
                 ephemeral=True
             )
             return
 
         if status == "primary_not_found":
             await interaction.followup.send(
-                f"Could not find primary RSN "
-                f"`{result['rsn']}` in the Novus WOM group.",
+                f"Could not find primary RSN `{result['rsn']}` "
+                f"in the Novus WOM group.",
                 ephemeral=True
             )
             return
@@ -815,80 +993,110 @@ class TasksCog(commands.Cog):
             )
             return
 
-        if status == "tenure_not_mapped":
-            await interaction.followup.send(
-                f"`{result['rsn']}` has WOM rank "
-                f"`{result['wom_role']}`, but that tenure "
-                f"rank has not been mapped with `/linkrole`.",
-                ephemeral=True
-            )
-            return
-
-        if status == "unsupported_rank":
-            await interaction.followup.send(
-                f"`{result['rsn']}` currently has WOM rank "
-                f"`{result['wom_role']}`.\n\n"
-                f"That rank is not configured as a Novus "
-                f"tenure or staff rank, so no Discord roles "
-                f"were changed.",
-                ephemeral=True
-            )
-            return
-
         if status == "forbidden":
             await interaction.followup.send(
-                "I could not update that member's roles. "
-                "Check the Novus Sync role hierarchy and "
-                "Manage Roles permission.",
+                "I could not update that member's roles. Check the Novus Sync "
+                "role hierarchy and Manage Roles permission.",
                 ephemeral=True
             )
             return
 
         if status == "error":
             await interaction.followup.send(
-                "Something went wrong while updating "
-                "that member's roles.",
+                "Something went wrong while updating that member's roles.",
                 ephemeral=True
             )
             return
 
-        added = result["roles_added"]
-        removed = result["roles_removed"]
-
-        added_text = (
-            ", ".join(
-                role.mention
-                for role in added
-            )
-            if added
-            else "None"
+        added = result.get(
+            "roles_added",
+            []
+        )
+        removed = result.get(
+            "roles_removed",
+            []
         )
 
-        removed_text = (
-            ", ".join(
-                role.mention
-                for role in removed
-            )
-            if removed
-            else "None"
+        heading = (
+            "Novus Sync Complete"
+            if added or removed
+            else "Already synchronized"
         )
 
-        if (
-            not added
-            and not removed
-        ):
-            heading = "Already synchronized"
-        else:
-            heading = "WOM Sync Complete"
+        current_tenure = result.get(
+            "current_discord_tenure_rank"
+        )
+        expected_tenure = result.get(
+            "expected_tenure_rank"
+        )
+        tenure_status = result.get(
+            "tenure_status"
+        )
 
         response = (
             f"**{heading}**\n\n"
             f"Member: {member.mention}\n"
             f"Primary RSN: `{result['rsn']}`\n"
-            f"WOM Rank: `{result['wom_role']}`\n"
-            f"Discord Role: "
-            f"{result['target_role'].mention}\n"
-            f"Added: {added_text}\n"
+            f"WOM Rank: `{result['wom_role']}`"
+        )
+
+        joined_at = result.get(
+            "joined_at"
+        )
+
+        if joined_at:
+            response += (
+                f"\nWOM Join Date: `{joined_at.date()}`"
+            )
+
+        if expected_tenure:
+            response += (
+                f"\nExpected Tenure Rank: `{expected_tenure}`"
+            )
+
+        response += (
+            f"\nDiscord Tenure Before Sync: "
+            f"`{current_tenure or 'none'}`"
+        )
+
+        tenure_messages = {
+            "promoted": "Promoted upward based on tenure.",
+            "current": "Tenure rank is correct.",
+            "duplicate_cleanup": "Removed duplicate lower tenure role(s).",
+            "ahead": "Discord tenure rank is ahead of the join-date schedule. No demotion was made.",
+            "missing_join_date": "WOM join date is missing. No tenure change was made.",
+            "not_mapped": "Expected tenure rank is not mapped to a Discord role. No tenure change was made.",
+        }
+
+        if tenure_status in tenure_messages:
+            response += (
+                f"\nTenure Check: **{tenure_messages[tenure_status]}**"
+            )
+
+        if result.get("wom_tenure_mismatch"):
+            direction = result.get(
+                "wom_tenure_direction",
+                "mismatched"
+            )
+            response += (
+                f"\nWOM Tenure Mismatch: `{result['wom_role']}` is "
+                f"**{direction}** relative to the expected "
+                f"`{expected_tenure}` rank."
+            )
+
+        added_text = (
+            ", ".join(role.mention for role in added)
+            if added
+            else "None"
+        )
+        removed_text = (
+            ", ".join(role.mention for role in removed)
+            if removed
+            else "None"
+        )
+
+        response += (
+            f"\nAdded: {added_text}\n"
             f"Removed: {removed_text}"
         )
 
@@ -896,7 +1104,6 @@ class TasksCog(commands.Cog):
             "verified_alts",
             []
         )
-
         missing_alts = result.get(
             "missing_alts",
             []
@@ -921,7 +1128,7 @@ class TasksCog(commands.Cog):
             )
 
         await interaction.followup.send(
-            response,
+            response[:1950],
             ephemeral=True
         )
 
@@ -955,8 +1162,7 @@ class TasksCog(commands.Cog):
 
         if guild is None:
             await interaction.followup.send(
-                "This command can only be used "
-                "inside the Novus server.",
+                "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
             return
@@ -979,22 +1185,18 @@ class TasksCog(commands.Cog):
 
         if not config or not config[0]:
             conn.close()
-
             await interaction.followup.send(
                 "No Wise Old Man group is configured.",
                 ephemeral=True
             )
             return
 
-        group_data, api_status = (
-            await self.get_wom_group(
-                config[0]
-            )
+        group_data, api_status = await self.get_wom_group(
+            config[0]
         )
 
         if group_data is None:
             conn.close()
-
             await interaction.followup.send(
                 "Could not retrieve the Novus WOM group.",
                 ephemeral=True
@@ -1017,6 +1219,11 @@ class TasksCog(commands.Cog):
 
         checked = 0
         changed = 0
+        automatic_promotions = []
+        tenure_ahead = []
+        wom_mismatches = []
+        missing_join_dates = []
+        mapping_issues = []
         skipped_members = []
         failed_members = []
         unfound_rsns = []
@@ -1041,29 +1248,65 @@ class TasksCog(commands.Cog):
             if result["status"] == "ignored_rank":
                 continue
 
-            if result["status"] == "success":
-                if (
-                    result["roles_added"]
-                    or result["roles_removed"]
-                ):
-                    changed += 1
-                continue
-
             if result["status"] == "primary_not_found":
                 unfound_rsns.append(
                     f"- {member.mention} (`{result['rsn']}`)"
                 )
                 continue
 
-            issue_line = format_sync_issue(
-                member,
-                result
-            )
+            if result["status"] != "success":
+                issue_line = format_sync_issue(
+                    member,
+                    result
+                )
 
-            if classify_sync_issue(result) == "failed":
-                failed_members.append(issue_line)
-            else:
-                skipped_members.append(issue_line)
+                if classify_sync_issue(result) == "failed":
+                    failed_members.append(issue_line)
+                else:
+                    skipped_members.append(issue_line)
+                continue
+
+            if result["roles_added"] or result["roles_removed"]:
+                changed += 1
+
+            if result.get("tenure_status") == "promoted":
+                automatic_promotions.append(
+                    f"- {member.mention} (`{result['rsn']}`): "
+                    f"`{result.get('current_discord_tenure_rank') or 'none'}` "
+                    f"-> `{result['expected_tenure_rank']}`"
+                )
+
+            elif result.get("tenure_status") == "ahead":
+                line = (
+                    f"- {member.mention} (`{result['rsn']}`): Discord "
+                    f"`{result['current_discord_tenure_rank']}`, expected "
+                    f"`{result['expected_tenure_rank']}`"
+                )
+                eligible_at = result.get(
+                    "tenure_ahead_eligible_at"
+                )
+                if eligible_at:
+                    line += f" - eligible `{eligible_at.date()}`"
+                tenure_ahead.append(line)
+
+            elif result.get("tenure_status") == "missing_join_date":
+                missing_join_dates.append(
+                    f"- {member.mention} (`{result['rsn']}`)"
+                )
+
+            elif result.get("tenure_status") == "not_mapped":
+                mapping_issues.append(
+                    f"- {member.mention} (`{result['rsn']}`): expected "
+                    f"`{result.get('expected_tenure_rank')}`"
+                )
+
+            if result.get("wom_tenure_mismatch"):
+                wom_mismatches.append(
+                    f"- {member.mention} (`{result['rsn']}`): WOM "
+                    f"`{result['wom_role']}`, expected "
+                    f"`{result['expected_tenure_rank']}` "
+                    f"({result['wom_tenure_direction']})"
+                )
 
         now = datetime.datetime.now().isoformat()
 
@@ -1091,28 +1334,65 @@ class TasksCog(commands.Cog):
             f"Clan members: **{clan_members}**\n"
             f"Linked primary members: **{checked}**\n"
             f"Members changed: **{changed}**\n"
-            f"Skipped: **{len(skipped_members)}**\n"
-            f"Failed: **{len(failed_members)}**\n"
+            f"Automatic tenure promotions: **{len(automatic_promotions)}**\n"
+            f"Premature Discord tenure ranks: **{len(tenure_ahead)}**\n"
+            f"WOM tenure mismatches: **{len(wom_mismatches)}**\n"
+            f"Missing WOM join date: **{len(missing_join_dates)}**\n"
             f"Primary RSN not found: **{len(unfound_rsns)}**"
         )
 
+        sections = []
+
+        if automatic_promotions:
+            sections.append(
+                "**Automatic Promotions**\n"
+                + "\n".join(automatic_promotions)
+            )
+
+        if tenure_ahead:
+            sections.append(
+                "**Premature Discord Tenure Ranks - No Demotions Made**\n"
+                + "\n".join(tenure_ahead)
+            )
+
+        if wom_mismatches:
+            sections.append(
+                "**WOM Tenure Mismatches**\n"
+                + "\n".join(wom_mismatches)
+            )
+
+        if missing_join_dates:
+            sections.append(
+                "**Missing WOM Join Date**\n"
+                + "\n".join(missing_join_dates)
+            )
+
+        if mapping_issues:
+            sections.append(
+                "**Tenure Mapping Issues**\n"
+                + "\n".join(mapping_issues)
+            )
+
         if skipped_members:
-            response += (
-                "\n\n**Skipped**\n"
+            sections.append(
+                "**Skipped**\n"
                 + "\n".join(skipped_members)
             )
 
         if failed_members:
-            response += (
-                "\n\n**Failed**\n"
+            sections.append(
+                "**Failed**\n"
                 + "\n".join(failed_members)
             )
 
         if unfound_rsns:
-            response += (
-                "\n\n**Primary RSN Not Found**\n"
+            sections.append(
+                "**Primary RSN Not Found**\n"
                 + "\n".join(unfound_rsns)
             )
+
+        if sections:
+            response += "\n\n" + "\n\n".join(sections)
 
         if len(response) > 1950:
             response = (
@@ -1155,8 +1435,7 @@ class TasksCog(commands.Cog):
 
         if guild is None:
             await interaction.followup.send(
-                "This command can only be used "
-                "inside the Novus server.",
+                "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
             return
@@ -1179,22 +1458,18 @@ class TasksCog(commands.Cog):
 
         if not config or not config[0]:
             conn.close()
-
             await interaction.followup.send(
                 "No Wise Old Man group is configured.",
                 ephemeral=True
             )
             return
 
-        group_data, api_status = (
-            await self.get_wom_group(
-                config[0]
-            )
+        group_data, api_status = await self.get_wom_group(
+            config[0]
         )
 
         if group_data is None:
             conn.close()
-
             await interaction.followup.send(
                 "Could not retrieve the Novus WOM group.",
                 ephemeral=True
@@ -1212,14 +1487,10 @@ class TasksCog(commands.Cog):
         }
 
         wom_by_username = {
-            membership["player"]["username"].lower():
-                membership
+            membership["player"]["username"].lower(): membership
             for membership in memberships
         }
 
-        # IMPORTANT:
-        # Promotions are evaluated from the primary link table only.
-        # Alt accounts are deliberately ignored.
         c.execute(
             """
             SELECT discord_id, rsn, wom_id
@@ -1231,9 +1502,6 @@ class TasksCog(commands.Cog):
 
         primary_links = c.fetchall()
 
-        # Map Discord tenure role IDs back to their WOM tenure-rank names.
-        # This lets staff keep progressing through the normal tenure ladder
-        # even though WOM displays their staff rank instead.
         c.execute(
             """
             SELECT wom_role, discord_role_id
@@ -1250,10 +1518,9 @@ class TasksCog(commands.Cog):
         }
 
         overdue_members = []
-        skipped_missing_join_date = 0
+        premature_members = []
+        missing_join_date_members = []
         skipped_primary_not_found = 0
-        skipped_special_tenure_role = 0
-        special_missing_tenure_members = []
         trial_members_excluded = 0
         checked_tenure_members = 0
 
@@ -1294,12 +1561,10 @@ class TasksCog(commands.Cog):
                 "username",
                 stored_rsn
             )
-
             current_wom_id = player.get(
                 "id"
             )
 
-            # Keep the primary link current if WOM has a rename/new ID.
             if (
                 current_rsn
                 and (
@@ -1322,230 +1587,410 @@ class TasksCog(commands.Cog):
                     )
                 )
 
-            current_rank = (
+            current_wom_rank = (
                 membership.get(
                     "role",
                     ""
                 ).lower()
             )
 
-            # Trial Members are not yet on the tenure ladder.
-            if current_rank in NOVUS_TRIAL_WOM_RANKS:
+            if current_wom_rank in NOVUS_TRIAL_WOM_RANKS:
                 trial_members_excluded += 1
                 continue
 
-            # Regular members expose their tenure rank directly in WOM.
-            if current_rank in TENURE_RANK_ORDER:
-                current_tenure_rank = current_rank
+            if current_wom_rank == "owner":
+                continue
 
-            else:
-                # Any other non-tenure WOM rank is treated as a special/status
-                # rank. Special ranks replace the visible tenure rank in WOM,
-                # but every full Novus member still keeps a Discord tenure role.
-                #
-                # This intentionally avoids hardcoding every special rank so
-                # future staff/achievement/status ranks work automatically.
-                discord_tenure_ranks = [
-                    tenure_rank_by_role_id[role.id]
-                    for role in member.roles
-                    if role.id in tenure_rank_by_role_id
-                ]
-
-                if not discord_tenure_ranks:
-                    skipped_special_tenure_role += 1
-                    special_missing_tenure_members.append(
-                        f"- {member.mention} (`{current_rsn}`) "
-                        f"- WOM rank `{current_rank}`"
-                    )
-                    continue
-
-                # There should normally be exactly one tenure role. If an
-                # accidental duplicate exists, use the highest one to avoid
-                # falsely reporting a lower-level promotion.
-                current_tenure_rank = max(
-                    discord_tenure_ranks,
-                    key=lambda rank: TENURE_RANK_ORDER[rank]
-                )
-
-            checked_tenure_members += 1
-
-            joined_value = membership.get(
-                "clientSyncJoinedAt"
-            )
-
-            if joined_value is None:
-                joined_value = player.get(
-                    "clientSyncJoinedAt"
-                )
-
-            joined_at = parse_wom_datetime(
-                joined_value
+            joined_at = get_membership_joined_at(
+                membership
             )
 
             if joined_at is None:
-                skipped_missing_join_date += 1
+                missing_join_date_members.append(
+                    f"- {member.mention} (`{current_rsn}`)"
+                )
                 continue
+
+            checked_tenure_members += 1
 
             expected_rank = expected_tenure_rank(
                 joined_at
             )
-
-            current_level = TENURE_RANK_ORDER[
-                current_tenure_rank
-            ]
-
             expected_level = TENURE_RANK_ORDER[
                 expected_rank
             ]
 
-            if expected_level <= current_level:
-                continue
+            discord_tenure_ranks = [
+                tenure_rank_by_role_id[role.id]
+                for role in member.roles
+                if role.id in tenure_rank_by_role_id
+            ]
 
-            required_months = next(
-                months
-                for rank, months
-                in PROMOTION_THRESHOLDS
-                if rank == expected_rank
-            )
+            current_tenure_rank = None
+            current_level = -1
 
-            eligibility_month = (
-                joined_at.month
-                - 1
-                + required_months
-            )
+            if discord_tenure_ranks:
+                current_tenure_rank = max(
+                    discord_tenure_ranks,
+                    key=lambda rank: TENURE_RANK_ORDER[rank]
+                )
+                current_level = TENURE_RANK_ORDER[
+                    current_tenure_rank
+                ]
 
-            eligibility_year = (
-                joined_at.year
-                + eligibility_month // 12
-            )
-
-            eligibility_month = (
-                eligibility_month % 12
-                + 1
-            )
-
-            day = joined_at.day
-
-            while day > 28:
-                try:
-                    eligible_at = joined_at.replace(
-                        year=eligibility_year,
-                        month=eligibility_month,
-                        day=day
-                    )
-                    break
-                except ValueError:
-                    day -= 1
-            else:
-                eligible_at = joined_at.replace(
-                    year=eligibility_year,
-                    month=eligibility_month,
-                    day=day
+            if current_level < expected_level:
+                eligible_at = tenure_eligible_at(
+                    joined_at,
+                    expected_rank
+                )
+                overdue_days = max(
+                    (now - eligible_at).days,
+                    0
                 )
 
-            overdue_days = max(
-                (now - eligible_at).days,
-                0
-            )
+                overdue_members.append(
+                    {
+                        "member": member,
+                        "rsn": current_rsn,
+                        "current": current_tenure_rank,
+                        "expected": expected_rank,
+                        "joined": joined_at,
+                        "eligible": eligible_at,
+                        "overdue_days": overdue_days,
+                    }
+                )
 
-            overdue_members.append(
-                {
-                    "member": member,
-                    "rsn": current_rsn,
-                    "current": current_tenure_rank,
-                    "expected": expected_rank,
-                    "joined": joined_at,
-                    "eligible": eligible_at,
-                    "overdue_days": overdue_days,
-                }
-            )
+            elif current_level > expected_level:
+                eligible_at = tenure_eligible_at(
+                    joined_at,
+                    current_tenure_rank
+                )
+
+                premature_members.append(
+                    {
+                        "member": member,
+                        "rsn": current_rsn,
+                        "current": current_tenure_rank,
+                        "expected": expected_rank,
+                        "eligible": eligible_at,
+                    }
+                )
 
         conn.commit()
         conn.close()
 
         overdue_members.sort(
-            key=lambda entry:
-                entry["overdue_days"],
+            key=lambda entry: entry["overdue_days"],
             reverse=True
+        )
+
+        premature_members.sort(
+            key=lambda entry: entry["eligible"]
         )
 
         summary = (
             f"**Novus Promotion Audit**\n\n"
-            f"Linked primary accounts checked: "
-            f"**{len(primary_links)}**\n"
-            f"Tenure members evaluated: "
-            f"**{checked_tenure_members}**\n"
-            f"Promotions due: "
-            f"**{len(overdue_members)}**"
+            f"Linked primary accounts checked: **{len(primary_links)}**\n"
+            f"Tenure members evaluated: **{checked_tenure_members}**\n"
+            f"Promotions due: **{len(overdue_members)}**\n"
+            f"Premature Discord tenure ranks: **{len(premature_members)}**"
         )
 
         if trial_members_excluded:
             summary += (
-                f"\nTrial members excluded: "
-                f"**{trial_members_excluded}**"
+                f"\nTrial members excluded: **{trial_members_excluded}**"
             )
 
-        if skipped_special_tenure_role:
+        if missing_join_date_members:
             summary += (
-                f"\nSpecial-rank members missing tenure role: "
-                f"**{skipped_special_tenure_role}**"
-            )
-
-        if skipped_missing_join_date:
-            summary += (
-                f"\nMissing WOM join date: "
-                f"**{skipped_missing_join_date}**"
+                f"\nMissing WOM join date: **{len(missing_join_date_members)}**"
             )
 
         if skipped_primary_not_found:
             summary += (
-                f"\nPrimary RSN not found in WOM: "
-                f"**{skipped_primary_not_found}**"
+                f"\nPrimary RSN not found in WOM: **{skipped_primary_not_found}**"
             )
 
-        if special_missing_tenure_members:
-            summary += (
-                "\n\n**Special-Rank Members Missing Tenure Role**\n"
-                + "\n".join(special_missing_tenure_members)
+        sections = []
+
+        if overdue_members:
+            lines = []
+            for entry in overdue_members:
+                lines.append(
+                    f"{entry['member'].mention} (`{entry['rsn']}`)\n"
+                    f"`{entry['current'] or 'none'}` -> `{entry['expected']}`\n"
+                    f"Joined: `{entry['joined'].date()}`\n"
+                    f"Eligible: `{entry['eligible'].date()}`\n"
+                    f"Overdue: **{entry['overdue_days']} day(s)**"
+                )
+            sections.append(
+                "**Promotions Due**\n"
+                + "\n\n".join(lines)
+            )
+        else:
+            sections.append(
+                "No linked tenure members are currently overdue for promotion."
             )
 
-        if not overdue_members:
+        if premature_members:
+            lines = []
+            for entry in premature_members:
+                lines.append(
+                    f"{entry['member'].mention} (`{entry['rsn']}`)\n"
+                    f"Discord: `{entry['current']}` | Expected: `{entry['expected']}`\n"
+                    f"Eligible for `{entry['current']}`: `{entry['eligible'].date()}`\n"
+                    f"**No demotion made.**"
+                )
+            sections.append(
+                "**Premature Discord Tenure Ranks**\n"
+                + "\n\n".join(lines)
+            )
+
+        if missing_join_date_members:
+            sections.append(
+                "**Missing WOM Join Date**\n"
+                + "\n".join(missing_join_date_members)
+            )
+
+        response = summary + "\n\n" + "\n\n".join(sections)
+
+        if len(response) > 1950:
+            response = (
+                response[:1900]
+                + "\n\n...additional promotion details omitted."
+            )
+
+        await interaction.followup.send(
+            response,
+            ephemeral=True
+        )
+
+    # ========================================================
+    # /TRIALS
+    # ========================================================
+
+    @app_commands.command(
+        name="trials",
+        description="Show current Trial Members and time remaining in their 30-day trial."
+    )
+    async def trials_command(
+        self,
+        interaction: discord.Interaction
+    ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(
+            ephemeral=True,
+            thinking=True
+        )
+
+        guild = interaction.guild
+
+        if guild is None:
             await interaction.followup.send(
-                summary
-                + "\n\nNo linked tenure members are "
-                + "currently overdue for promotion.",
+                "This command can only be used inside the Novus server.",
+                ephemeral=True
+            )
+            return
+
+        conn = sqlite3.connect(
+            "wom_multi.db"
+        )
+        c = conn.cursor()
+
+        c.execute(
+            """
+            SELECT group_id
+            FROM guild_configs
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+
+        config = c.fetchone()
+
+        if not config or not config[0]:
+            conn.close()
+            await interaction.followup.send(
+                "No Wise Old Man group is configured.",
+                ephemeral=True
+            )
+            return
+
+        group_data, api_status = await self.get_wom_group(
+            config[0]
+        )
+
+        if group_data is None:
+            conn.close()
+            await interaction.followup.send(
+                "Could not retrieve the Novus WOM group.",
+                ephemeral=True
+            )
+            return
+
+        c.execute(
+            """
+            SELECT discord_id, rsn, wom_id
+            FROM links
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+
+        link_rows = c.fetchall()
+        conn.close()
+
+        discord_by_wom_id = {
+            wom_id: discord_id
+            for discord_id, _, wom_id in link_rows
+            if wom_id is not None
+        }
+        discord_by_rsn = {
+            rsn.lower(): discord_id
+            for discord_id, rsn, _ in link_rows
+            if rsn
+        }
+
+        now = datetime.datetime.now(
+            datetime.timezone.utc
+        )
+        trials = []
+
+        for membership in group_data.get(
+            "memberships",
+            []
+        ):
+            wom_role = (
+                membership.get(
+                    "role",
+                    ""
+                ).lower()
+            )
+
+            if wom_role not in NOVUS_TRIAL_WOM_RANKS:
+                continue
+
+            player = membership.get(
+                "player",
+                {}
+            )
+            rsn = player.get(
+                "username",
+                "Unknown"
+            )
+            wom_id = player.get(
+                "id"
+            )
+            joined_at = get_membership_joined_at(
+                membership
+            )
+
+            discord_id = discord_by_wom_id.get(
+                wom_id
+            )
+
+            if discord_id is None:
+                discord_id = discord_by_rsn.get(
+                    rsn.lower()
+                )
+
+            member = (
+                guild.get_member(discord_id)
+                if discord_id is not None
+                else None
+            )
+
+            trial_end = None
+            days_remaining = None
+
+            if joined_at:
+                trial_end = joined_at + datetime.timedelta(
+                    days=TRIAL_PERIOD_DAYS
+                )
+                days_remaining = (
+                    trial_end.date()
+                    - now.date()
+                ).days
+
+            trials.append(
+                {
+                    "member": member,
+                    "rsn": rsn,
+                    "joined": joined_at,
+                    "ends": trial_end,
+                    "days_remaining": days_remaining,
+                }
+            )
+
+        trials.sort(
+            key=lambda entry: (
+                entry["ends"] is None,
+                entry["ends"] or datetime.datetime.max.replace(
+                    tzinfo=datetime.timezone.utc
+                ),
+                entry["rsn"].lower()
+            )
+        )
+
+        if not trials:
+            await interaction.followup.send(
+                "**Novus Trial Members**\n\nNo current Trial Members found in WOM.",
                 ephemeral=True
             )
             return
 
         lines = []
 
-        for entry in overdue_members:
-            lines.append(
-                f"{entry['member'].mention} "
-                f"(`{entry['rsn']}`)\n"
-                f"`{entry['current']}` -> "
-                f"`{entry['expected']}`\n"
-                f"Joined: "
-                f"{entry['joined'].date()}\n"
-                f"Eligible: "
-                f"{entry['eligible'].date()}\n"
-                f"Overdue: "
-                f"{entry['overdue_days']} day(s)"
+        for entry in trials:
+            identity = (
+                f"{entry['member'].mention} (`{entry['rsn']}`)"
+                if entry["member"]
+                else f"`{entry['rsn']}`"
             )
 
-        output = "\n\n".join(lines)
+            if entry["joined"] is None:
+                lines.append(
+                    f"{identity}\nWOM join date unavailable - trial timing cannot be calculated."
+                )
+                continue
+
+            days_remaining = entry["days_remaining"]
+
+            if days_remaining > 0:
+                status_text = (
+                    f"**{days_remaining} day(s) remaining**"
+                )
+            elif days_remaining == 0:
+                status_text = "**Trial ends today**"
+            else:
+                status_text = (
+                    f"**Overdue by {abs(days_remaining)} day(s)**"
+                )
+
+            lines.append(
+                f"{identity}\n"
+                f"Joined: `{entry['joined'].date()}` | "
+                f"Ends: `{entry['ends'].date()}` | {status_text}"
+            )
 
         response = (
-            summary
-            + "\n\n**Promotions Due**\n"
-            + output
+            f"**Novus Trial Members**\n\n"
+            f"Current trials: **{len(trials)}**\n\n"
+            + "\n\n".join(lines)
         )
 
         if len(response) > 1950:
             response = (
                 response[:1900]
-                + "\n\n...additional promotions omitted."
+                + "\n\n...additional trial members omitted."
             )
 
         await interaction.followup.send(
@@ -1573,22 +2018,18 @@ class TasksCog(commands.Cog):
             else None
         )
 
-        group_data, api_status = (
-            await self.get_wom_group(
-                group_id
-            )
+        group_data, api_status = await self.get_wom_group(
+            group_id
         )
 
         if group_data is None:
             if log_channel:
                 try:
                     await log_channel.send(
-                        "WOM sync failed because the "
-                        "Wise Old Man API could not be reached."
+                        "WOM sync failed because the Wise Old Man API could not be reached."
                     )
                 except discord.Forbidden:
                     pass
-
             return
 
         conn = sqlite3.connect(
@@ -1598,7 +2039,7 @@ class TasksCog(commands.Cog):
 
         c.execute(
             """
-            SELECT discord_id
+            SELECT discord_id, rsn, wom_id
             FROM links
             WHERE guild_id = ?
             """,
@@ -1607,13 +2048,19 @@ class TasksCog(commands.Cog):
 
         links = c.fetchall()
 
-        role_updates = []
+        automatic_promotions = []
+        staff_updates = []
+        duplicate_cleanups = []
+        premature_discord_ranks = []
+        wom_rank_mismatches = []
+        missing_join_dates = []
+        tenure_mapping_issues = []
         skipped_members = []
         failed_members = []
         removed_users_count = 0
         unfound_rsns = []
 
-        for (discord_id,) in links:
+        for discord_id, stored_rsn, stored_wom_id in links:
             member = guild.get_member(
                 discord_id
             )
@@ -1658,8 +2105,7 @@ class TasksCog(commands.Cog):
 
             if result["status"] == "primary_not_found":
                 unfound_rsns.append(
-                    f"- {member.mention} "
-                    f"(`{result['rsn']}`)"
+                    f"- {member.mention} (`{result['rsn']}`)"
                 )
                 continue
 
@@ -1673,61 +2119,116 @@ class TasksCog(commands.Cog):
                     failed_members.append(issue_line)
                 else:
                     skipped_members.append(issue_line)
-
                 continue
 
+            tenure_status = result.get(
+                "tenure_status"
+            )
+
+            if tenure_status == "promoted":
+                automatic_promotions.append(
+                    f"- {member.mention} (`{result['rsn']}`): "
+                    f"`{result.get('current_discord_tenure_rank') or 'none'}` "
+                    f"-> `{result['expected_tenure_rank']}`"
+                )
+
+            elif tenure_status == "duplicate_cleanup":
+                duplicate_cleanups.append(
+                    f"- {member.mention} (`{result['rsn']}`): kept "
+                    f"`{result['expected_tenure_rank']}` and removed lower duplicate(s)"
+                )
+
+            elif tenure_status == "ahead":
+                line = (
+                    f"- {member.mention} (`{result['rsn']}`): Discord "
+                    f"`{result['current_discord_tenure_rank']}`, expected "
+                    f"`{result['expected_tenure_rank']}`"
+                )
+
+                eligible_at = result.get(
+                    "tenure_ahead_eligible_at"
+                )
+
+                if eligible_at:
+                    line += (
+                        f" - eligible for `{result['current_discord_tenure_rank']}` "
+                        f"on `{eligible_at.date()}`"
+                    )
+
+                premature_discord_ranks.append(
+                    line
+                )
+
+            elif tenure_status == "missing_join_date":
+                missing_join_dates.append(
+                    f"- {member.mention} (`{result['rsn']}`)"
+                )
+
+            elif tenure_status == "not_mapped":
+                tenure_mapping_issues.append(
+                    f"- {member.mention} (`{result['rsn']}`): expected "
+                    f"`{result.get('expected_tenure_rank')}`"
+                )
+
+            if result.get("wom_tenure_mismatch"):
+                wom_rank_mismatches.append(
+                    f"- {member.mention} (`{result['rsn']}`): WOM "
+                    f"`{result['wom_role']}`, expected "
+                    f"`{result['expected_tenure_rank']}` "
+                    f"({result['wom_tenure_direction']})"
+                )
+
             if (
-                result["roles_added"]
-                or result["roles_removed"]
+                result.get("staff_roles_added")
+                or result.get("staff_roles_removed")
             ):
                 old_roles = (
                     ", ".join(
                         role.mention
-                        for role
-                        in result["roles_removed"]
+                        for role in result.get(
+                            "staff_roles_removed",
+                            []
+                        )
                     )
                     or "none"
                 )
-
                 new_roles = (
                     ", ".join(
                         role.mention
-                        for role
-                        in result["roles_added"]
+                        for role in result.get(
+                            "staff_roles_added",
+                            []
+                        )
                     )
                     or "none"
                 )
 
-                role_updates.append(
-                    f"- {member.mention} "
-                    f"(`{result['rsn']}`): "
+                staff_updates.append(
+                    f"- {member.mention} (`{result['rsn']}`): "
                     f"{old_roles} -> {new_roles}"
                 )
 
-                if (
-                    dm_notifications_on
-                    and result.get(
-                        "user_dm_on"
+            if (
+                dm_notifications_on
+                and result.get("user_dm_on")
+                and (
+                    result.get("roles_added")
+                    or result.get("roles_removed")
+                )
+            ):
+                try:
+                    await member.send(
+                        "Your Novus roles have been updated."
                     )
-                ):
-                    try:
-                        await member.send(
-                            f"Your Novus roles have been "
-                            f"updated from Wise Old Man."
-                        )
-                    except discord.Forbidden:
-                        pass
-                    except Exception as e:
-                        logger.error(
-                            f"Could not DM "
-                            f"{member.id}: {e}"
-                        )
+                except discord.Forbidden:
+                    pass
+                except Exception as e:
+                    logger.error(
+                        f"Could not DM {member.id}: {e}"
+                    )
 
             # Optional nickname enforcement uses the linked account
             # structure: Primary | Alt | Alt.
-            #
-            # Only the primary account affects Discord rank. Alts are
-            # included here for display purposes only.
             if nickname_enforcement:
                 c.execute(
                     """
@@ -1757,8 +2258,6 @@ class TasksCog(commands.Cog):
                     nickname_parts
                 )
 
-                # Discord nicknames are limited to 32 characters.
-                # Keep as many complete linked account names as will fit.
                 if len(desired_nickname) > 32:
                     fitted_parts = []
 
@@ -1791,9 +2290,118 @@ class TasksCog(commands.Cog):
                         pass
                     except Exception as e:
                         logger.error(
-                            f"Could not update nickname for "
-                            f"{member} ({member.id}): {e}"
+                            f"Could not update nickname for {member} ({member.id}): {e}"
                         )
+
+        # ----------------------------------------------------
+        # TRIAL MEMBERS ENDING SOON
+        # ----------------------------------------------------
+
+        discord_by_wom_id = {
+            wom_id: discord_id
+            for discord_id, _, wom_id in links
+            if wom_id is not None
+        }
+        discord_by_rsn = {
+            rsn.lower(): discord_id
+            for discord_id, rsn, _ in links
+            if rsn
+        }
+
+        now_utc = datetime.datetime.now(
+            datetime.timezone.utc
+        )
+        trials_ending_soon = []
+
+        for membership in group_data.get(
+            "memberships",
+            []
+        ):
+            current_wom_role = (
+                membership.get(
+                    "role",
+                    ""
+                ).lower()
+            )
+
+            if current_wom_role not in NOVUS_TRIAL_WOM_RANKS:
+                continue
+
+            player = membership.get(
+                "player",
+                {}
+            )
+            rsn = player.get(
+                "username",
+                "Unknown"
+            )
+            wom_id = player.get(
+                "id"
+            )
+            joined_at = get_membership_joined_at(
+                membership
+            )
+
+            if joined_at is None:
+                continue
+
+            trial_end = joined_at + datetime.timedelta(
+                days=TRIAL_PERIOD_DAYS
+            )
+            days_remaining = (
+                trial_end.date()
+                - now_utc.date()
+            ).days
+
+            if days_remaining > TRIAL_ENDING_SOON_DAYS:
+                continue
+
+            discord_id = discord_by_wom_id.get(
+                wom_id
+            )
+
+            if discord_id is None:
+                discord_id = discord_by_rsn.get(
+                    rsn.lower()
+                )
+
+            member = (
+                guild.get_member(discord_id)
+                if discord_id is not None
+                else None
+            )
+
+            identity = (
+                f"{member.mention} (`{rsn}`)"
+                if member
+                else f"`{rsn}`"
+            )
+
+            if days_remaining > 0:
+                status_text = (
+                    f"{days_remaining} day(s) remaining"
+                )
+            elif days_remaining == 0:
+                status_text = "ends today"
+            else:
+                status_text = (
+                    f"overdue by {abs(days_remaining)} day(s)"
+                )
+
+            trials_ending_soon.append(
+                (
+                    days_remaining,
+                    f"- {identity}: {status_text} - ends `{trial_end.date()}`"
+                )
+            )
+
+        trials_ending_soon.sort(
+            key=lambda entry: entry[0]
+        )
+        trial_lines = [
+            line
+            for _, line in trials_ending_soon
+        ]
 
         now = datetime.datetime.now().isoformat()
 
@@ -1809,7 +2417,13 @@ class TasksCog(commands.Cog):
             )
         )
 
-        if role_updates:
+        actual_role_changes = (
+            automatic_promotions
+            or staff_updates
+            or duplicate_cleanups
+        )
+
+        if actual_role_changes:
             c.execute(
                 """
                 UPDATE guild_configs
@@ -1825,38 +2439,101 @@ class TasksCog(commands.Cog):
         conn.commit()
         conn.close()
 
-        if log_channel and (
-            role_updates
-            or skipped_members
-            or failed_members
-            or unfound_rsns
-            or removed_users_count
-        ):
+        should_log = any((
+            automatic_promotions,
+            staff_updates,
+            duplicate_cleanups,
+            premature_discord_ranks,
+            wom_rank_mismatches,
+            missing_join_dates,
+            tenure_mapping_issues,
+            trial_lines,
+            skipped_members,
+            failed_members,
+            unfound_rsns,
+            removed_users_count,
+        ))
+
+        if log_channel and should_log:
             embed = discord.Embed(
                 title=f"Sync Complete for {guild.name}",
                 color=discord.Color.blue(),
                 timestamp=datetime.datetime.now()
             )
 
-            embed.set_footer(
-                text="Novus WOM Role Sync"
+            embed.description = (
+                f"Checked **{len(links)}** linked members | "
+                f"**{len(group_data.get('memberships', []))}** WOM clan accounts\n"
+                f"Tenure roles only move upward automatically."
             )
 
-            if role_updates:
+            embed.set_footer(
+                text="Novus Tenure Sync"
+            )
+
+            if automatic_promotions:
                 embed.add_field(
-                    name="Role Updates",
-                    value="\n".join(
-                        role_updates
+                    name=f"Automatic Promotions ({len(automatic_promotions)})",
+                    value="\n".join(automatic_promotions)[:1024],
+                    inline=False
+                )
+
+            if premature_discord_ranks:
+                embed.add_field(
+                    name=f"Premature Discord Tenure Ranks ({len(premature_discord_ranks)})",
+                    value=(
+                        "No demotions were made.\n"
+                        + "\n".join(premature_discord_ranks)
                     )[:1024],
+                    inline=False
+                )
+
+            if wom_rank_mismatches:
+                embed.add_field(
+                    name=f"WOM Tenure Mismatches ({len(wom_rank_mismatches)})",
+                    value="\n".join(wom_rank_mismatches)[:1024],
+                    inline=False
+                )
+
+            if trial_lines:
+                embed.add_field(
+                    name=f"Trials Ending Soon ({len(trial_lines)})",
+                    value="\n".join(trial_lines)[:1024],
+                    inline=False
+                )
+
+            if missing_join_dates:
+                embed.add_field(
+                    name=f"Missing WOM Join Date ({len(missing_join_dates)})",
+                    value="\n".join(missing_join_dates)[:1024],
+                    inline=False
+                )
+
+            if tenure_mapping_issues:
+                embed.add_field(
+                    name=f"Tenure Mapping Issues ({len(tenure_mapping_issues)})",
+                    value="\n".join(tenure_mapping_issues)[:1024],
+                    inline=False
+                )
+
+            if duplicate_cleanups:
+                embed.add_field(
+                    name=f"Duplicate Tenure Roles Cleaned ({len(duplicate_cleanups)})",
+                    value="\n".join(duplicate_cleanups)[:1024],
+                    inline=False
+                )
+
+            if staff_updates:
+                embed.add_field(
+                    name=f"Staff Role Updates ({len(staff_updates)})",
+                    value="\n".join(staff_updates)[:1024],
                     inline=False
                 )
 
             if unfound_rsns:
                 embed.add_field(
                     name="Primary RSN Not Found",
-                    value="\n".join(
-                        unfound_rsns
-                    )[:1024],
+                    value="\n".join(unfound_rsns)[:1024],
                     inline=False
                 )
 
@@ -1864,9 +2541,7 @@ class TasksCog(commands.Cog):
                 embed.add_field(
                     name="Users Removed",
                     value=(
-                        f"{removed_users_count} linked "
-                        f"user(s) were no longer "
-                        f"in the Discord server."
+                        f"{removed_users_count} linked user(s) were no longer in the Discord server."
                     ),
                     inline=False
                 )
@@ -1874,18 +2549,14 @@ class TasksCog(commands.Cog):
             if skipped_members:
                 embed.add_field(
                     name=f"Skipped ({len(skipped_members)})",
-                    value="\n".join(
-                        skipped_members
-                    )[:1024],
+                    value="\n".join(skipped_members)[:1024],
                     inline=False
                 )
 
             if failed_members:
                 embed.add_field(
                     name=f"Failed ({len(failed_members)})",
-                    value="\n".join(
-                        failed_members
-                    )[:1024],
+                    value="\n".join(failed_members)[:1024],
                     inline=False
                 )
 
@@ -1895,18 +2566,16 @@ class TasksCog(commands.Cog):
                 )
             except discord.Forbidden:
                 logger.warning(
-                    f"Could not send log message "
-                    f"to channel {log_channel_id}"
+                    f"Could not send log message to channel {log_channel_id}"
                 )
 
         logger.info(
-            f"Synced roles for guild "
-            f"{guild.name} ({guild.id}). "
+            f"Synced roles for guild {guild.name} ({guild.id}). "
             f"{len(links)} linked members checked."
         )
 
         return (
-            len(role_updates),
+            len(automatic_promotions) + len(staff_updates) + len(duplicate_cleanups),
             len(skipped_members) + len(failed_members),
             len(links)
         )

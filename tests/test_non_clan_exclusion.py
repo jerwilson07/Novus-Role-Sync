@@ -9,6 +9,7 @@ from common import (
     GUEST_ROLE_ID,
     forget_member_links,
     forget_non_clan_links,
+    forget_unmatched_alt_links,
     has_non_clan_role,
 )
 
@@ -37,7 +38,7 @@ class NonClanExclusionTests(unittest.TestCase):
             "CREATE TABLE links (guild_id INTEGER, discord_id INTEGER, rsn TEXT)"
         )
         self.cur.execute(
-            "CREATE TABLE alt_links (guild_id INTEGER, discord_id INTEGER, rsn TEXT)"
+            "CREATE TABLE alt_links (guild_id INTEGER, discord_id INTEGER, rsn TEXT, wom_id INTEGER)"
         )
         for guild_id, discord_id, rsn in (
             (1, 10, "GuestMain"), (1, 20, "FriendMain"),
@@ -47,7 +48,7 @@ class NonClanExclusionTests(unittest.TestCase):
                 "INSERT INTO links VALUES (?, ?, ?)", (guild_id, discord_id, rsn)
             )
         self.cur.executemany(
-            "INSERT INTO alt_links VALUES (?, ?, ?)",
+            "INSERT INTO alt_links (guild_id, discord_id, rsn) VALUES (?, ?, ?)",
             [(1, 10, "GuestAlt"), (1, 20, "FriendAlt"), (1, 30, "MemberAlt")],
         )
         self.guild = DummyGuild(
@@ -91,6 +92,39 @@ class NonClanExclusionTests(unittest.TestCase):
         self.assertEqual(forget_member_links(self.cur, 1, 10), 2)
         self.assertEqual(self.count("links", 1, 30), 1)
         self.assertEqual(self.count("links", 2, 10), 1)
+
+    def test_alt_cleanup_only_removes_accounts_missing_from_clan(self):
+        self.cur.execute(
+            "UPDATE alt_links SET wom_id = ? WHERE guild_id = ? AND discord_id = ?",
+            (12345, 1, 30),
+        )
+        roster = [
+            {"player": {"id": 12345, "username": "RenamedMemberAlt"}},
+            {"player": {"id": 98765, "username": "OtherCurrentAccount"}},
+        ]
+        self.assertEqual(forget_unmatched_alt_links(self.cur, 1, roster), 2)
+        self.assertEqual(self.count("links", 1, 10), 1)
+        self.assertEqual(self.count("links", 1, 20), 1)
+        self.assertEqual(self.count("links", 1, 30), 1)
+        self.assertEqual(self.count("alt_links", 1, 30), 1)
+        self.assertEqual(self.count("alt_links", 1, 10), 0)
+        self.assertEqual(self.count("alt_links", 1, 20), 0)
+        self.assertEqual(self.count("links", 2, 10), 1)
+        self.assertEqual(forget_unmatched_alt_links(self.cur, 1, roster), 0)
+
+    def test_alt_cleanup_matches_case_insensitive_rsn(self):
+        roster = [{"player": {"id": 321, "username": "memberALT"}}]
+        self.assertEqual(forget_unmatched_alt_links(self.cur, 1, roster), 2)
+        self.assertEqual(self.count("alt_links", 1, 30), 1)
+
+    def test_alt_cleanup_does_not_purge_on_empty_or_invalid_roster(self):
+        self.assertEqual(forget_unmatched_alt_links(self.cur, 1, []), 0)
+        self.assertEqual(
+            forget_unmatched_alt_links(self.cur, 1, [{"bad": "response"}]),
+            0,
+        )
+        for discord_id in (10, 20, 30):
+            self.assertEqual(self.count("alt_links", 1, discord_id), 1)
 
 
 if __name__ == "__main__":

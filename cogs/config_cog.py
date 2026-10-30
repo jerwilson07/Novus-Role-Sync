@@ -5,7 +5,10 @@ import sqlite3
 import logging
 import re
 
-from common import sanitize_rsn, WOM_API_KEY
+from common import (
+    sanitize_rsn, WOM_API_KEY, GUEST_ROLE_ID, CLAN_FRIEND_ROLE_ID,
+    NON_CLAN_ROLE_IDS, has_non_clan_role, forget_non_clan_links
+)
 from typing import List
 
 
@@ -19,18 +22,10 @@ logger = logging.getLogger("WOMBot")
 COUNCIL_ROLE_ID = 1532830356875513906
 MODERATOR_ROLE_ID = 1532830960062693396
 TRIAL_MOD_ROLE_ID = 1533587986204069908
-GUEST_ROLE_ID = 1532905619412226199
-CLAN_FRIEND_ROLE_ID = 1534581044274270388
-
 NOVUS_COMMAND_ROLE_IDS = {
     COUNCIL_ROLE_ID,
     MODERATOR_ROLE_ID,
     TRIAL_MOD_ROLE_ID,
-}
-
-NON_CLAN_ROLE_IDS = {
-    GUEST_ROLE_ID,
-    CLAN_FRIEND_ROLE_ID,
 }
 
 # Only these WOM ranks are allowed to be mapped to Discord tenure roles.
@@ -600,6 +595,14 @@ class ConfigCog(commands.Cog):
             )
             return
 
+        if has_non_clan_role(user):
+            await interaction.response.send_message(
+                f"{user.mention} has Guest or Clan Friend and cannot be linked "
+                "while either role is assigned.",
+                ephemeral=True
+            )
+            return
+
         conn = sqlite3.connect(
             "wom_multi.db"
         )
@@ -781,6 +784,8 @@ class ConfigCog(commands.Cog):
             "wom_multi.db"
         )
         c = conn.cursor()
+        forget_non_clan_links(c, guild)
+        conn.commit()
 
         c.execute(
             """
@@ -911,7 +916,6 @@ class ConfigCog(commands.Cog):
         partial_alt_matches = []
         ignored_guest_members = []
         ignored_clan_friend_members = []
-        membership_conflicts = []
 
         for member in guild.members:
 
@@ -968,41 +972,13 @@ class ConfigCog(commands.Cog):
                 )
             )
 
-            # Guest and Clan Friend are intentionally non-clan roles.
-            # If one of them exactly matches a current WOM member,
-            # report it as a role conflict instead of silently ignoring it.
+            # A non-clan Discord role overrides WOM presence.
+            # Never link or report these users as clan members.
             if has_guest_role or has_clan_friend_role:
-                if primary_membership is not None:
-                    conflict_roles = []
-
-                    if has_guest_role:
-                        conflict_roles.append(
-                            "Guest"
-                        )
-
-                    if has_clan_friend_role:
-                        conflict_roles.append(
-                            "Clan Friend"
-                        )
-
-                    membership_conflicts.append(
-                        {
-                            "member": member,
-                            "rsn": primary_membership["player"]["username"],
-                            "roles": conflict_roles,
-                        }
-                    )
-                else:
-                    if has_guest_role:
-                        ignored_guest_members.append(
-                            member
-                        )
-
-                    if has_clan_friend_role:
-                        ignored_clan_friend_members.append(
-                            member
-                        )
-
+                if has_guest_role:
+                    ignored_guest_members.append(member)
+                if has_clan_friend_role:
+                    ignored_clan_friend_members.append(member)
                 continue
 
             # Never guess the primary identity.
@@ -1288,27 +1264,6 @@ class ConfigCog(commands.Cog):
                     f"{len(unmatched_wom_accounts) - 30} more."
                 )
 
-        if membership_conflicts:
-            conflict_lines = []
-
-            for entry in membership_conflicts[:20]:
-                conflict_lines.append(
-                    f"- {entry['member'].mention}: "
-                    f"`{entry['rsn']}` is in WOM but has "
-                    + " / ".join(entry["roles"])
-                )
-
-            response += (
-                "\n\n**Possible Membership Conflicts**\n"
-                + "\n".join(conflict_lines)
-            )
-
-            if len(membership_conflicts) > 20:
-                response += (
-                    f"\n...and "
-                    f"{len(membership_conflicts) - 20} more."
-                )
-
         if partial_alt_matches:
             partial_lines = []
 
@@ -1378,6 +1333,8 @@ class ConfigCog(commands.Cog):
             "wom_multi.db"
         )
         c = conn.cursor()
+        forget_non_clan_links(c, guild)
+        conn.commit()
 
         c.execute(
             """
@@ -1588,67 +1545,6 @@ class ConfigCog(commands.Cog):
             key=str.lower
         )
 
-        # ----------------------------------------------------
-        # GUEST / CLAN FRIEND MEMBERSHIP CONFLICTS
-        # ----------------------------------------------------
-
-        membership_conflicts = []
-
-        for member in guild.members:
-            member_role_ids = {
-                role.id
-                for role in member.roles
-            }
-
-            non_clan_roles = (
-                member_role_ids
-                & NON_CLAN_ROLE_IDS
-            )
-
-            if not non_clan_roles:
-                continue
-
-            display_name = (
-                member.display_name
-                or member.name
-            )
-
-            parts = [
-                sanitize_rsn(part)
-                for part in re.split(
-                    r"[|/]",
-                    display_name
-                )
-                if sanitize_rsn(part)
-            ]
-
-            if not parts:
-                continue
-
-            primary_name = parts[0].lower()
-
-            if primary_name in wom_by_username:
-                labels = []
-
-                if GUEST_ROLE_ID in non_clan_roles:
-                    labels.append(
-                        "Guest"
-                    )
-
-                if CLAN_FRIEND_ROLE_ID in non_clan_roles:
-                    labels.append(
-                        "Clan Friend"
-                    )
-
-                role_text = " / ".join(
-                    labels
-                )
-
-                membership_conflicts.append(
-                    f"- {member.mention}: "
-                    f"`{parts[0]}` ({role_text})"
-                )
-
         conn.close()
 
         # ----------------------------------------------------
@@ -1668,9 +1564,7 @@ class ConfigCog(commands.Cog):
             f"Broken primary links: "
             f"**{len(broken_primaries)}**\n"
             f"Missing linked alts: "
-            f"**{len(missing_alts)}**\n"
-            f"Guest/Clan Friend conflicts: "
-            f"**{len(membership_conflicts)}**"
+            f"**{len(missing_alts)}**"
         )
 
         sections = []
@@ -1697,14 +1591,6 @@ class ConfigCog(commands.Cog):
                 "**Missing Linked Alts**\n"
                 + "\n".join(
                     missing_alts
-                )
-            )
-
-        if membership_conflicts:
-            sections.append(
-                "**Possible Membership Conflicts**\n"
-                + "\n".join(
-                    membership_conflicts
                 )
             )
 

@@ -335,13 +335,96 @@ class CumulativeTenureTests(unittest.TestCase):
         ))
         self.assertEqual(session.calls,[0,50])
 
-    def test_role_changes_do_not_affect_tenure(self):
+    def test_lone_rank_change_does_not_imply_completed_tenure(self):
         self.assertEqual(store_group_activity(self.c, GUILD, GROUP, [
             activity("changed_role", d("2025-03-01"))
-        ]), 0)
+        ]), 1)
         self.assertEqual(prior_tenure(
             self.c, GUILD, GROUP, PLAYER, d("2026-01-01")
         ), dt.timedelta())
+
+    def test_founder_without_join_event_gets_lower_bound_of_prior_tenure(self):
+        # Initial WOM group creation may not produce a 'joined' event.
+        # A dated rank change proves this player belonged at that point.
+        events = [
+            activity("changed_role", d("2026-08-01")),
+            activity("changed_role", d("2026-09-05")),
+            activity("left", d("2026-10-24")),
+            activity("joined", d("2026-10-29")),
+        ]
+        store_group_activity(self.c, GUILD, GROUP, events)
+        previous = prior_tenure(
+            self.c, GUILD, GROUP, PLAYER, d("2026-10-29")
+        )
+        self.assertEqual(previous, dt.timedelta(days=84))
+        diagnostics = get_tenure_diagnostics(
+            self.c, GUILD, GROUP, PLAYER, d("2026-10-29")
+        )
+        self.assertEqual(diagnostics["matched_previous_periods"], 1)
+
+    def test_rank_change_does_not_bridge_two_membership_periods(self):
+        events = [
+            activity("changed_role", d("2026-07-31")),
+            activity("left", d("2026-08-15")),
+            activity("changed_role", d("2026-09-01")),
+            activity("left", d("2026-09-10")),
+            activity("joined", d("2026-10-29")),
+        ]
+        store_group_activity(self.c, GUILD, GROUP, events)
+        self.assertEqual(prior_tenure(
+            self.c, GUILD, GROUP, PLAYER, d("2026-10-29")
+        ), dt.timedelta(days=24))
+
+    def test_explicit_join_overrides_rank_activity_anchor(self):
+        events = [
+            activity("changed_role", d("2026-07-31")),
+            activity("joined", d("2026-08-05")),
+            activity("left", d("2026-09-01")),
+        ]
+        store_group_activity(self.c, GUILD, GROUP, events)
+        self.assertEqual(prior_tenure(
+            self.c, GUILD, GROUP, PLAYER, d("2026-10-29")
+        ), dt.timedelta(days=27))
+
+    def test_existing_completed_import_is_reset_once_for_new_evidence(self):
+        # Simulate a database created before changed_role activity was stored.
+        self.c.execute("DROP TABLE tenure_backfill")
+        self.c.execute("""
+            CREATE TABLE tenure_backfill (
+                guild_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL,
+                offset INTEGER NOT NULL DEFAULT 0,
+                complete INTEGER NOT NULL DEFAULT 0,
+                last_checked_at TEXT,
+                PRIMARY KEY (guild_id, group_id)
+            )
+        """)
+        self.c.execute("""
+            INSERT INTO tenure_backfill
+            (guild_id, group_id, offset, complete, last_checked_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (GUILD, GROUP, 1500, 1, d("2026-10-30").isoformat()))
+        initialize_tenure_tables(self.c)
+
+        session = FakeActivitySession({
+            0: [activity("left", d("2026-10-24"))],
+        })
+        asyncio.run(refresh_activity_history(
+            session, {}, self.c, GUILD, GROUP
+        ))
+        self.assertEqual(session.calls, [0])
+        version, complete, offset = self.c.execute(
+            """SELECT activity_version, complete, offset
+               FROM tenure_backfill WHERE guild_id=? AND group_id=?""",
+            (GUILD, GROUP)
+        ).fetchone()
+        self.assertEqual((version, complete, offset), (2, 1, 1))
+
+        # A repeat should respect the freshness cache, not rescan endlessly.
+        asyncio.run(refresh_activity_history(
+            session, {}, self.c, GUILD, GROUP
+        ))
+        self.assertEqual(session.calls, [0])
 
 
 if __name__ == "__main__":

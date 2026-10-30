@@ -10,7 +10,10 @@ import asyncio
 import os
 import shutil
 
-from common import (WOM_API_KEY, has_non_clan_role, forget_member_links, forget_non_clan_links)
+from common import (
+    WOM_API_KEY, has_non_clan_role, forget_member_links,
+    forget_non_clan_links, forget_unmatched_alt_links,
+)
 
 
 logger = logging.getLogger("WOMBot")
@@ -418,7 +421,14 @@ class TasksCog(commands.Cog):
                 )
 
             if membership is None:
-                missing.append(alt_rsn)
+                # Unlinked alts outside Novus do not belong in Novus Sync.
+                cursor.execute(
+                    """
+                    DELETE FROM alt_links
+                    WHERE guild_id = ? AND discord_id = ? AND rsn = ?
+                    """,
+                    (guild_id, discord_id, alt_rsn),
+                )
                 continue
 
             current_alt_rsn = (
@@ -966,6 +976,8 @@ class TasksCog(commands.Cog):
             )
             return
 
+        forget_unmatched_alt_links(c, guild.id, group_data.get("memberships", []))
+
         result = await self.sync_one_member(
             guild,
             member,
@@ -1167,26 +1179,12 @@ class TasksCog(commands.Cog):
             "verified_alts",
             []
         )
-        missing_alts = result.get(
-            "missing_alts",
-            []
-        )
-
         if verified_alts:
             response += (
                 "\n\nVerified alts: "
                 + ", ".join(
                     f"`{alt}`"
                     for alt in verified_alts
-                )
-            )
-
-        if missing_alts:
-            response += (
-                "\nAlts not found in WOM: "
-                + ", ".join(
-                    f"`{alt}`"
-                    for alt in missing_alts
                 )
             )
 
@@ -1265,6 +1263,8 @@ class TasksCog(commands.Cog):
                 ephemeral=True
             )
             return
+
+        forget_unmatched_alt_links(c, guild.id, group_data.get("memberships", []))
 
         c.execute(
             """
@@ -2115,6 +2115,10 @@ class TasksCog(commands.Cog):
             "wom_multi.db"
         )
         c = conn.cursor()
+
+        forget_unmatched_alt_links(
+            c, guild.id, group_data.get("memberships", [])
+        )
 
         c.execute(
             """

@@ -6,8 +6,7 @@ import logging
 import re
 
 from common import (
-    sanitize_rsn, WOM_API_KEY, GUEST_ROLE_ID, CLAN_FRIEND_ROLE_ID,
-    NON_CLAN_ROLE_IDS, has_non_clan_role, forget_non_clan_links
+    sanitize_rsn, WOM_API_KEY, has_non_clan_role, forget_non_clan_links
 )
 from typing import List
 
@@ -914,12 +913,10 @@ class ConfigCog(commands.Cog):
         already_linked = []
         unmatched_discord_members = []
         partial_alt_matches = []
-        ignored_guest_members = []
-        ignored_clan_friend_members = []
 
         for member in guild.members:
 
-            if member.bot:
+            if member.bot or has_non_clan_role(member):
                 continue
 
             if member.id in existing_links:
@@ -927,18 +924,6 @@ class ConfigCog(commands.Cog):
                     member
                 )
                 continue
-
-            member_role_ids = {
-                role.id
-                for role in member.roles
-            }
-
-            has_guest_role = (
-                GUEST_ROLE_ID in member_role_ids
-            )
-            has_clan_friend_role = (
-                CLAN_FRIEND_ROLE_ID in member_role_ids
-            )
 
             display_name = member.display_name
 
@@ -971,15 +956,6 @@ class ConfigCog(commands.Cog):
                     primary_candidate.lower()
                 )
             )
-
-            # A non-clan Discord role overrides WOM presence.
-            # Never link or report these users as clan members.
-            if has_guest_role or has_clan_friend_role:
-                if has_guest_role:
-                    ignored_guest_members.append(member)
-                if has_clan_friend_role:
-                    ignored_clan_friend_members.append(member)
-                continue
 
             # Never guess the primary identity.
             if primary_membership is None:
@@ -1201,11 +1177,7 @@ class ConfigCog(commands.Cog):
             f"Discord members not confidently matched: "
             f"**{len(unmatched_discord_members)}**\n"
             f"WOM clan accounts still unmatched: "
-            f"**{len(unmatched_wom_accounts)}**\n"
-            f"Guests ignored: "
-            f"**{len(ignored_guest_members)}**\n"
-            f"Clan Friends ignored: "
-            f"**{len(ignored_clan_friend_members)}**"
+            f"**{len(unmatched_wom_accounts)}**"
         )
 
         if partial_alt_matches:

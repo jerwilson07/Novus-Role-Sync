@@ -12,6 +12,8 @@ from tenure_history import (
     prior_tenure,
     record_roster,
     store_group_activity,
+    set_manual_previous_tenure,
+    get_manual_previous_tenure,
 )
 
 GUILD = 1
@@ -159,6 +161,53 @@ class CumulativeTenureTests(unittest.TestCase):
             (PLAYER,)
         ).fetchone()
         self.assertIsNone(row[0])
+
+    def test_manual_previous_service_fills_missing_wom_history(self):
+        joined = d("2026-10-01")
+        set_manual_previous_tenure(self.c, GUILD, GROUP, PLAYER, 245)
+        effective, credited = cumulative_effective_join(
+            self.c, GUILD, GROUP, PLAYER, joined
+        )
+        self.assertEqual(credited, dt.timedelta(days=245))
+        self.assertEqual(effective, joined - dt.timedelta(days=245))
+
+    def test_manual_credit_and_wom_history_use_max_not_sum(self):
+        store_group_activity(self.c, GUILD, GROUP, [
+            activity("joined", d("2025-01-01")),
+            activity("left", d("2025-04-01")),
+        ])
+        current = d("2026-10-01")
+        set_manual_previous_tenure(self.c, GUILD, GROUP, PLAYER, 160)
+        _, credited = cumulative_effective_join(
+            self.c, GUILD, GROUP, PLAYER, current
+        )
+        self.assertEqual(credited, dt.timedelta(days=160))
+        set_manual_previous_tenure(self.c, GUILD, GROUP, PLAYER, 20)
+        _, credited = cumulative_effective_join(
+            self.c, GUILD, GROUP, PLAYER, current
+        )
+        self.assertEqual(credited, dt.timedelta(days=90))
+
+    def test_manual_credit_can_be_cleared_and_isolated_by_player(self):
+        set_manual_previous_tenure(self.c, GUILD, GROUP, PLAYER, 365)
+        self.assertEqual(
+            get_manual_previous_tenure(self.c, GUILD, GROUP, PLAYER),
+            dt.timedelta(days=365)
+        )
+        self.assertEqual(
+            get_manual_previous_tenure(self.c, GUILD, GROUP, 98765),
+            dt.timedelta()
+        )
+        set_manual_previous_tenure(self.c, GUILD, GROUP, PLAYER, 0)
+        self.assertEqual(
+            get_manual_previous_tenure(self.c, GUILD, GROUP, PLAYER),
+            dt.timedelta()
+        )
+
+    def test_manual_credit_rejects_invalid_values(self):
+        for value in (-1, 3651, 2.5, "500"):
+            with self.assertRaises(ValueError):
+                set_manual_previous_tenure(self.c, GUILD, GROUP, PLAYER, value)
 
     def test_role_changes_do_not_affect_tenure(self):
         self.assertEqual(store_group_activity(self.c, GUILD, GROUP, [

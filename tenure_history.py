@@ -51,6 +51,16 @@ def initialize_tenure_tables(cursor):
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tenure_manual_credit (
+            guild_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            player_id INTEGER NOT NULL,
+            previous_days REAL NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, group_id, player_id)
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS tenure_backfill (
             guild_id INTEGER NOT NULL,
             group_id INTEGER NOT NULL,
@@ -183,11 +193,57 @@ def prior_tenure(cursor, guild_id, group_id, player_id, current_joined_at):
     return sum((end - start for start, end in merged), datetime.timedelta(0))
 
 
+def get_manual_previous_tenure(cursor, guild_id, group_id, player_id):
+    """Return a staff-verified previous-service floor (never additive to WOM)."""
+    if group_id is None or player_id is None:
+        return datetime.timedelta(0)
+    cursor.execute("""
+        SELECT previous_days FROM tenure_manual_credit
+        WHERE guild_id = ? AND group_id = ? AND player_id = ?
+    """, (guild_id, group_id, player_id))
+    row = cursor.fetchone()
+    if row is None:
+        return datetime.timedelta(0)
+    return datetime.timedelta(days=max(0, row[0]))
+
+
+def set_manual_previous_tenure(cursor, guild_id, group_id, player_id, days):
+    """Set verified previous clan service. Zero removes the manual credit.
+
+    This is the TOTAL historical time spent in Novus before the current
+    membership stint, not a value to add to other WOM-derived history.
+    """
+    if not isinstance(days, int) or not 0 <= days <= 3650:
+        raise ValueError("Previous service must be an integer from 0 to 3650 days")
+    if not isinstance(group_id, int) or not isinstance(player_id, int):
+        raise ValueError("A linked WOM group and player ID are required")
+    if days == 0:
+        cursor.execute("""
+            DELETE FROM tenure_manual_credit
+            WHERE guild_id = ? AND group_id = ? AND player_id = ?
+        """, (guild_id, group_id, player_id))
+        return
+    cursor.execute("""
+        INSERT INTO tenure_manual_credit
+            (guild_id, group_id, player_id, previous_days, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id, group_id, player_id)
+        DO UPDATE SET previous_days = excluded.previous_days,
+                      updated_at = excluded.updated_at
+    """, (guild_id, group_id, player_id, days, iso(datetime.datetime.now(UTC))))
+
+
 def cumulative_effective_join(cursor, guild_id, group_id, player_id, joined_at):
-    """Equivalent continuous start time for existing month-based rank rules."""
+    """Equivalent continuous start time from the largest verified previous-service record.
+
+    A manually verified total is a floor, not extra service to double count
+    on top of recorded WOM join/leave events.
+    """
     if joined_at is None:
         return None, datetime.timedelta(0)
-    past = prior_tenure(cursor, guild_id, group_id, player_id, joined_at)
+    recorded = prior_tenure(cursor, guild_id, group_id, player_id, joined_at)
+    manual = get_manual_previous_tenure(cursor, guild_id, group_id, player_id)
+    past = max(recorded, manual)
     return joined_at - past, past
 
 

@@ -1,6 +1,7 @@
 """Regression tests for cumulative Novus clan tenure across re-joins."""
 
 import datetime as dt
+import asyncio
 import sqlite3
 import unittest
 
@@ -15,6 +16,7 @@ from tenure_history import (
     set_manual_previous_tenure,
     get_manual_previous_tenure,
     get_tenure_diagnostics,
+    refresh_activity_history,
 )
 
 GUILD = 1
@@ -35,6 +37,33 @@ def membership(joined, player_id=PLAYER):
 
 def activity(kind, when, player_id=PLAYER):
     return {"playerId": player_id, "type": kind, "createdAt": when.isoformat()}
+
+
+class FakeActivityResponse:
+    status = 200
+
+    def __init__(self, events):
+        self.events = events
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return False
+
+    async def json(self):
+        return self.events
+
+
+class FakeActivitySession:
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    def get(self, url, headers, params, timeout):
+        page = params["offset"]
+        self.calls.append(page)
+        return FakeActivityResponse(self.pages.get(page, []))
 
 
 class CumulativeTenureTests(unittest.TestCase):
@@ -237,6 +266,74 @@ class CumulativeTenureTests(unittest.TestCase):
         self.assertEqual(details["matched_previous_periods"], 1)
         self.assertEqual(details["wom_previous_days"], 85)
         self.assertEqual(len(details["events"]), 3)
+
+    def test_history_import_limits_requests_and_resumes_older_pages(self):
+        # Group activity is paginated newest-first, with the first event
+        # on page 0 and an earlier join appearing hundreds of entries later.
+        filler = [
+            activity("changed_role", d("2026-05-01"), i + 1000)
+            for i in range(50)
+        ]
+        pages = {
+            0: [activity("left", d("2026-10-23"))] + filler[:49],
+            50: filler,
+            100: filler,
+            150: filler,
+            200: [activity("joined", d("2026-07-31"))] + filler[:49],
+            250: filler[:5],
+        }
+        session = FakeActivitySession(pages)
+
+        asyncio.run(refresh_activity_history(
+            session, {}, self.c, GUILD, GROUP
+        ))
+        self.assertEqual(session.calls, [0, 50, 100, 150])
+        self.assertEqual(prior_tenure(
+            self.c, GUILD, GROUP, PLAYER, d("2026-10-29")
+        ), dt.timedelta())
+        offset = self.c.execute(
+            "SELECT offset FROM tenure_backfill WHERE guild_id=? AND group_id=?",
+            (GUILD, GROUP)
+        ).fetchone()[0]
+        self.assertEqual(offset, 200)
+
+        # A normal sync within an hour uses the cached result.
+        asyncio.run(refresh_activity_history(
+            session, {}, self.c, GUILD, GROUP
+        ))
+        self.assertEqual(len(session.calls), 4)
+
+        # Simulate the next scheduled refresh and resume with overlap.
+        self.c.execute(
+            "UPDATE tenure_backfill SET last_checked_at=? WHERE group_id=?",
+            (d("2025-01-01").isoformat(), GROUP)
+        )
+        asyncio.run(refresh_activity_history(
+            session, {}, self.c, GUILD, GROUP
+        ))
+        self.assertEqual(session.calls[4:], [0, 150, 200, 250])
+        self.assertEqual(prior_tenure(
+            self.c, GUILD, GROUP, PLAYER, d("2026-10-29")
+        ), dt.timedelta(days=84))
+
+        row = self.c.execute(
+            "SELECT complete FROM tenure_backfill WHERE group_id=?", (GROUP,)
+        ).fetchone()
+        self.assertEqual(row[0], 1)
+
+    def test_complete_backfill_checks_only_recent_pages(self):
+        filler = [activity("changed_role", d("2026-09-01"), i+500) for i in range(50)]
+        session = FakeActivitySession({0:filler,50:[]})
+        self.c.execute(
+            """INSERT INTO tenure_backfill
+               (guild_id,group_id,offset,complete,last_checked_at)
+               VALUES (?,?,?,?,?)""",
+            (GUILD,GROUP,400,1,None)
+        )
+        asyncio.run(refresh_activity_history(
+            session, {}, self.c, GUILD, GROUP
+        ))
+        self.assertEqual(session.calls,[0,50])
 
     def test_role_changes_do_not_affect_tenure(self):
         self.assertEqual(store_group_activity(self.c, GUILD, GROUP, [

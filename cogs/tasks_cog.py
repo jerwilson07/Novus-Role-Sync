@@ -10,7 +10,10 @@ import asyncio
 import os
 import shutil
 
-from common import WOM_API_KEY
+from common import (
+    WOM_API_KEY, has_non_clan_role, forget_member_links,
+    forget_non_clan_links, forget_unmatched_alt_links,
+)
 
 
 logger = logging.getLogger("WOMBot")
@@ -284,6 +287,57 @@ class TasksCog(commands.Cog):
         self.check_reminders.cancel()
 
     # ========================================================
+    # GUEST / CLAN FRIEND EXCLUSION
+    # ========================================================
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Reconcile preexisting Guest/Clan Friend roles on every startup.
+        for guild in self.bot.guilds:
+            try:
+                conn = sqlite3.connect("wom_multi.db")
+                try:
+                    cursor = conn.cursor()
+                    people, accounts = forget_non_clan_links(cursor, guild)
+                    conn.commit()
+                finally:
+                    conn.close()
+                if people:
+                    logger.info(
+                        "Forgot %s Guest/Clan Friend members (%s linked accounts) in guild %s",
+                        people, accounts, guild.id
+                    )
+            except sqlite3.Error:
+                logger.exception(
+                    "Failed to forget Guest/Clan Friend links for guild %s",
+                    guild.id
+                )
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        # Forget people as soon as they receive either exclusion role.
+        if not has_non_clan_role(after) or has_non_clan_role(before):
+            return
+        try:
+            conn = sqlite3.connect("wom_multi.db")
+            try:
+                cursor = conn.cursor()
+                deleted = forget_member_links(cursor, after.guild.id, after.id)
+                conn.commit()
+            finally:
+                conn.close()
+            if deleted:
+                logger.info(
+                    "Forgot Guest/Clan Friend %s in guild %s: %s account links deleted",
+                    after.id, after.guild.id, deleted
+                )
+        except sqlite3.Error:
+            logger.exception(
+                "Failed to forget Guest/Clan Friend %s in guild %s",
+                after.id, after.guild.id
+            )
+
+    # ========================================================
     # WOM API
     # ========================================================
 
@@ -367,7 +421,14 @@ class TasksCog(commands.Cog):
                 )
 
             if membership is None:
-                missing.append(alt_rsn)
+                # Unlinked alts outside Novus do not belong in Novus Sync.
+                cursor.execute(
+                    """
+                    DELETE FROM alt_links
+                    WHERE guild_id = ? AND discord_id = ? AND rsn = ?
+                    """,
+                    (guild_id, discord_id, alt_rsn),
+                )
                 continue
 
             current_alt_rsn = (
@@ -415,6 +476,10 @@ class TasksCog(commands.Cog):
         Tenure roles are based on WOM clientSyncJoinedAt, not the visible WOM
         clan rank. Tenure may move upward automatically, but never downward.
         """
+
+        if has_non_clan_role(member):
+            forget_member_links(cursor, guild.id, member.id)
+            return {"status": "non_clan_ignored"}
 
         cursor.execute(
             """
@@ -911,6 +976,8 @@ class TasksCog(commands.Cog):
             )
             return
 
+        forget_unmatched_alt_links(c, guild.id, group_data.get("memberships", []))
+
         result = await self.sync_one_member(
             guild,
             member,
@@ -967,6 +1034,14 @@ class TasksCog(commands.Cog):
                     f"unmanaged by Novus Sync, so no Discord roles were changed.",
                     ephemeral=True
                 )
+            return
+
+        if status == "non_clan_ignored":
+            await interaction.followup.send(
+                f"{member.mention} has Guest or Clan Friend and is excluded "
+                "from Novus Sync. Any stored account links have been forgotten.",
+                ephemeral=True
+            )
             return
 
         if status == "not_linked":
@@ -1104,26 +1179,12 @@ class TasksCog(commands.Cog):
             "verified_alts",
             []
         )
-        missing_alts = result.get(
-            "missing_alts",
-            []
-        )
-
         if verified_alts:
             response += (
                 "\n\nVerified alts: "
                 + ", ".join(
                     f"`{alt}`"
                     for alt in verified_alts
-                )
-            )
-
-        if missing_alts:
-            response += (
-                "\nAlts not found in WOM: "
-                + ", ".join(
-                    f"`{alt}`"
-                    for alt in missing_alts
                 )
             )
 
@@ -1203,6 +1264,8 @@ class TasksCog(commands.Cog):
             )
             return
 
+        forget_unmatched_alt_links(c, guild.id, group_data.get("memberships", []))
+
         c.execute(
             """
             SELECT discord_id
@@ -1236,6 +1299,10 @@ class TasksCog(commands.Cog):
             if not member:
                 continue
 
+            if has_non_clan_role(member):
+                forget_member_links(c, guild.id, member.id)
+                continue
+
             checked += 1
 
             result = await self.sync_one_member(
@@ -1245,7 +1312,7 @@ class TasksCog(commands.Cog):
                 c
             )
 
-            if result["status"] == "ignored_rank":
+            if result["status"] in ("ignored_rank", "non_clan_ignored"):
                 continue
 
             if result["status"] == "primary_not_found":
@@ -1533,7 +1600,7 @@ class TasksCog(commands.Cog):
                 discord_id
             )
 
-            if member is None:
+            if member is None or has_non_clan_role(member):
                 continue
 
             membership = None
@@ -1908,6 +1975,9 @@ class TasksCog(commands.Cog):
                 else None
             )
 
+            if member is not None and has_non_clan_role(member):
+                continue
+
             trial_end = None
             days_remaining = None
 
@@ -2018,6 +2088,15 @@ class TasksCog(commands.Cog):
             else None
         )
 
+        # Forget non-clan links even if the WOM API is unavailable.
+        conn = sqlite3.connect("wom_multi.db")
+        try:
+            cursor = conn.cursor()
+            forget_non_clan_links(cursor, guild)
+            conn.commit()
+        finally:
+            conn.close()
+
         group_data, api_status = await self.get_wom_group(
             group_id
         )
@@ -2036,6 +2115,10 @@ class TasksCog(commands.Cog):
             "wom_multi.db"
         )
         c = conn.cursor()
+
+        forget_unmatched_alt_links(
+            c, guild.id, group_data.get("memberships", [])
+        )
 
         c.execute(
             """
@@ -2064,6 +2147,10 @@ class TasksCog(commands.Cog):
             member = guild.get_member(
                 discord_id
             )
+
+            if member is not None and has_non_clan_role(member):
+                forget_member_links(c, guild.id, member.id)
+                continue
 
             if not member:
                 c.execute(
@@ -2100,7 +2187,7 @@ class TasksCog(commands.Cog):
                 c
             )
 
-            if result["status"] == "ignored_rank":
+            if result["status"] in ("ignored_rank", "non_clan_ignored"):
                 continue
 
             if result["status"] == "primary_not_found":

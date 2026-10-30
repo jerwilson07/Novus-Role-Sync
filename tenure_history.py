@@ -73,6 +73,7 @@ def record_roster(cursor, guild_id, group_id, memberships, now=None):
 
     now = now or datetime.datetime.now(UTC)
     current = {}
+    present_ids = {m["player"]["id"] for m in memberships}
     for m in memberships:
         raw = m.get("clientSyncJoinedAt")
         if raw is None:
@@ -88,7 +89,9 @@ def record_roster(cursor, guild_id, group_id, memberships, now=None):
         WHERE guild_id = ? AND group_id = ? AND closed_at IS NULL
     """, (guild_id, group_id))
     for player_id, old_start, last_seen in cursor.fetchall():
-        if current.get(player_id) != parse_timestamp(old_start):
+        if player_id not in present_ids or (
+            player_id in current and current[player_id] != parse_timestamp(old_start)
+        ):
             # Conservative end: last verified day in WOM, never time outside it.
             cursor.execute("""
                 UPDATE tenure_observed SET closed_at = ?

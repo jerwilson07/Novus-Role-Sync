@@ -67,9 +67,20 @@ def initialize_tenure_tables(cursor):
             offset INTEGER NOT NULL DEFAULT 0,
             complete INTEGER NOT NULL DEFAULT 0,
             last_checked_at TEXT,
+            activity_version INTEGER NOT NULL DEFAULT 2,
             PRIMARY KEY (guild_id, group_id)
         )
     """)
+
+    # Older databases skipped rank-change activity. Re-scan historical
+    # pages exactly once after upgrading, preserving all credited periods.
+    cursor.execute("PRAGMA table_info(tenure_backfill)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if "activity_version" not in columns:
+        cursor.execute(
+            "ALTER TABLE tenure_backfill ADD COLUMN "
+            "activity_version INTEGER NOT NULL DEFAULT 1"
+        )
 
 
 def record_roster(cursor, guild_id, group_id, memberships, now=None):
@@ -124,10 +135,16 @@ def record_roster(cursor, guild_id, group_id, memberships, now=None):
 
 
 def store_group_activity(cursor, guild_id, group_id, events):
-    """Only group join/leave events count; ignore rank-change events."""
+    """Record join/leave and rank changes, which prove group membership.
+
+    Some initial group members may lack an explicit 'joined' activity
+    because they were added when the WOM group was first created.
+    """
     added = 0
     for event in events:
-        if not isinstance(event, dict) or event.get("type") not in ("joined", "left"):
+        if not isinstance(event, dict) or event.get("type") not in (
+            "joined", "left", "changed_role"
+        ):
             continue
         player_id = event.get("playerId")
         if player_id is None and isinstance(event.get("player"), dict):
@@ -147,9 +164,11 @@ def store_group_activity(cursor, guild_id, group_id, events):
 def prior_tenure(cursor, guild_id, group_id, player_id, current_joined_at):
     """Union confirmed older service intervals, avoiding double counting.
 
-    Only closed WOM join->left event pairs and closed locally observed stints
-    ending before the current in-game join are credited. Current stint itself
-    is counted by the main sync engine.
+    Only closed WOM activity intervals and closed locally observed stints
+    ending before the current in-game join are credited. A changed_role
+    event proves the account was already in the WOM group and can anchor
+    the start if a founding 'joined' event is missing. This is a lower
+    bound, not an invented join date. Current stint is counted separately.
     """
     if player_id is None or current_joined_at is None:
         return datetime.timedelta(0)
@@ -166,8 +185,12 @@ def prior_tenure(cursor, guild_id, group_id, player_id, current_joined_at):
             continue
         if event_type == "joined":
             opened = when
-        elif event_type == "left" and opened is not None:
-            if opened < when <= current_joined_at:
+        elif event_type == "changed_role" and opened is None:
+            # An earlier rank change is evidence of membership, but not
+            # proof that the member joined any earlier than that event.
+            opened = when
+        elif event_type == "left":
+            if opened is not None and opened < when <= current_joined_at:
                 intervals.append((opened, when))
             opened = None
 
@@ -263,6 +286,22 @@ async def refresh_activity_history(session, headers, cursor, guild_id, group_id)
     """, (guild_id, group_id))
     row = cursor.fetchone()
     offset, complete, last_checked_at = row if row else (0, 0, None)
+
+    cursor.execute("""
+        SELECT activity_version FROM tenure_backfill
+        WHERE guild_id = ? AND group_id = ?
+    """, (guild_id, group_id))
+    existing = cursor.fetchone()
+    if existing is not None and existing[0] < 2:
+        # Revisit older pages now that rank-change evidence is supported.
+        # Never delete previously imported membership activity or credit.
+        cursor.execute("""
+            UPDATE tenure_backfill SET offset = 0, complete = 0,
+                last_checked_at = NULL, activity_version = 2
+            WHERE guild_id = ? AND group_id = ?
+        """, (guild_id, group_id))
+        offset, complete, last_checked_at = 0, 0, None
+
     last_checked = parse_timestamp(last_checked_at)
     now = datetime.datetime.now(UTC)
     if last_checked and now - last_checked < datetime.timedelta(hours=1):
@@ -381,8 +420,10 @@ def get_tenure_diagnostics(cursor, guild_id, group_id, player_id, joined_at):
             continue
         if kind == "joined":
             opened = moment
-        elif kind == "left" and opened is not None:
-            if joined_at and opened < moment <= joined_at:
+        elif kind == "changed_role" and opened is None:
+            opened = moment
+        elif kind == "left":
+            if opened is not None and joined_at and opened < moment <= joined_at:
                 matched_previous_periods += 1
             opened = None
 

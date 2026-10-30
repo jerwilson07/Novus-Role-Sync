@@ -142,10 +142,18 @@ def store_group_activity(cursor, guild_id, group_id, events):
     """
     added = 0
     for event in events:
-        if not isinstance(event, dict) or event.get("type") not in (
-            "joined", "left", "changed_role"
+        if not isinstance(event, dict):
+            continue
+
+        # WOM explicitly identifies which group each event belongs to.
+        # Never borrow membership activity from another clan, even if
+        # that group also contains the same WOM player ID.
+        if (
+            event.get("groupId") != group_id
+            or event.get("type") not in ("joined", "left", "changed_role")
         ):
             continue
+
         player_id = event.get("playerId")
         if player_id is None and isinstance(event.get("player"), dict):
             player_id = event["player"].get("id")

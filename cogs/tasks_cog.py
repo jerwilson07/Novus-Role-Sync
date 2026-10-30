@@ -13,6 +13,7 @@ import shutil
 from common import (
     WOM_API_KEY, has_non_clan_role, forget_member_links,
     forget_non_clan_links, forget_unmatched_alt_links,
+    has_novus_member_role, is_active_novus_member_link,
 )
 
 
@@ -481,6 +482,9 @@ class TasksCog(commands.Cog):
             forget_member_links(cursor, guild.id, member.id)
             return {"status": "non_clan_ignored"}
 
+        if not has_novus_member_role(member):
+            return {"status": "not_current_member"}
+
         cursor.execute(
             """
             SELECT rsn, wom_id, dm_notifications_on
@@ -533,10 +537,9 @@ class TasksCog(commands.Cog):
             )
 
         if membership is None:
-            return {
-                "status": "primary_not_found",
-                "rsn": rsn
-            }
+            # Verified Discord access alone does not establish clan membership.
+            # Retain the link for a possible future return; don't report it.
+            return {"status": "not_current_member"}
 
         player = membership.get(
             "player",
@@ -1051,10 +1054,12 @@ class TasksCog(commands.Cog):
             )
             return
 
-        if status == "primary_not_found":
+        if status == "not_current_member":
             await interaction.followup.send(
-                f"Could not find primary RSN `{result['rsn']}` "
-                f"in the Novus WOM group.",
+                f"{member.mention} is not an active Novus member. "
+                "Both the Discord Member role and a primary RSN in the "
+                "current Novus WOM group are required. No account links "
+                "or Discord roles were changed.",
                 ephemeral=True
             )
             return
@@ -1268,17 +1273,15 @@ class TasksCog(commands.Cog):
 
         c.execute(
             """
-            SELECT discord_id
+            SELECT discord_id, rsn, wom_id
             FROM links
             WHERE guild_id = ?
             """,
             (guild.id,)
         )
 
-        discord_ids = [
-            row[0]
-            for row in c.fetchall()
-        ]
+        linked_primaries = c.fetchall()
+        memberships = group_data.get("memberships", [])
 
         checked = 0
         changed = 0
@@ -1289,18 +1292,17 @@ class TasksCog(commands.Cog):
         mapping_issues = []
         skipped_members = []
         failed_members = []
-        unfound_rsns = []
+missing array
+        for discord_id, rsn, wom_id in linked_primaries:
+            member = guild.get_member(discord_id)
 
-        for discord_id in discord_ids:
-            member = guild.get_member(
-                discord_id
-            )
-
-            if not member:
+            if member is not None and has_non_clan_role(member):
+                forget_member_links(c, guild.id, member.id)
                 continue
 
-            if has_non_clan_role(member):
-                forget_member_links(c, guild.id, member.id)
+            if not is_active_novus_member_link(
+                member, rsn, wom_id, memberships
+            ):
                 continue
 
             checked += 1
@@ -1312,13 +1314,9 @@ class TasksCog(commands.Cog):
                 c
             )
 
-            if result["status"] in ("ignored_rank", "non_clan_ignored"):
-                continue
-
-            if result["status"] == "primary_not_found":
-                unfound_rsns.append(
-                    f"- {member.mention} (`{result['rsn']}`)"
-                )
+            if result["status"] in (
+                "ignored_rank", "non_clan_ignored", "not_current_member"
+            ):
                 continue
 
             if result["status"] != "success":
@@ -1404,8 +1402,7 @@ class TasksCog(commands.Cog):
             f"Automatic tenure promotions: **{len(automatic_promotions)}**\n"
             f"Premature Discord tenure ranks: **{len(tenure_ahead)}**\n"
             f"WOM tenure mismatches: **{len(wom_mismatches)}**\n"
-            f"Missing WOM join date: **{len(missing_join_dates)}**\n"
-            f"Primary RSN not found: **{len(unfound_rsns)}**"
+            f"Missing WOM join date: **{len(missing_join_dates)}**"
         )
 
         sections = []
@@ -1450,12 +1447,6 @@ class TasksCog(commands.Cog):
             sections.append(
                 "**Failed**\n"
                 + "\n".join(failed_members)
-            )
-
-        if unfound_rsns:
-            sections.append(
-                "**Primary RSN Not Found**\n"
-                + "\n".join(unfound_rsns)
             )
 
         if sections:
@@ -1587,9 +1578,9 @@ class TasksCog(commands.Cog):
         overdue_members = []
         premature_members = []
         missing_join_date_members = []
-        skipped_primary_not_found = 0
         trial_members_excluded = 0
         checked_tenure_members = 0
+        active_primary_members = 0
 
         now = datetime.datetime.now(
             datetime.timezone.utc
@@ -1600,9 +1591,12 @@ class TasksCog(commands.Cog):
                 discord_id
             )
 
-            if member is None or has_non_clan_role(member):
+            if not is_active_novus_member_link(
+                member, stored_rsn, stored_wom_id, memberships
+            ):
                 continue
 
+            active_primary_members += 1
             membership = None
 
             if stored_wom_id:
@@ -1616,7 +1610,6 @@ class TasksCog(commands.Cog):
                 )
 
             if membership is None:
-                skipped_primary_not_found += 1
                 continue
 
             player = membership.get(
@@ -1757,7 +1750,7 @@ class TasksCog(commands.Cog):
 
         summary = (
             f"**Novus Promotion Audit**\n\n"
-            f"Linked primary accounts checked: **{len(primary_links)}**\n"
+            f"Active Novus primary accounts: **{active_primary_members}**\n"
             f"Tenure members evaluated: **{checked_tenure_members}**\n"
             f"Promotions due: **{len(overdue_members)}**\n"
             f"Premature Discord tenure ranks: **{len(premature_members)}**"
@@ -1771,11 +1764,6 @@ class TasksCog(commands.Cog):
         if missing_join_date_members:
             summary += (
                 f"\nMissing WOM join date: **{len(missing_join_date_members)}**"
-            )
-
-        if skipped_primary_not_found:
-            summary += (
-                f"\nPrimary RSN not found in WOM: **{skipped_primary_not_found}**"
             )
 
         sections = []
@@ -2130,6 +2118,9 @@ class TasksCog(commands.Cog):
         )
 
         links = c.fetchall()
+        memberships = group_data.get("memberships", [])
+        active_links_checked = 0
+        eligible_links = []
 
         automatic_promotions = []
         staff_updates = []
@@ -2141,7 +2132,6 @@ class TasksCog(commands.Cog):
         skipped_members = []
         failed_members = []
         removed_users_count = 0
-        unfound_rsns = []
 
         for discord_id, stored_rsn, stored_wom_id in links:
             member = guild.get_member(
@@ -2180,6 +2170,16 @@ class TasksCog(commands.Cog):
                 removed_users_count += 1
                 continue
 
+            if not is_active_novus_member_link(
+                member, stored_rsn, stored_wom_id, memberships
+            ):
+                # Former Novus members may retain Verified on Discord.
+                # Do not sync, flag or count them.
+                continue
+
+            active_links_checked += 1
+            eligible_links.append((discord_id, stored_rsn, stored_wom_id))
+
             result = await self.sync_one_member(
                 guild,
                 member,
@@ -2187,13 +2187,9 @@ class TasksCog(commands.Cog):
                 c
             )
 
-            if result["status"] in ("ignored_rank", "non_clan_ignored"):
-                continue
-
-            if result["status"] == "primary_not_found":
-                unfound_rsns.append(
-                    f"- {member.mention} (`{result['rsn']}`)"
-                )
+            if result["status"] in (
+                "ignored_rank", "non_clan_ignored", "not_current_member"
+            ):
                 continue
 
             if result["status"] != "success":
@@ -2386,12 +2382,12 @@ class TasksCog(commands.Cog):
 
         discord_by_wom_id = {
             wom_id: discord_id
-            for discord_id, _, wom_id in links
+            for discord_id, _, wom_id in eligible_links
             if wom_id is not None
         }
         discord_by_rsn = {
             rsn.lower(): discord_id
-            for discord_id, rsn, _ in links
+            for discord_id, rsn, _ in eligible_links
             if rsn
         }
 
@@ -2537,7 +2533,6 @@ class TasksCog(commands.Cog):
             trial_lines,
             skipped_members,
             failed_members,
-            unfound_rsns,
             removed_users_count,
         ))
 
@@ -2549,7 +2544,7 @@ class TasksCog(commands.Cog):
             )
 
             embed.description = (
-                f"Checked **{len(links)}** linked members | "
+                f"Checked **{active_links_checked}** active Novus members | "
                 f"**{len(group_data.get('memberships', []))}** WOM clan accounts\n"
                 f"Tenure roles only move upward automatically."
             )
@@ -2617,13 +2612,6 @@ class TasksCog(commands.Cog):
                     inline=False
                 )
 
-            if unfound_rsns:
-                embed.add_field(
-                    name="Primary RSN Not Found",
-                    value="\n".join(unfound_rsns)[:1024],
-                    inline=False
-                )
-
             if removed_users_count:
                 embed.add_field(
                     name="Users Removed",
@@ -2664,7 +2652,7 @@ class TasksCog(commands.Cog):
         return (
             len(automatic_promotions) + len(staff_updates) + len(duplicate_cleanups),
             len(skipped_members) + len(failed_members),
-            len(links)
+            active_links_checked
         )
 
     # ========================================================

@@ -14,10 +14,11 @@ from common import (
     WOM_API_KEY, has_non_clan_role, forget_member_links,
     forget_non_clan_links, forget_unmatched_alt_links,
     has_novus_member_role, is_active_novus_member_link,
+    find_primary_wom_membership,
 )
 from tenure_history import (
     cumulative_effective_join, record_roster, refresh_activity_history,
-    set_manual_previous_tenure, get_manual_previous_tenure,
+    set_manual_previous_tenure, prior_tenure,
 )
 
 
@@ -911,6 +912,122 @@ class TasksCog(commands.Cog):
             "missing_alts": missing_alts,
             "user_dm_on": user_dm_on,
         }
+
+    # ========================================================
+    # /TENURECREDIT
+    # ========================================================
+
+    @app_commands.command(
+        name="tenurecredit",
+        description="Set verified days previously spent in Novus before a rejoin."
+    )
+    @app_commands.describe(
+        member="Returning Novus member to credit.",
+        previous_days="Total verified previous Novus days, excluding this stint. 0 clears."
+    )
+    async def tenurecredit(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        previous_days: app_commands.Range[int, 0, 3650]
+    ):
+        if not any(
+            role.id in TENURE_CREDIT_ROLE_IDS
+            for role in interaction.user.roles
+        ):
+            await interaction.response.send_message(
+                "Only Novus Council or Moderators can set historical tenure.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        if guild is None or not has_novus_member_role(member):
+            await interaction.followup.send(
+                "This requires an active Discord Novus Member.",
+                ephemeral=True
+            )
+            return
+
+        conn = sqlite3.connect("wom_multi.db")
+        try:
+            c = conn.cursor()
+            c.execute(
+                "SELECT group_id FROM guild_configs WHERE guild_id = ?",
+                (guild.id,)
+            )
+            config = c.fetchone()
+            group_id = config[0] if config else None
+            c.execute(
+                "SELECT rsn, wom_id FROM links WHERE guild_id = ? AND discord_id = ?",
+                (guild.id, member.id)
+            )
+            link = c.fetchone()
+
+            if not group_id or not link:
+                await interaction.followup.send(
+                    "This member must have a linked primary RSN and a configured WOM group.",
+                    ephemeral=True
+                )
+                return
+
+            group_data, status = await self.get_wom_group(group_id)
+            if not isinstance(group_data, dict):
+                await interaction.followup.send(
+                    "WOM is unavailable. No historical credit was changed.",
+                    ephemeral=True
+                )
+                return
+
+            memberships = group_data.get("memberships", [])
+            if not is_active_novus_member_link(
+                member, link[0], link[1], memberships
+            ):
+                await interaction.followup.send(
+                    "The linked primary account is not in the current Novus WOM group.",
+                    ephemeral=True
+                )
+                return
+
+            current_membership = find_primary_wom_membership(
+                link[0], link[1], memberships
+            )
+            player_id = current_membership["player"]["id"]
+            joined_at = get_membership_joined_at(current_membership)
+            if joined_at is None:
+                await interaction.followup.send(
+                    "WOM has no current clan join date. No credit was changed.",
+                    ephemeral=True
+                )
+                return
+
+            # Update our group events before computing the automatic credit.
+            await self.prepare_tenure_history(c, guild, group_data)
+            recorded = prior_tenure(
+                c, guild.id, group_id, player_id, joined_at
+            )
+            set_manual_previous_tenure(
+                c, guild.id, group_id, player_id, previous_days
+            )
+            effective, previous = cumulative_effective_join(
+                c, guild.id, group_id, player_id, joined_at
+            )
+            conn.commit()
+
+            message = (
+                f"Historical service updated for {member.mention} "
+                f"(`{current_membership['player']['username']}`).\n"
+                f"Manual previous service: **{previous_days} days**\n"
+                f"Recorded WOM previous service: **{recorded.days} days**\n"
+                f"Previous service credited (whichever is greater): "
+                f"**{previous.total_seconds() / 86400:.1f} days**\n"
+                "The current stint is counted separately. "
+                "Use `/syncuser` to recalculate their rank now."
+            )
+            await interaction.followup.send(message, ephemeral=True)
+        finally:
+            conn.close()
 
     # ========================================================
     # /SYNCUSER

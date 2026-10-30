@@ -16,6 +16,7 @@ from common import (
 from tenure_history import cumulative_effective_join
 from cogs.tasks_cog import (
     TENURE_RANK_ORDER, tenure_eligible_at, get_membership_joined_at,
+    NOVUS_TRIAL_WOM_RANKS,
 )
 from typing import List
 
@@ -127,6 +128,40 @@ def format_personal_tenure(rank, effective_joined_at, now=None):
         header + f" | {next_rank.title()}: {days_left} days"
         f" ({next_eligible.strftime('%b %d')})"
     )
+
+
+def find_unmatched_nontrial_wom_accounts(
+    memberships, linked_wom_ids, linked_names
+):
+    """Only full members lacking a Discord link are actionable audit issues.
+
+    WOM trial members are handled by /trials, not /audit, whether or not
+    they already have a Discord Member role.
+    """
+    unmatched = []
+
+    for membership in memberships:
+        if not isinstance(membership, dict):
+            continue
+        wom_role = str(membership.get("role") or "").strip().casefold()
+        if wom_role in NOVUS_TRIAL_WOM_RANKS:
+            continue
+
+        player = membership.get("player")
+        if not isinstance(player, dict):
+            continue
+        wom_id = player.get("id")
+        username = player.get("username")
+        if not isinstance(username, str) or not username.strip():
+            continue
+
+        if (
+            wom_id not in linked_wom_ids
+            and username.casefold() not in linked_names
+        ):
+            unmatched.append(username)
+
+    return sorted(unmatched, key=str.casefold)
 
 
 # ============================================================
@@ -1540,32 +1575,8 @@ class ConfigCog(commands.Cog):
         # WOM ACCOUNTS NOT ASSOCIATED WITH ANY DISCORD LINK
         # ----------------------------------------------------
 
-        unmatched_wom = []
-
-        for membership in memberships:
-            player = membership.get(
-                "player",
-                {}
-            )
-
-            wom_id = player.get(
-                "id"
-            )
-            username = player.get(
-                "username",
-                ""
-            )
-
-            if (
-                wom_id not in linked_wom_ids
-                and username.lower() not in linked_names
-            ):
-                unmatched_wom.append(
-                    username
-                )
-
-        unmatched_wom.sort(
-            key=str.lower
+        unmatched_wom = find_unmatched_nontrial_wom_accounts(
+            memberships, linked_wom_ids, linked_names
         )
 
         # Only show the caller's own tenure, never a server-wide tenure dump.

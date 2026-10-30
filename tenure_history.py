@@ -56,6 +56,7 @@ def initialize_tenure_tables(cursor):
             group_id INTEGER NOT NULL,
             offset INTEGER NOT NULL DEFAULT 0,
             complete INTEGER NOT NULL DEFAULT 0,
+            last_checked_at TEXT,
             PRIMARY KEY (guild_id, group_id)
         )
     """)
@@ -197,11 +198,15 @@ async def refresh_activity_history(session, headers, cursor, guild_id, group_id)
     one page to accommodate new activity arriving while backfilling.
     """
     cursor.execute("""
-        SELECT offset, complete FROM tenure_backfill
+        SELECT offset, complete, last_checked_at FROM tenure_backfill
         WHERE guild_id = ? AND group_id = ?
     """, (guild_id, group_id))
     row = cursor.fetchone()
-    offset, complete = row if row else (0, 0)
+    offset, complete, last_checked_at = row if row else (0, 0, None)
+    last_checked = parse_timestamp(last_checked_at)
+    now = datetime.datetime.now(UTC)
+    if last_checked and (now - last_checked) < datetime.timedelta(hours=6):
+        return 0
 
     # Always collect the newest events, then progressively older events.
     page_offsets = [0]
@@ -215,6 +220,7 @@ async def refresh_activity_history(session, headers, cursor, guild_id, group_id)
     total = 0
     newest_backfill_offset = offset
     reached_end = bool(complete)
+    fetched_successfully = False
 
     for page in dict.fromkeys(page_offsets):
         try:
@@ -233,6 +239,7 @@ async def refresh_activity_history(session, headers, cursor, guild_id, group_id)
 
         if not isinstance(events, list):
             break
+        fetched_successfully = True
         total += store_group_activity(cursor, guild_id, group_id, events)
         if not complete:
             newest_backfill_offset = max(newest_backfill_offset, page + len(events))
@@ -241,10 +248,15 @@ async def refresh_activity_history(session, headers, cursor, guild_id, group_id)
             break
 
     cursor.execute("""
-        INSERT INTO tenure_backfill (guild_id, group_id, offset, complete)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO tenure_backfill
+            (guild_id, group_id, offset, complete, last_checked_at)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(guild_id, group_id) DO UPDATE SET
             offset = MAX(tenure_backfill.offset, excluded.offset),
-            complete = MAX(tenure_backfill.complete, excluded.complete)
-    """, (guild_id, group_id, newest_backfill_offset, int(reached_end)))
+            complete = MAX(tenure_backfill.complete, excluded.complete),
+            last_checked_at = excluded.last_checked_at
+    """, (
+        guild_id, group_id, newest_backfill_offset, int(reached_end),
+        iso(now) if fetched_successfully else last_checked_at
+    ))
     return total

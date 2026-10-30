@@ -6,7 +6,8 @@ import logging
 import re
 
 from common import (
-    sanitize_rsn, WOM_API_KEY, has_non_clan_role, forget_non_clan_links
+    sanitize_rsn, WOM_API_KEY, has_non_clan_role,
+    forget_non_clan_links, forget_unmatched_alt_links
 )
 from typing import List
 
@@ -850,6 +851,9 @@ class ConfigCog(commands.Cog):
             []
         )
 
+        forget_unmatched_alt_links(c, guild.id, memberships)
+        conn.commit()
+
         wom_by_username = {
             membership["player"]["username"].lower():
                 membership
@@ -912,7 +916,6 @@ class ConfigCog(commands.Cog):
         linked_members = []
         already_linked = []
         unmatched_discord_members = []
-        partial_alt_matches = []
 
         for member in guild.members:
 
@@ -1087,14 +1090,6 @@ class ConfigCog(commands.Cog):
                 }
             )
 
-            if missing_alts:
-                partial_alt_matches.append(
-                    {
-                        "member": member,
-                        "missing": missing_alts,
-                    }
-                )
-
         conn.commit()
 
         # Re-read all links after this run so the reverse WOM audit
@@ -1180,12 +1175,6 @@ class ConfigCog(commands.Cog):
             f"**{len(unmatched_wom_accounts)}**"
         )
 
-        if partial_alt_matches:
-            response += (
-                f"\nMembers with an unmatched alt: "
-                f"**{len(partial_alt_matches)}**"
-            )
-
         if linked_members:
             examples = []
 
@@ -1235,23 +1224,6 @@ class ConfigCog(commands.Cog):
                     f"\n...and "
                     f"{len(unmatched_wom_accounts) - 30} more."
                 )
-
-        if partial_alt_matches:
-            partial_lines = []
-
-            for entry in partial_alt_matches[:10]:
-                partial_lines.append(
-                    f"- {entry['member'].mention}: "
-                    + ", ".join(
-                        f"`{name}`"
-                        for name in entry["missing"]
-                    )
-                )
-
-            response += (
-                "\n\n**Unmatched Alt Names**\n"
-                + "\n".join(partial_lines)
-            )
 
         if len(response) > 1950:
             response = (
@@ -1372,6 +1344,15 @@ class ConfigCog(commands.Cog):
             []
         )
 
+        forget_unmatched_alt_links(c, guild.id, memberships)
+        conn.commit()
+
+        c.execute(
+            "SELECT discord_id, rsn, wom_id FROM alt_links WHERE guild_id = ?",
+            (guild.id,),
+        )
+        alt_links = c.fetchall()
+
         wom_by_id = {
             membership["player"]["id"]: membership
             for membership in memberships
@@ -1413,7 +1394,6 @@ class ConfigCog(commands.Cog):
         linked_names = set()
 
         broken_primaries = []
-        missing_alts = []
 
         for discord_id, rsn, wom_id in primary_links:
             membership = None
@@ -1470,21 +1450,6 @@ class ConfigCog(commands.Cog):
                 linked_names.add(
                     membership["player"]["username"].lower()
                 )
-            else:
-                member = guild.get_member(
-                    discord_id
-                )
-
-                member_text = (
-                    member.mention
-                    if member
-                    else f"<@{discord_id}>"
-                )
-
-                missing_alts.append(
-                    f"- {member_text}: `{rsn}`"
-                )
-
         # ----------------------------------------------------
         # WOM ACCOUNTS NOT ASSOCIATED WITH ANY DISCORD LINK
         # ----------------------------------------------------
@@ -1534,9 +1499,7 @@ class ConfigCog(commands.Cog):
             f"Unmatched WOM accounts: "
             f"**{len(unmatched_wom)}**\n"
             f"Broken primary links: "
-            f"**{len(broken_primaries)}**\n"
-            f"Missing linked alts: "
-            f"**{len(missing_alts)}**"
+            f"**{len(broken_primaries)}**"
         )
 
         sections = []
@@ -1555,14 +1518,6 @@ class ConfigCog(commands.Cog):
                 "**Broken Primary Links**\n"
                 + "\n".join(
                     broken_primaries
-                )
-            )
-
-        if missing_alts:
-            sections.append(
-                "**Missing Linked Alts**\n"
-                + "\n".join(
-                    missing_alts
                 )
             )
 
@@ -1752,6 +1707,24 @@ class ConfigCog(commands.Cog):
             for membership in memberships
         }
 
+        # Current WOM membership is required for an alt to remain tracked.
+        conn = sqlite3.connect("wom_multi.db")
+        try:
+            c = conn.cursor()
+            forget_unmatched_alt_links(c, guild.id, memberships)
+            conn.commit()
+            c.execute(
+                """
+                SELECT rsn, wom_id FROM alt_links
+                WHERE guild_id = ? AND discord_id = ?
+                ORDER BY rsn COLLATE NOCASE
+                """,
+                (guild.id, member.id),
+            )
+            alt_rows = c.fetchall()
+        finally:
+            conn.close()
+
         primary_membership = None
 
         if primary_wom_id:
@@ -1811,18 +1784,6 @@ class ConfigCog(commands.Cog):
                     f"- `{current_alt_rsn}` "
                     f"(WOM ID: `{current_alt_wom_id}`) - Verified"
                 )
-            else:
-                wom_id_text = (
-                    f"`{alt_wom_id}`"
-                    if alt_wom_id is not None
-                    else "Not set"
-                )
-
-                alt_lines.append(
-                    f"- `{alt_rsn}` "
-                    f"(WOM ID: {wom_id_text}) - Not found in current WOM group"
-                )
-
         primary_wom_id_text = (
             f"`{current_primary_wom_id}`"
             if current_primary_wom_id is not None

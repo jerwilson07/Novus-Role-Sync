@@ -6,8 +6,8 @@ Bot Website: https://womrolesync.app/
 
 ## Features
 
-*   **Automatic Role Synchronization:** Syncs roles every hour, fetching the latest data from the WOM API.
-*   **Slash Command Configuration:** Simple server setup with intuitive commands.
+*   **Automatic Role Synchronization:** Syncs current Novus members daily using the WOM API. Historical clan activity is refreshed separately every two hours.
+*   **Focused Discord Commands:** Only the four operational commands are visible: `/audit`, `/syncall`, `/autolink`, and `/trials`.
 *   **Nickname Enforcement:** Option to enforce member nicknames to match their RuneScape Name (RSN).
 *   **DM Notifications:** Users can opt-in to receive direct messages when their roles are changed.
 *   **Inactivity Reminders:** Admins can be prompted to re-sync their WOM group if it becomes inactive.
@@ -65,24 +65,28 @@ python3 main.py
     sudo docker-compose down
     ```
 
-## Available Commands
+## Available Discord Commands
 
-Server administrators can configure the bot using the following slash commands:
+The bot intentionally exposes just four commands for Novus staff:
 
-*   `/groupid`: Sets the WOM Group ID for the server.
-*   `/linkrole`: Maps a WOM group role to a Discord role.
-*   `/unlinkrole`: Removes a role mapping.
-*   `/linkuser`: Links a Discord user to their RuneScape Name (RSN).
-*   `/nickname`: Toggles enforcement of member nicknames to match their RSN.
-*   `/notifyplayers`: Toggles DM notifications for role changes for the whole server.
-*   `/reminder`: Configures inactivity reminders.
+* `/audit`: Review current Novus WOM accounts and eligible linked Discord members.
+* `/syncall`: Sync active Novus members immediately.
+* `/autolink`: Match eligible Discord Member-role accounts to the Novus WOM group.
+* `/trials`: Review current in-game Trial Members and trial deadlines.
 
-General commands:
+Historical tenure runs automatically, without a staff command. The bot
+periodically imports WOM group join and leave activity in small, API-friendly
+batches and accumulates separate periods of confirmed Novus membership. Time
+spent outside Novus is not credited. The daily rank sync uses the recovered
+tenure to grant due promotions while never automatically demoting existing
+tenure ranks.
 
-*   `/help`: Displays a setup guide.
-*   `/info`: Shows the server's configuration.
-*   `/playerlist`: Displays all linked users.
-*   `/notifyme`: Toggles personal DM notifications.
+Historical coverage depends on the events WOM actually recorded. The bot
+preserves observed periods going forward even if older activity is incomplete.
+Group membership timestamps can differ slightly from in-game clan dates.
+
+The original configuration and diagnostic command implementations remain in
+the source repository but are not registered as Discord slash commands.
 
 ## License
 

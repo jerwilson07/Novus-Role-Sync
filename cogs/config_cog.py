@@ -4,11 +4,18 @@ from discord.ext import commands
 import sqlite3
 import logging
 import re
+import datetime
+import math
 
 from common import (
     sanitize_rsn, WOM_API_KEY, has_non_clan_role,
     forget_non_clan_links, forget_unmatched_alt_links,
     has_novus_member_role, is_active_novus_member_link,
+    find_primary_wom_membership,
+)
+from tenure_history import cumulative_effective_join
+from cogs.tasks_cog import (
+    TENURE_RANK_ORDER, tenure_eligible_at, get_membership_joined_at,
 )
 from typing import List
 
@@ -57,6 +64,69 @@ def build_wom_headers():
         headers["x-api-key"] = WOM_API_KEY
 
     return headers
+
+
+def format_personal_tenure(rank, effective_joined_at, now=None):
+    """One compact /audit line, using exactly the sync's tenure thresholds.
+
+    Do not offer a countdown if the recorded service cannot even justify
+    the member's existing rank. WOM may have lost an older membership stint.
+    """
+    if not rank:
+        return None
+
+    if effective_joined_at is None:
+        return f"**Your tenure:** {rank.title()} | Join date unavailable"
+
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if effective_joined_at.tzinfo is None:
+        effective_joined_at = effective_joined_at.replace(
+            tzinfo=datetime.timezone.utc
+        )
+    effective_joined_at = effective_joined_at.astimezone(
+        datetime.timezone.utc
+    )
+    service_days = max(
+        0, (now - effective_joined_at).total_seconds() / 86400
+    )
+
+    ordered_ranks = sorted(
+        TENURE_RANK_ORDER, key=TENURE_RANK_ORDER.get
+    )
+    if rank not in ordered_ranks:
+        return None
+
+    header = f"**Your tenure:** {rank.title()} | {service_days:.1f} days recorded"
+    index = ordered_ranks.index(rank)
+    if index == len(ordered_ranks) - 1:
+        return header + " | Highest tenure rank"
+
+    next_rank = ordered_ranks[index + 1]
+    current_eligible = tenure_eligible_at(
+        effective_joined_at, rank
+    )
+
+    if current_eligible and current_eligible > now:
+        # Insufficient documented history is not proof of premature rank.
+        return (
+            header + f" | {next_rank.title()}: older service not verified"
+        )
+
+    next_eligible = tenure_eligible_at(
+        effective_joined_at, next_rank
+    )
+    if next_eligible is None:
+        return header
+
+    days_left = max(
+        0, math.ceil((next_eligible - now).total_seconds() / 86400)
+    )
+    if days_left == 0:
+        return header + f" | {next_rank.title()}: eligible now"
+    return (
+        header + f" | {next_rank.title()}: {days_left} days"
+        f" ({next_eligible.strftime('%b %d')})"
+    )
 
 
 # ============================================================
@@ -1498,6 +1568,54 @@ class ConfigCog(commands.Cog):
             key=str.lower
         )
 
+        # Only show the caller's own tenure, never a server-wide tenure dump.
+        personal_tenure = None
+        own_link = next(
+            (
+                (rsn, wom_id)
+                for discord_id, rsn, wom_id in primary_links
+                if discord_id == interaction.user.id
+            ),
+            None
+        )
+
+        if own_link:
+            own_membership = find_primary_wom_membership(
+                own_link[0], own_link[1], memberships
+            )
+            if own_membership:
+                player_id = own_membership["player"].get("id")
+                joined_at = get_membership_joined_at(own_membership)
+                effective_joined_at, _ = cumulative_effective_join(
+                    c, guild.id, group_id, player_id, joined_at
+                )
+
+                c.execute(
+                    """
+                    SELECT wom_role, discord_role_id
+                    FROM role_mappings
+                    WHERE guild_id = ?
+                    """,
+                    (guild.id,)
+                )
+                tenure_by_role_id = {
+                    discord_id: wom_role.lower()
+                    for wom_role, discord_id in c.fetchall()
+                    if wom_role.lower() in TENURE_RANK_ORDER
+                }
+                own_ranks = [
+                    tenure_by_role_id[role.id]
+                    for role in interaction.user.roles
+                    if role.id in tenure_by_role_id
+                ]
+                if own_ranks:
+                    highest_rank = max(
+                        own_ranks, key=TENURE_RANK_ORDER.get
+                    )
+                    personal_tenure = format_personal_tenure(
+                        highest_rank, effective_joined_at
+                    )
+
         conn.close()
 
         # ----------------------------------------------------
@@ -1515,6 +1633,9 @@ class ConfigCog(commands.Cog):
             f"Unmatched WOM accounts: "
             f"**{len(unmatched_wom)}**"
         )
+
+        if personal_tenure:
+            summary += "\n\n" + personal_tenure
 
         sections = []
 

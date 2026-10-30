@@ -281,6 +281,7 @@ class TasksCog(commands.Cog):
         self.bot = bot
 
         self.sync_roles_loop.start()
+        self.history_backfill_loop.start()
         self.cleanup_inactive_guilds.start()
         self.backup_database.start()
         self.update_stats.start()
@@ -288,6 +289,7 @@ class TasksCog(commands.Cog):
 
     def cog_unload(self):
         self.sync_roles_loop.cancel()
+        self.history_backfill_loop.cancel()
         self.cleanup_inactive_guilds.cancel()
         self.backup_database.cancel()
         self.update_stats.cancel()
@@ -2856,6 +2858,61 @@ class TasksCog(commands.Cog):
             len(skipped_members) + len(failed_members),
             active_links_checked
         )
+
+    # ========================================================
+    # AUTOMATIC HISTORICAL TENURE BACKFILL
+    # ========================================================
+
+    @tasks.loop(hours=2)
+    async def history_backfill_loop(self):
+        """Recover older WOM membership periods without staff commands.
+
+        This loop only saves WOM history. Normal daily role sync applies any
+        newly recovered service to promotions, preserving the rank ladder.
+        """
+        await self.bot.wait_until_ready()
+
+        for guild in self.bot.guilds:
+            conn = sqlite3.connect("wom_multi.db")
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT group_id FROM guild_configs WHERE guild_id = ?",
+                    (guild.id,)
+                )
+                row = cursor.fetchone()
+                group_id = row[0] if row else None
+            finally:
+                conn.close()
+
+            if not group_id:
+                continue
+
+            group_data, api_status = await self.get_wom_group(group_id)
+            if not isinstance(group_data, dict):
+                logger.warning(
+                    "Skipped tenure history refresh for guild %s: WOM status %s",
+                    guild.id, api_status
+                )
+                continue
+
+            conn = sqlite3.connect("wom_multi.db")
+            try:
+                cursor = conn.cursor()
+                await self.prepare_tenure_history(
+                    cursor, guild, group_data
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                logger.exception(
+                    "Historical tenure refresh failed for guild %s", guild.id
+                )
+            finally:
+                conn.close()
+
+            # Space API requests when multiple guilds use this bot.
+            await asyncio.sleep(3)
 
     # ========================================================
     # DAILY SYNC LOOP

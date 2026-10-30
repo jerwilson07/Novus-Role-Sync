@@ -5,6 +5,31 @@ import sqlite3
 import datetime
 from typing import List
 
+from common import (
+    WOM_API_KEY, has_novus_member_role, is_active_novus_member_link
+)
+
+
+async def get_current_wom_memberships(bot, group_id):
+    """Return current WOM group memberships or None on an API error."""
+    headers = {"User-Agent": "NovusRoleSync/1.0"}
+    if WOM_API_KEY:
+        headers["x-api-key"] = WOM_API_KEY
+    try:
+        async with bot.http_session.get(
+            f"https://api.wiseoldman.net/v2/groups/{group_id}",
+            headers=headers, timeout=30
+        ) as response:
+            if response.status != 200:
+                return None
+            data = await response.json()
+        if not isinstance(data, dict) or not isinstance(data.get("memberships"), list):
+            return None
+        return data["memberships"]
+    except Exception:
+        return None
+
+
 
 # Novus staff command access
 COUNCIL_ROLE_ID = 1532830356875513906
@@ -103,12 +128,38 @@ class InfoView(discord.ui.View):
 
         group_id = config[0]
         
-        c.execute("SELECT discord_id, rsn FROM links WHERE guild_id = ?", (interaction.guild_id,))
-        links = c.fetchall()
+        c.execute(
+            "SELECT discord_id, rsn, wom_id FROM links WHERE guild_id = ?",
+            (interaction.guild_id,)
+        )
+        stored_links = c.fetchall()
         conn.close()
 
+        memberships = await get_current_wom_memberships(
+            interaction.client, group_id
+        )
+        if memberships is None:
+            await interaction.followup.send(
+                "Could not verify current Novus membership with WOM. "
+                "No cached member list was shown.", ephemeral=True
+            )
+            return
+
+        links = [
+            (discord_id, rsn)
+            for discord_id, rsn, wom_id in stored_links
+            if is_active_novus_member_link(
+                interaction.guild.get_member(discord_id),
+                rsn, wom_id, memberships
+            )
+        ]
+
         if not links:
-            await interaction.followup.send("No players have been linked in this server yet. Use `/linkuser` to add one.", ephemeral=True)
+            await interaction.followup.send(
+                "No actively linked Novus clan members were found. "
+                "Members must appear in WOM and have the Discord Member role.",
+                ephemeral=True
+            )
             return
 
         view = PlayerListView(interaction, links, interaction.guild.name, group_id)
@@ -153,16 +204,64 @@ class GeneralCog(commands.Cog):
             )
             return
 
-        conn = sqlite3.connect('wom_multi.db')
-        c = conn.cursor()
-        c.execute("SELECT rsn FROM links WHERE guild_id = ? AND discord_id = ?", (interaction.guild_id, user.id))
-        result = c.fetchone()
-        conn.close()
+        if not has_novus_member_role(user):
+            await interaction.response.send_message(
+                f"{user.mention} is not an active Novus member. "
+                "The Discord Member role is required.",
+                ephemeral=True
+            )
+            return
 
-        if result:
-            await interaction.response.send_message(f"✅ {user.mention} is linked to the RSN: **{result[0]}**", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"🤔 {user.mention} is not linked to any RSN in this server.", ephemeral=True)
+        conn = sqlite3.connect("wom_multi.db")
+        try:
+            c = conn.cursor()
+            c.execute(
+                "SELECT group_id FROM guild_configs WHERE guild_id = ?",
+                (interaction.guild_id,)
+            )
+            row = c.fetchone()
+            group_id = row[0] if row else None
+            c.execute(
+                "SELECT rsn, wom_id FROM links WHERE guild_id = ? AND discord_id = ?",
+                (interaction.guild_id, user.id)
+            )
+            link = c.fetchone()
+        finally:
+            conn.close()
+
+        if not group_id:
+            await interaction.response.send_message(
+                "No WOM group is configured.", ephemeral=True
+            )
+            return
+        if not link:
+            await interaction.response.send_message(
+                f"{user.mention} does not have an active Novus account link.",
+                ephemeral=True
+            )
+            return
+
+        memberships = await get_current_wom_memberships(
+            interaction.client, group_id
+        )
+        if memberships is None:
+            await interaction.response.send_message(
+                "Could not verify the current Novus WOM roster.",
+                ephemeral=True
+            )
+            return
+        if not is_active_novus_member_link(user, link[0], link[1], memberships):
+            await interaction.response.send_message(
+                f"{user.mention} is not in the current Novus WOM group "
+                "and is excluded from Novus member reports.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            f"{user.mention} is linked to the Novus RSN: **{link[0]}**",
+            ephemeral=True
+        )
 
     @app_commands.command(name="info", description="View configuration and sync status")
     async def info(self, interaction: discord.Interaction):

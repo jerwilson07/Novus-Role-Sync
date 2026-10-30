@@ -7,7 +7,8 @@ import re
 
 from common import (
     sanitize_rsn, WOM_API_KEY, has_non_clan_role,
-    forget_non_clan_links, forget_unmatched_alt_links
+    forget_non_clan_links, forget_unmatched_alt_links,
+    has_novus_member_role, is_active_novus_member_link,
 )
 from typing import List
 
@@ -603,6 +604,14 @@ class ConfigCog(commands.Cog):
             )
             return
 
+        if not has_novus_member_role(user):
+            await interaction.response.send_message(
+                f"{user.mention} doesn't have the Novus Discord Member role. "
+                "Verified alone does not qualify for clan linking.",
+                ephemeral=True
+            )
+            return
+
         conn = sqlite3.connect(
             "wom_multi.db"
         )
@@ -871,6 +880,14 @@ class ConfigCog(commands.Cog):
         )
 
         existing_rows = c.fetchall()
+        active_existing_rows = [
+            (discord_id, rsn, wom_id)
+            for discord_id, rsn, wom_id in existing_rows
+            if is_active_novus_member_link(
+                guild.get_member(discord_id), rsn, wom_id, memberships
+            )
+        ]
+        active_existing_ids = {row[0] for row in active_existing_rows}
 
         existing_links = {
             row[0]
@@ -880,26 +897,30 @@ class ConfigCog(commands.Cog):
         # Track every WOM account already associated with a Discord user.
         claimed_wom_ids = {
             wom_id
-            for _, _, wom_id in existing_rows
+            for _, _, wom_id in active_existing_rows
             if wom_id is not None
         }
 
         claimed_wom_names = {
             rsn.lower()
-            for _, rsn, _ in existing_rows
+            for _, rsn, _ in active_existing_rows
             if rsn
         }
 
         c.execute(
             """
-            SELECT rsn, wom_id
+            SELECT discord_id, rsn, wom_id
             FROM alt_links
             WHERE guild_id = ?
             """,
             (guild.id,)
         )
 
-        existing_alt_rows = c.fetchall()
+        existing_alt_rows = [
+            (rsn, wom_id)
+            for discord_id, rsn, wom_id in c.fetchall()
+            if discord_id in active_existing_ids
+        ]
 
         claimed_wom_ids.update(
             wom_id
@@ -919,13 +940,13 @@ class ConfigCog(commands.Cog):
 
         for member in guild.members:
 
-            if member.bot or has_non_clan_role(member):
+            if member.bot or not has_novus_member_role(member):
                 continue
 
             if member.id in existing_links:
-                already_linked.append(
-                    member
-                )
+                if member.id in active_existing_ids:
+                    already_linked.append(member)
+                # Retain old links without counting former members.
                 continue
 
             display_name = member.display_name
@@ -1377,7 +1398,14 @@ class ConfigCog(commands.Cog):
             (guild.id,)
         )
 
-        primary_links = c.fetchall()
+        primary_links = [
+            (discord_id, rsn, wom_id)
+            for discord_id, rsn, wom_id in c.fetchall()
+            if is_active_novus_member_link(
+                guild.get_member(discord_id), rsn, wom_id, memberships
+            )
+        ]
+        active_discord_ids = {row[0] for row in primary_links}
 
         c.execute(
             """
@@ -1388,12 +1416,15 @@ class ConfigCog(commands.Cog):
             (guild.id,)
         )
 
-        alt_links = c.fetchall()
+        alt_links = [
+            (discord_id, rsn, wom_id)
+            for discord_id, rsn, wom_id in c.fetchall()
+            if discord_id in active_discord_ids
+        ]
 
         linked_wom_ids = set()
         linked_names = set()
 
-        broken_primaries = []
 
         for discord_id, rsn, wom_id in primary_links:
             membership = None
@@ -1415,21 +1446,6 @@ class ConfigCog(commands.Cog):
                 linked_names.add(
                     membership["player"]["username"].lower()
                 )
-            else:
-                member = guild.get_member(
-                    discord_id
-                )
-
-                member_text = (
-                    member.mention
-                    if member
-                    else f"<@{discord_id}>"
-                )
-
-                broken_primaries.append(
-                    f"- {member_text}: `{rsn}`"
-                )
-
         for discord_id, rsn, wom_id in alt_links:
             membership = None
 
@@ -1497,9 +1513,7 @@ class ConfigCog(commands.Cog):
             f"Linked alt accounts: "
             f"**{len(alt_links)}**\n"
             f"Unmatched WOM accounts: "
-            f"**{len(unmatched_wom)}**\n"
-            f"Broken primary links: "
-            f"**{len(broken_primaries)}**"
+            f"**{len(unmatched_wom)}**"
         )
 
         sections = []
@@ -1510,14 +1524,6 @@ class ConfigCog(commands.Cog):
                 + "\n".join(
                     f"- `{name}`"
                     for name in unmatched_wom
-                )
-            )
-
-        if broken_primaries:
-            sections.append(
-                "**Broken Primary Links**\n"
-                + "\n".join(
-                    broken_primaries
                 )
             )
 
@@ -1582,6 +1588,14 @@ class ConfigCog(commands.Cog):
             await interaction.followup.send(
                 "This command can only be used "
                 "inside the Novus server.",
+                ephemeral=True
+            )
+            return
+
+        if not has_novus_member_role(member):
+            await interaction.followup.send(
+                f"{member.mention} isn't an active Novus clan member "
+                "(Discord Member role required).",
                 ephemeral=True
             )
             return
@@ -1695,6 +1709,16 @@ class ConfigCog(commands.Cog):
             "memberships",
             []
         )
+
+        if not is_active_novus_member_link(
+            member, primary_rsn, primary_wom_id, memberships
+        ):
+            await interaction.followup.send(
+                f"{member.mention} isn't in the current Novus WOM group "
+                "and is excluded from clan reports.",
+                ephemeral=True
+            )
+            return
 
         wom_by_id = {
             membership["player"]["id"]: membership
@@ -1964,7 +1988,7 @@ class ConfigCog(commands.Cog):
 
         c.execute(
             """
-            SELECT rsn, wom_id
+            SELECT discord_id, rsn, wom_id
             FROM links
             WHERE guild_id = ?
             """,
@@ -1974,7 +1998,7 @@ class ConfigCog(commands.Cog):
 
         c.execute(
             """
-            SELECT rsn, wom_id
+            SELECT discord_id, rsn, wom_id
             FROM alt_links
             WHERE guild_id = ?
             """,
@@ -1983,18 +2007,6 @@ class ConfigCog(commands.Cog):
         alt_links = c.fetchall()
 
         conn.close()
-
-        linked_ids = {
-            wom_id
-            for _, wom_id in primary_links + alt_links
-            if wom_id is not None
-        }
-
-        linked_names = {
-            rsn.lower()
-            for rsn, _ in primary_links + alt_links
-            if rsn
-        }
 
         url = (
             f"https://api.wiseoldman.net/v2/groups/"
@@ -2033,6 +2045,25 @@ class ConfigCog(commands.Cog):
             "memberships",
             []
         )
+
+        active_discord_ids = {
+            discord_id
+            for discord_id, rsn, wom_id in primary_links
+            if is_active_novus_member_link(
+                guild.get_member(discord_id), rsn, wom_id, memberships
+            )
+        }
+        active_links = [
+            (rsn, wom_id)
+            for discord_id, rsn, wom_id in primary_links + alt_links
+            if discord_id in active_discord_ids
+        ]
+        linked_ids = {
+            wom_id for _, wom_id in active_links if wom_id is not None
+        }
+        linked_names = {
+            rsn.lower() for rsn, _ in active_links if rsn
+        }
 
         unmatched_accounts = []
 

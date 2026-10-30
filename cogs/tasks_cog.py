@@ -18,7 +18,7 @@ from common import (
 )
 from tenure_history import (
     cumulative_effective_join, record_roster, refresh_activity_history,
-    set_manual_previous_tenure, prior_tenure,
+    set_manual_previous_tenure, prior_tenure, get_tenure_diagnostics,
 )
 
 
@@ -912,6 +912,146 @@ class TasksCog(commands.Cog):
             "missing_alts": missing_alts,
             "user_dm_on": user_dm_on,
         }
+
+    # ========================================================
+    # /TENUREHISTORY
+    # ========================================================
+
+    @app_commands.command(
+        name="tenurehistory",
+        description="Inspect WOM join/leave events and credited tenure for a Novus member."
+    )
+    @app_commands.describe(member="Active Novus member to inspect.")
+    async def tenurehistory(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member
+    ):
+        if not has_novus_command_permission(interaction.user):
+            await interaction.response.send_message(
+                "Only Novus staff can inspect historical tenure.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        if guild is None or not has_novus_member_role(member):
+            await interaction.followup.send(
+                "Select an active Discord Novus Member.",
+                ephemeral=True
+            )
+            return
+
+        conn = sqlite3.connect("wom_multi.db")
+        try:
+            c = conn.cursor()
+            c.execute(
+                "SELECT group_id FROM guild_configs WHERE guild_id = ?",
+                (guild.id,)
+            )
+            row = c.fetchone()
+            group_id = row[0] if row else None
+            c.execute(
+                "SELECT rsn, wom_id FROM links WHERE guild_id = ? AND discord_id = ?",
+                (guild.id, member.id)
+            )
+            link = c.fetchone()
+            if not group_id or not link:
+                await interaction.followup.send(
+                    "This member must have a linked primary RSN and a configured WOM group.",
+                    ephemeral=True
+                )
+                return
+
+            group_data, api_status = await self.get_wom_group(group_id)
+            if not isinstance(group_data, dict):
+                await interaction.followup.send(
+                    "WOM group data is unavailable; no tenure records were changed.",
+                    ephemeral=True
+                )
+                return
+
+            memberships = group_data.get("memberships", [])
+            if not is_active_novus_member_link(
+                member, link[0], link[1], memberships
+            ):
+                await interaction.followup.send(
+                    "This account is not a current Novus WOM member.",
+                    ephemeral=True
+                )
+                return
+
+            membership = find_primary_wom_membership(
+                link[0], link[1], memberships
+            )
+            player_id = membership["player"]["id"]
+            joined_at = get_membership_joined_at(membership)
+            membership_created = parse_wom_datetime(
+                membership.get("createdAt")
+            )
+
+            # Import available historical events before showing the evidence.
+            await self.prepare_tenure_history(c, guild, group_data)
+            diagnostic = get_tenure_diagnostics(
+                c, guild.id, group_id, player_id, joined_at
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        documented = diagnostic["wom_previous_days"]
+        manual = diagnostic["manual_previous_days"]
+        credited = max(documented, manual)
+        event_lines = [
+            f"- `{kind}` {stamp[:10]}"
+            for kind, stamp in diagnostic["events"][-12:]
+        ]
+        if not event_lines:
+            event_lines = ["No WOM group join/leave activity saved for this RSN."]
+
+        join_text = joined_at.date().isoformat() if joined_at else "Unavailable"
+        created_text = (
+            membership_created.date().isoformat()
+            if membership_created else "Unavailable"
+        )
+        history_status = (
+            "Complete for recorded WOM group activity"
+            if diagnostic["backfill_complete"]
+            else "Historical import still incomplete or unavailable"
+        )
+        last_checked = diagnostic["history_last_checked"] or "Not successfully imported"
+
+        response = (
+            f"**Novus Tenure History: {member.mention}**\n"
+            f"RSN: `{membership['player']['username']}`\n"
+            f"Current in-game join date: `{join_text}`\n"
+            f"Added to WOM group: `{created_text}` "
+            "(not necessarily an in-game join date)\n"
+            f"Previous WOM service recovered: **{documented:.1f} days**\n"
+            f"Manual previous service recorded: **{manual:.1f} days**\n"
+            f"Previous service actually credited: **{credited:.1f} days**\n"
+            f"Prior WOM joined/left pairs: **{diagnostic['matched_previous_periods']}**\n"
+            f"Previously observed closed stints: "
+            f"**{diagnostic['closed_observed_stints']}**\n"
+            f"WOM activity imported through offset: "
+            f"**{diagnostic['history_offset']}**\n"
+            f"Import status: **{history_status}**\n"
+            f"Last import: `{last_checked[:19]}`\n\n"
+            "**Saved WOM group events (last 12)**\n"
+            + "\n".join(event_lines)
+        )
+        if joined_at and documented == 0 and manual == 0:
+            response += (
+                "\n\n**Why prior tenure is missing:** No completed "
+                "previous Novus membership period has been reconstructed. "
+                "An earlier WOM-group creation date alone does not prove "
+                "continuous in-game clan membership."
+            )
+        if len(response) > 1900:
+            response = response[:1850] + "\n...additional details omitted."
+
+        await interaction.followup.send(response, ephemeral=True)
 
     # ========================================================
     # /TENURECREDIT

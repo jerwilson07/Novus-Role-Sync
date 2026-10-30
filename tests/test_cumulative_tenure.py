@@ -35,8 +35,13 @@ def membership(joined, player_id=PLAYER):
     }
 
 
-def activity(kind, when, player_id=PLAYER):
-    return {"playerId": player_id, "type": kind, "createdAt": when.isoformat()}
+def activity(kind, when, player_id=PLAYER, group_id=GROUP):
+    return {
+        "groupId": group_id,
+        "playerId": player_id,
+        "type": kind,
+        "createdAt": when.isoformat(),
+    }
 
 
 class FakeActivityResponse:
@@ -82,6 +87,60 @@ class CumulativeTenureTests(unittest.TestCase):
         )
         self.assertEqual(effective, joined)
         self.assertEqual(past, dt.timedelta())
+
+    def test_ignores_membership_activity_from_other_clans(self):
+        current = d("2026-10-29")
+        events = [
+            # A join to a different WOM group must never anchor Novus time.
+            activity("joined", d("2026-07-31"), group_id=9999),
+            activity("changed_role", d("2026-08-01"), group_id=9999),
+            activity("left", d("2026-10-23")),
+            activity("joined", current),
+        ]
+        inserted = store_group_activity(self.c, GUILD, GROUP, events)
+        self.assertEqual(inserted, 2)
+        self.assertEqual(
+            prior_tenure(self.c, GUILD, GROUP, PLAYER, current),
+            dt.timedelta(),
+        )
+
+    def test_novus_only_joins_leaves_and_role_changes_credit_exact_stints(self):
+        current = d("2026-10-29")
+        events = [
+            activity("changed_role", d("2026-07-31")),
+            activity("changed_role", d("2026-08-10")),
+            activity("left", d("2026-10-24")),
+            # Outside Novus: these events belong to a different group.
+            activity("joined", d("2026-10-25"), group_id=9999),
+            activity("changed_role", d("2026-10-27"), group_id=9999),
+            activity("left", d("2026-10-28"), group_id=9999),
+            activity("joined", current),
+        ]
+        store_group_activity(self.c, GUILD, GROUP, events)
+        self.assertEqual(
+            prior_tenure(self.c, GUILD, GROUP, PLAYER, current),
+            dt.timedelta(days=85),
+        )
+
+    def test_ignores_missing_group_ids_and_unknown_activity_types(self):
+        current = d("2026-10-29")
+        legitimate = activity("left", d("2026-10-24"))
+        invalid = [
+            {k: v for k, v in activity(
+                "joined", d("2026-07-31")
+            ).items() if k != "groupId"},
+            activity("joined", d("2026-07-31"), group_id=999),
+            activity("updated", d("2026-07-31")),
+            legitimate,
+            activity("joined", current),
+        ]
+        self.assertEqual(
+            store_group_activity(self.c, GUILD, GROUP, invalid), 2
+        )
+        self.assertEqual(
+            prior_tenure(self.c, GUILD, GROUP, PLAYER, current),
+            dt.timedelta(),
+        )
 
     def test_historic_join_leave_credits_previous_period(self):
         events = [

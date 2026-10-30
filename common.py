@@ -96,3 +96,51 @@ def forget_unmatched_alt_links(cursor, guild_id: int, memberships: list) -> int:
         removed += cursor.rowcount
 
     return removed
+
+
+
+# Verified is a server-access role, not evidence of active clan membership.
+# Regular Novus membership requires BOTH the exact Discord "Member" role
+# and a linked primary account in the current Novus WOM group.
+NOVUS_MEMBER_ROLE_NAME = "member"
+
+
+def has_novus_member_role(member) -> bool:
+    """True only for Discord Member-role holders who aren't Guest/Clan Friend."""
+    if member is None or has_non_clan_role(member):
+        return False
+    return any(
+        getattr(role, "name", "").strip().casefold() == NOVUS_MEMBER_ROLE_NAME
+        for role in member.roles
+    )
+
+
+def find_primary_wom_membership(rsn, wom_id, memberships):
+    """Find a linked primary on the Novus WOM roster, including renamed RSNs.
+
+    This function only determines eligibility; missing members are never
+    unlinked merely because WOM temporarily omitted them.
+    """
+    if not isinstance(memberships, list):
+        return None
+
+    if wom_id is not None:
+        for entry in memberships:
+            if isinstance(entry, dict) and isinstance(entry.get("player"), dict):
+                if entry["player"].get("id") == wom_id:
+                    return entry
+
+    if rsn:
+        for entry in memberships:
+            if isinstance(entry, dict) and isinstance(entry.get("player"), dict):
+                username = entry["player"].get("username")
+                if username and username.casefold() == rsn.casefold():
+                    return entry
+    return None
+
+
+def is_active_novus_member_link(member, rsn, wom_id, memberships) -> bool:
+    """Active clan member = Discord Member role AND current WOM primary."""
+    return has_novus_member_role(member) and (
+        find_primary_wom_membership(rsn, wom_id, memberships) is not None
+    )

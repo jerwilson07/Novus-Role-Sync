@@ -1292,7 +1292,6 @@ class TasksCog(commands.Cog):
         mapping_issues = []
         skipped_members = []
         failed_members = []
-missing array
         for discord_id, rsn, wom_id in linked_primaries:
             member = guild.get_member(discord_id)
 

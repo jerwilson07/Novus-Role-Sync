@@ -345,3 +345,58 @@ async def refresh_activity_history(session, headers, cursor, guild_id, group_id)
             highest_end, reached_end,
         )
     return added
+
+
+def get_tenure_diagnostics(cursor, guild_id, group_id, player_id, joined_at):
+    """Explain how much historical WOM tenure is documented and why.
+
+    Does not infer in-game membership from group creation dates.
+    """
+    cursor.execute("""
+        SELECT event_type, event_at FROM tenure_activity
+        WHERE guild_id = ? AND group_id = ? AND player_id = ?
+        ORDER BY event_at ASC
+    """, (guild_id, group_id, player_id))
+    events = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT COUNT(*) FROM tenure_observed
+        WHERE guild_id = ? AND group_id = ? AND player_id = ?
+          AND closed_at IS NOT NULL
+    """, (guild_id, group_id, player_id))
+    observed_closed = cursor.fetchone()[0]
+
+    cursor.execute("""
+        SELECT offset, complete, last_checked_at
+        FROM tenure_backfill WHERE guild_id = ? AND group_id = ?
+    """, (guild_id, group_id))
+    row = cursor.fetchone()
+    offset, complete, last_checked = row if row else (0, 0, None)
+
+    matched_previous_periods = 0
+    opened = None
+    for kind, timestamp in events:
+        moment = parse_timestamp(timestamp)
+        if moment is None:
+            continue
+        if kind == "joined":
+            opened = moment
+        elif kind == "left" and opened is not None:
+            if joined_at and opened < moment <= joined_at:
+                matched_previous_periods += 1
+            opened = None
+
+    return {
+        "events": events,
+        "matched_previous_periods": matched_previous_periods,
+        "closed_observed_stints": observed_closed,
+        "history_offset": offset,
+        "backfill_complete": bool(complete),
+        "history_last_checked": last_checked,
+        "wom_previous_days": prior_tenure(
+            cursor, guild_id, group_id, player_id, joined_at
+        ).total_seconds() / 86400 if joined_at else 0,
+        "manual_previous_days": get_manual_previous_tenure(
+            cursor, guild_id, group_id, player_id
+        ).total_seconds() / 86400,
+    }

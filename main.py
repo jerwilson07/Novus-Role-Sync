@@ -619,10 +619,10 @@ class WOMBot(
         else:
             for command in registered_commands:
                 if command.name not in allowed_commands:
-                    self.tree.remove_command(
-                        command.name,
-                        type=command.type
-                    )
+                    # Local discord.py app_commands.Command instances
+                    # do not have .type (unlike fetched AppCommand models).
+                    # Every Novus command is a standard slash command.
+                    self.tree.remove_command(command.name)
 
             await self.tree.sync()
 

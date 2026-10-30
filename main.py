@@ -11,6 +11,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from dotenv import load_dotenv
 from common import WOM_API_KEY
+from tenure_history import initialize_tenure_tables
 
 
 # ============================================================
@@ -263,6 +264,9 @@ def init_db():
         )
         """
     )
+
+    # Preserve cumulative clan tenure independently of Discord links.
+    initialize_tenure_tables(c)
 
     # --------------------------------------------------------
     # DATABASE MIGRATIONS

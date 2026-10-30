@@ -15,6 +15,9 @@ from common import (
     forget_non_clan_links, forget_unmatched_alt_links,
     has_novus_member_role, is_active_novus_member_link,
 )
+from tenure_history import (
+    cumulative_effective_join, record_roster, refresh_activity_history,
+)
 
 
 logger = logging.getLogger("WOMBot")
@@ -372,6 +375,21 @@ class TasksCog(commands.Cog):
             return None, None
 
     # ========================================================
+    # HISTORICAL CLAN TENURE
+    # ========================================================
+
+    async def prepare_tenure_history(self, cursor, guild, group_data):
+        group_id = group_data.get("id")
+        if not isinstance(group_id, int):
+            return
+        memberships = group_data.get("memberships", [])
+        record_roster(cursor, guild.id, group_id, memberships)
+        await refresh_activity_history(
+            self.bot.http_session, build_wom_headers(),
+            cursor, guild.id, group_id
+        )
+
+    # ========================================================
     # ALT ACCOUNT VERIFICATION
     # ========================================================
 
@@ -702,8 +720,9 @@ class TasksCog(commands.Cog):
         # TENURE SYNC - PROMOTIONS ONLY
         # ----------------------------------------------------
 
-        joined_at = get_membership_joined_at(
-            membership
+        joined_at = get_membership_joined_at(membership)
+        effective_joined_at, prior_service = cumulative_effective_join(
+            cursor, guild.id, group_data.get("id"), current_wom_id, joined_at
         )
 
         expected_rank = None
@@ -726,7 +745,7 @@ class TasksCog(commands.Cog):
 
         if joined_at is not None:
             expected_rank = expected_tenure_rank(
-                joined_at
+                effective_joined_at
             )
 
             expected_role = configured_map.get(
@@ -801,7 +820,7 @@ class TasksCog(commands.Cog):
                         # is only flagged for staff review.
                         tenure_status = "ahead"
                         tenure_ahead_eligible_at = tenure_eligible_at(
-                            joined_at,
+                            effective_joined_at,
                             current_discord_tenure_rank
                         )
 
@@ -878,6 +897,8 @@ class TasksCog(commands.Cog):
             "rsn": current_rsn,
             "wom_role": current_wom_role,
             "joined_at": joined_at,
+            "effective_joined_at": effective_joined_at,
+            "prior_tenure_days": prior_service.total_seconds() / 86400,
             "expected_tenure_rank": expected_rank,
             "expected_tenure_role": expected_role,
             "current_discord_tenure_rank": current_discord_tenure_rank,
@@ -980,6 +1001,7 @@ class TasksCog(commands.Cog):
             return
 
         forget_unmatched_alt_links(c, guild.id, group_data.get("memberships", []))
+        await self.prepare_tenure_history(c, guild, group_data)
 
         result = await self.sync_one_member(
             guild,
@@ -1126,7 +1148,17 @@ class TasksCog(commands.Cog):
 
         if joined_at:
             response += (
-                f"\nWOM Join Date: `{joined_at.date()}`"
+                f"\nCurrent Clan Join Date: `{joined_at.date()}`"
+            )
+            prior_days = result.get("prior_tenure_days", 0)
+            if prior_days > 0:
+                response += (
+                    f"\nPrevious Novus Service Credited: "
+                    f"**{prior_days:.1f} days**"
+                )
+            response += (
+                f"\nTotal Clan Tenure: "
+                f"**{(datetime.datetime.now(datetime.timezone.utc) - joined_at).total_seconds() / 86400 + prior_days:.1f} days**"
             )
 
         if expected_tenure:
@@ -1270,6 +1302,7 @@ class TasksCog(commands.Cog):
             return
 
         forget_unmatched_alt_links(c, guild.id, group_data.get("memberships", []))
+        await self.prepare_tenure_history(c, guild, group_data)
 
         c.execute(
             """
@@ -1537,6 +1570,7 @@ class TasksCog(commands.Cog):
             "memberships",
             []
         )
+        await self.prepare_tenure_history(c, guild, group_data)
 
         wom_by_id = {
             membership["player"]["id"]: membership
@@ -1672,8 +1706,11 @@ class TasksCog(commands.Cog):
 
             checked_tenure_members += 1
 
+            effective_joined_at, prior_service = cumulative_effective_join(
+                c, guild.id, group_data.get("id"), current_wom_id, joined_at
+            )
             expected_rank = expected_tenure_rank(
-                joined_at
+                effective_joined_at
             )
             expected_level = TENURE_RANK_ORDER[
                 expected_rank
@@ -1699,7 +1736,7 @@ class TasksCog(commands.Cog):
 
             if current_level < expected_level:
                 eligible_at = tenure_eligible_at(
-                    joined_at,
+                    effective_joined_at,
                     expected_rank
                 )
                 overdue_days = max(
@@ -1714,6 +1751,7 @@ class TasksCog(commands.Cog):
                         "current": current_tenure_rank,
                         "expected": expected_rank,
                         "joined": joined_at,
+                        "prior_tenure_days": prior_service.days,
                         "eligible": eligible_at,
                         "overdue_days": overdue_days,
                     }
@@ -1721,7 +1759,7 @@ class TasksCog(commands.Cog):
 
             elif current_level > expected_level:
                 eligible_at = tenure_eligible_at(
-                    joined_at,
+                    effective_joined_at,
                     current_tenure_rank
                 )
 
@@ -1773,7 +1811,8 @@ class TasksCog(commands.Cog):
                 lines.append(
                     f"{entry['member'].mention} (`{entry['rsn']}`)\n"
                     f"`{entry['current'] or 'none'}` -> `{entry['expected']}`\n"
-                    f"Joined: `{entry['joined'].date()}`\n"
+                    f"Current stint joined: `{entry['joined'].date()}`\n"
+                    f"Previous service: **{entry['prior_tenure_days']} days**\n"
                     f"Eligible: `{entry['eligible'].date()}`\n"
                     f"Overdue: **{entry['overdue_days']} day(s)**"
                 )
@@ -2106,6 +2145,7 @@ class TasksCog(commands.Cog):
         forget_unmatched_alt_links(
             c, guild.id, group_data.get("memberships", [])
         )
+        await self.prepare_tenure_history(c, guild, group_data)
 
         c.execute(
             """

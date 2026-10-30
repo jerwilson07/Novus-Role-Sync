@@ -14,6 +14,7 @@ from tenure_history import (
     store_group_activity,
     set_manual_previous_tenure,
     get_manual_previous_tenure,
+    get_tenure_diagnostics,
 )
 
 GUILD = 1
@@ -208,6 +209,34 @@ class CumulativeTenureTests(unittest.TestCase):
         for value in (-1, 3651, 2.5, "500"):
             with self.assertRaises(ValueError):
                 set_manual_previous_tenure(self.c, GUILD, GROUP, PLAYER, value)
+
+    def test_diagnostic_shows_missing_historic_pair_not_fake_service(self):
+        current = d("2026-10-29")
+        store_group_activity(self.c, GUILD, GROUP, [
+            activity("left", d("2026-10-24")),
+            activity("joined", current),
+        ])
+        details = get_tenure_diagnostics(
+            self.c, GUILD, GROUP, PLAYER, current
+        )
+        self.assertEqual(details["wom_previous_days"], 0)
+        self.assertEqual(details["matched_previous_periods"], 0)
+        self.assertEqual(len(details["events"]), 2)
+        self.assertFalse(details["backfill_complete"])
+
+    def test_diagnostic_shows_recovered_previous_stint(self):
+        current = d("2026-10-29")
+        store_group_activity(self.c, GUILD, GROUP, [
+            activity("joined", d("2026-07-31")),
+            activity("left", d("2026-10-24")),
+            activity("joined", current),
+        ])
+        details = get_tenure_diagnostics(
+            self.c, GUILD, GROUP, PLAYER, current
+        )
+        self.assertEqual(details["matched_previous_periods"], 1)
+        self.assertEqual(details["wom_previous_days"], 85)
+        self.assertEqual(len(details["events"]), 3)
 
     def test_role_changes_do_not_affect_tenure(self):
         self.assertEqual(store_group_activity(self.c, GUILD, GROUP, [

@@ -601,12 +601,35 @@ class WOMBot(
                         f"{filename}: {e}"
                     )
 
-        # Register commands globally.
-        await self.tree.sync()
+        # Novus staff only use these four operational commands.
+        # Keep the other command implementations in the repository so
+        # configuration can be restored later without rewriting bot logic.
+        allowed_commands = {"audit", "syncall", "autolink", "trials"}
+        registered_commands = self.tree.get_commands()
+        registered_names = {command.name for command in registered_commands}
+        missing_commands = allowed_commands - registered_names
 
-        logger.info(
-            "Commands synced globally."
-        )
+        if missing_commands:
+            # Do not accidentally erase working Discord slash commands if
+            # a required cog failed to load at startup.
+            logger.error(
+                "Refusing to replace Discord commands: required commands "
+                "were not loaded: %s", sorted(missing_commands)
+            )
+        else:
+            for command in registered_commands:
+                if command.name not in allowed_commands:
+                    self.tree.remove_command(
+                        command.name,
+                        type=command.type
+                    )
+
+            await self.tree.sync()
+
+            logger.info(
+                "Registered only the four Novus commands: %s",
+                ", ".join(sorted(allowed_commands))
+            )
 
         # Start CLI loop only in an interactive terminal.
         if sys.stdin.isatty():

@@ -248,10 +248,14 @@ def cumulative_effective_join(cursor, guild_id, group_id, player_id, joined_at):
 
 
 async def refresh_activity_history(session, headers, cursor, guild_id, group_id):
-    """Incremental, bounded group activity import. Older pages backfill over syncs.
+    """Incrementally import WOM joined/left events without flooding its API.
 
-    A failed/partial response never erases prior service. Pagination overlaps
-    one page to accommodate new activity arriving while backfilling.
+    Group activity is ordered newest-first. Collect recent activity every
+    refresh and resume historical pages across hourly refreshes. A one-page
+    overlap helps tolerate offsets moving when new group events are added.
+    The activity endpoint has a 50-item page limit and public rate limits,
+    so each refresh fetches at most four pages. A completed historic backfill
+    keeps checking the newest pages for future departures and rejoins.
     """
     cursor.execute("""
         SELECT offset, complete, last_checked_at FROM tenure_backfill
@@ -261,48 +265,66 @@ async def refresh_activity_history(session, headers, cursor, guild_id, group_id)
     offset, complete, last_checked_at = row if row else (0, 0, None)
     last_checked = parse_timestamp(last_checked_at)
     now = datetime.datetime.now(UTC)
-    if last_checked and (now - last_checked) < datetime.timedelta(hours=6):
+    if last_checked and now - last_checked < datetime.timedelta(hours=1):
         return 0
 
-    # Always collect the newest events, then progressively older events.
-    page_offsets = [0]
     if complete:
-        page_offsets.extend([50, 100])  # cover busy periods between syncs
+        # Two pages cover up to 100 recent events between regular checks.
+        pages = [0, 50]
     elif offset:
-        page_offsets.extend(range(max(0, offset - 50), offset + 950, 50))
+        # Current events, plus prior-page overlap and forward progress.
+        pages = [0, max(0, offset - 50), offset, offset + 50]
     else:
-        page_offsets.extend(range(50, 1000, 50))
+        pages = [0, 50, 100, 150]
 
-    total = 0
-    newest_backfill_offset = offset
+    added = 0
+    highest_end = offset
     reached_end = bool(complete)
-    fetched_successfully = False
+    fetched = False
+    successful_pages = set()
 
-    for page in dict.fromkeys(page_offsets):
+    for page in dict.fromkeys(pages):
         try:
             async with session.get(
                 f"https://api.wiseoldman.net/v2/groups/{group_id}/activity",
-                headers=headers, params={"limit": 50, "offset": page},
-                timeout=30
+                headers=headers,
+                params={"limit": 50, "offset": page},
+                timeout=30,
             ) as response:
                 if response.status != 200:
-                    log.warning("WOM tenure history API: group %s returned %s", group_id, response.status)
+                    log.warning(
+                        "WOM history group %s returned HTTP %s on offset %s",
+                        group_id, response.status, page
+                    )
                     break
                 events = await response.json()
         except Exception as exc:
-            log.warning("WOM tenure history unavailable for group %s: %s", group_id, exc)
+            log.warning(
+                "WOM history group %s unavailable at offset %s: %s",
+                group_id, page, exc
+            )
             break
 
         if not isinstance(events, list):
-            break
-        fetched_successfully = True
-        total += store_group_activity(cursor, guild_id, group_id, events)
-        if not complete:
-            newest_backfill_offset = max(newest_backfill_offset, page + len(events))
-        if len(events) < 50:
-            reached_end = True
+            log.warning("WOM history group %s returned invalid activity", group_id)
             break
 
+        fetched = True
+        successful_pages.add(page)
+        added += store_group_activity(
+            cursor, guild_id, group_id, events
+        )
+
+        # Never advance the historical cursor based solely on a recent page
+        # when resuming after an older offset.
+        if not complete and page >= max(0, offset - 50):
+            highest_end = max(highest_end, page + len(events))
+            if len(events) < 50:
+                reached_end = True
+                break
+
+    # Do not mark history complete on a short recent page if deeper history
+    # was already being imported; an earlier transient gap is possible.
     cursor.execute("""
         INSERT INTO tenure_backfill
             (guild_id, group_id, offset, complete, last_checked_at)
@@ -312,10 +334,17 @@ async def refresh_activity_history(session, headers, cursor, guild_id, group_id)
             complete = MAX(tenure_backfill.complete, excluded.complete),
             last_checked_at = excluded.last_checked_at
     """, (
-        guild_id, group_id, newest_backfill_offset, int(reached_end),
-        iso(now) if fetched_successfully else last_checked_at
+        guild_id, group_id, highest_end, int(reached_end),
+        iso(now) if fetched else last_checked_at
     ))
-    return total
+    if fetched:
+        log.info(
+            "WOM group %s tenure history: %s new events, pages %s, "
+            "historic offset %s, complete %s",
+            group_id, added, sorted(successful_pages),
+            highest_end, reached_end,
+        )
+    return added
 
 
 def get_tenure_diagnostics(cursor, guild_id, group_id, player_id, joined_at):

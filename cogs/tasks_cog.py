@@ -17,6 +17,7 @@ from common import (
 )
 from tenure_history import (
     cumulative_effective_join, record_roster, refresh_activity_history,
+    set_manual_previous_tenure, get_manual_previous_tenure,
 )
 
 
@@ -38,6 +39,7 @@ NOVUS_COMMAND_ROLE_IDS = {
     MODERATOR_ROLE_ID,
     TRIAL_MOD_ROLE_ID,
 }
+TENURE_CREDIT_ROLE_IDS = {COUNCIL_ROLE_ID, MODERATOR_ROLE_ID}
 
 # WOM staff rank -> Discord staff role
 NOVUS_STAFF_WOM_ROLES = {
@@ -729,7 +731,6 @@ class TasksCog(commands.Cog):
         expected_role = None
         current_discord_tenure_rank = None
         tenure_status = "missing_join_date"
-        tenure_ahead_eligible_at = None
 
         discord_tenure_ranks = [
             tenure_role_by_id[role.id]
@@ -816,13 +817,10 @@ class TasksCog(commands.Cog):
                         )
 
                     else:
-                        # Never demote. A Discord rank ahead of the tenure date
-                        # is only flagged for staff review.
-                        tenure_status = "ahead"
-                        tenure_ahead_eligible_at = tenure_eligible_at(
-                            effective_joined_at,
-                            current_discord_tenure_rank
-                        )
+                        # WOM group activity may omit earlier in-game clan
+                        # stints. Retain the assigned rank without alleging
+                        # a premature promotion.
+                        tenure_status = "retained_rank"
 
         wom_tenure_mismatch = False
         wom_tenure_direction = None
@@ -830,17 +828,14 @@ class TasksCog(commands.Cog):
         if (
             expected_rank is not None
             and current_wom_role in TENURE_RANK_ORDER
-            and current_wom_role != expected_rank
+            and TENURE_RANK_ORDER[current_wom_role]
+                < TENURE_RANK_ORDER[expected_rank]
         ):
+            # A lower WOM rank can genuinely lag calculated service.
+            # A higher WOM rank could reflect historical service omitted
+            # from the WOM group activity log, so it is not a mismatch.
             wom_tenure_mismatch = True
-
-            if (
-                TENURE_RANK_ORDER[current_wom_role]
-                > TENURE_RANK_ORDER[expected_rank]
-            ):
-                wom_tenure_direction = "ahead"
-            else:
-                wom_tenure_direction = "behind"
+            wom_tenure_direction = "behind"
 
         roles_to_add = list(dict.fromkeys(
             tenure_roles_to_add
@@ -903,7 +898,6 @@ class TasksCog(commands.Cog):
             "expected_tenure_role": expected_role,
             "current_discord_tenure_rank": current_discord_tenure_rank,
             "tenure_status": tenure_status,
-            "tenure_ahead_eligible_at": tenure_ahead_eligible_at,
             "wom_tenure_mismatch": wom_tenure_mismatch,
             "wom_tenure_direction": wom_tenure_direction,
             "staff_target_role": staff_target_role,
@@ -1157,8 +1151,9 @@ class TasksCog(commands.Cog):
                     f"**{prior_days:.1f} days**"
                 )
             response += (
-                f"\nTotal Clan Tenure: "
+                f"\nDocumented Clan Tenure: "
                 f"**{(datetime.datetime.now(datetime.timezone.utc) - joined_at).total_seconds() / 86400 + prior_days:.1f} days**"
+                " (may exclude older stints not recorded by WOM)"
             )
 
         if expected_tenure:
@@ -1175,7 +1170,7 @@ class TasksCog(commands.Cog):
             "promoted": "Promoted upward based on tenure.",
             "current": "Tenure rank is correct.",
             "duplicate_cleanup": "Removed duplicate lower tenure role(s).",
-            "ahead": "Discord tenure rank is ahead of the join-date schedule. No demotion was made.",
+            "retained_rank": "Existing tenure rank retained. Historical Novus service may be missing from WOM records; no demotion was made.",
             "missing_join_date": "WOM join date is missing. No tenure change was made.",
             "not_mapped": "Expected tenure rank is not mapped to a Discord role. No tenure change was made.",
         }
@@ -1319,7 +1314,6 @@ class TasksCog(commands.Cog):
         checked = 0
         changed = 0
         automatic_promotions = []
-        tenure_ahead = []
         wom_mismatches = []
         missing_join_dates = []
         mapping_issues = []
@@ -1373,19 +1367,6 @@ class TasksCog(commands.Cog):
                     f"-> `{result['expected_tenure_rank']}`"
                 )
 
-            elif result.get("tenure_status") == "ahead":
-                line = (
-                    f"- {member.mention} (`{result['rsn']}`): Discord "
-                    f"`{result['current_discord_tenure_rank']}`, expected "
-                    f"`{result['expected_tenure_rank']}`"
-                )
-                eligible_at = result.get(
-                    "tenure_ahead_eligible_at"
-                )
-                if eligible_at:
-                    line += f" - eligible `{eligible_at.date()}`"
-                tenure_ahead.append(line)
-
             elif result.get("tenure_status") == "missing_join_date":
                 missing_join_dates.append(
                     f"- {member.mention} (`{result['rsn']}`)"
@@ -1432,7 +1413,7 @@ class TasksCog(commands.Cog):
             f"Linked primary members: **{checked}**\n"
             f"Members changed: **{changed}**\n"
             f"Automatic tenure promotions: **{len(automatic_promotions)}**\n"
-            f"Premature Discord tenure ranks: **{len(tenure_ahead)}**\n"
+
             f"WOM tenure mismatches: **{len(wom_mismatches)}**\n"
             f"Missing WOM join date: **{len(missing_join_dates)}**"
         )
@@ -1443,12 +1424,6 @@ class TasksCog(commands.Cog):
             sections.append(
                 "**Automatic Promotions**\n"
                 + "\n".join(automatic_promotions)
-            )
-
-        if tenure_ahead:
-            sections.append(
-                "**Premature Discord Tenure Ranks - No Demotions Made**\n"
-                + "\n".join(tenure_ahead)
             )
 
         if wom_mismatches:
@@ -1609,7 +1584,6 @@ class TasksCog(commands.Cog):
         }
 
         overdue_members = []
-        premature_members = []
         missing_join_date_members = []
         trial_members_excluded = 0
         checked_tenure_members = 0
@@ -1757,22 +1731,6 @@ class TasksCog(commands.Cog):
                     }
                 )
 
-            elif current_level > expected_level:
-                eligible_at = tenure_eligible_at(
-                    effective_joined_at,
-                    current_tenure_rank
-                )
-
-                premature_members.append(
-                    {
-                        "member": member,
-                        "rsn": current_rsn,
-                        "current": current_tenure_rank,
-                        "expected": expected_rank,
-                        "eligible": eligible_at,
-                    }
-                )
-
         conn.commit()
         conn.close()
 
@@ -1781,16 +1739,11 @@ class TasksCog(commands.Cog):
             reverse=True
         )
 
-        premature_members.sort(
-            key=lambda entry: entry["eligible"]
-        )
-
         summary = (
             f"**Novus Promotion Audit**\n\n"
             f"Active Novus primary accounts: **{active_primary_members}**\n"
             f"Tenure members evaluated: **{checked_tenure_members}**\n"
-            f"Promotions due: **{len(overdue_members)}**\n"
-            f"Premature Discord tenure ranks: **{len(premature_members)}**"
+            f"Promotions due: **{len(overdue_members)}**"
         )
 
         if trial_members_excluded:
@@ -1823,20 +1776,6 @@ class TasksCog(commands.Cog):
         else:
             sections.append(
                 "No linked tenure members are currently overdue for promotion."
-            )
-
-        if premature_members:
-            lines = []
-            for entry in premature_members:
-                lines.append(
-                    f"{entry['member'].mention} (`{entry['rsn']}`)\n"
-                    f"Discord: `{entry['current']}` | Expected: `{entry['expected']}`\n"
-                    f"Eligible for `{entry['current']}`: `{entry['eligible'].date()}`\n"
-                    f"**No demotion made.**"
-                )
-            sections.append(
-                "**Premature Discord Tenure Ranks**\n"
-                + "\n\n".join(lines)
             )
 
         if missing_join_date_members:
@@ -2164,7 +2103,6 @@ class TasksCog(commands.Cog):
         automatic_promotions = []
         staff_updates = []
         duplicate_cleanups = []
-        premature_discord_ranks = []
         wom_rank_mismatches = []
         missing_join_dates = []
         tenure_mapping_issues = []
@@ -2258,27 +2196,6 @@ class TasksCog(commands.Cog):
                 duplicate_cleanups.append(
                     f"- {member.mention} (`{result['rsn']}`): kept "
                     f"`{result['expected_tenure_rank']}` and removed lower duplicate(s)"
-                )
-
-            elif tenure_status == "ahead":
-                line = (
-                    f"- {member.mention} (`{result['rsn']}`): Discord "
-                    f"`{result['current_discord_tenure_rank']}`, expected "
-                    f"`{result['expected_tenure_rank']}`"
-                )
-
-                eligible_at = result.get(
-                    "tenure_ahead_eligible_at"
-                )
-
-                if eligible_at:
-                    line += (
-                        f" - eligible for `{result['current_discord_tenure_rank']}` "
-                        f"on `{eligible_at.date()}`"
-                    )
-
-                premature_discord_ranks.append(
-                    line
                 )
 
             elif tenure_status == "missing_join_date":
@@ -2565,7 +2482,6 @@ class TasksCog(commands.Cog):
             automatic_promotions,
             staff_updates,
             duplicate_cleanups,
-            premature_discord_ranks,
             wom_rank_mismatches,
             missing_join_dates,
             tenure_mapping_issues,
@@ -2596,16 +2512,6 @@ class TasksCog(commands.Cog):
                 embed.add_field(
                     name=f"Automatic Promotions ({len(automatic_promotions)})",
                     value="\n".join(automatic_promotions)[:1024],
-                    inline=False
-                )
-
-            if premature_discord_ranks:
-                embed.add_field(
-                    name=f"Premature Discord Tenure Ranks ({len(premature_discord_ranks)})",
-                    value=(
-                        "No demotions were made.\n"
-                        + "\n".join(premature_discord_ranks)
-                    )[:1024],
                     inline=False
                 )
 

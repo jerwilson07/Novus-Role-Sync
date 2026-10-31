@@ -402,8 +402,9 @@ class WOMBot(
             "Bot is online and ready!"
         )
 
-        # One-time cleanup of old guild-specific slash commands.
-        # The bot now uses global commands only.
+        # Sync the operational command set directly to each guild as well as
+        # globally. Guild sync makes newly added commands available immediately
+        # in Novus instead of depending on Discord's global-command propagation.
         if not self.guild_command_cleanup_done:
             for guild in self.guilds:
                 try:
@@ -411,19 +412,30 @@ class WOMBot(
                         guild=guild
                     )
 
-                    await self.tree.sync(
+                    self.tree.copy_global_to(
+                        guild=guild
+                    )
+
+                    synced = await self.tree.sync(
                         guild=guild
                     )
 
                     logger.info(
-                        f"Cleared old guild-specific "
-                        f"commands from {guild.name}"
+                        "Synced %s guild commands to %s: %s",
+                        len(synced),
+                        guild.name,
+                        ", ".join(
+                            sorted(
+                                command.name
+                                for command in synced
+                            )
+                        )
                     )
 
                 except Exception as e:
                     logger.error(
-                        f"Failed to clear guild-specific "
-                        f"commands from {guild.name}: {e}"
+                        f"Failed to sync guild-specific "
+                        f"commands for {guild.name}: {e}"
                     )
 
             self.guild_command_cleanup_done = True

@@ -12,7 +12,7 @@ import shutil
 
 from common import (
     WOM_API_KEY, has_non_clan_role, forget_member_links,
-    forget_non_clan_links, forget_unmatched_alt_links,
+    forget_non_clan_links,
     has_novus_member_role, is_active_novus_member_link,
     find_primary_wom_membership,
 )
@@ -61,12 +61,6 @@ NOVUS_TENURE_ROLES = {
 
 # Trial Member in WOM/in-game. Trials are not yet on the tenure ladder.
 NOVUS_TRIAL_WOM_RANKS = {
-    "gnome_child",
-}
-
-# Known WOM ranks intentionally left unmanaged by Novus Sync.
-# These should not appear as routine skipped-sync noise.
-IGNORED_WOM_RANKS = {
     "gnome_child",
 }
 
@@ -2131,7 +2125,6 @@ class TasksCog(commands.Cog):
             )
             return
 
-        forget_unmatched_alt_links(c, guild.id, group_data.get("memberships", []))
         await self.prepare_tenure_history(c, guild, group_data)
 
         result = await self.sync_one_member(
@@ -2145,52 +2138,6 @@ class TasksCog(commands.Cog):
         conn.close()
 
         status = result["status"]
-
-        if status == "ignored_rank":
-            if result.get("wom_role") in NOVUS_TRIAL_WOM_RANKS:
-                joined_at = result.get("joined_at")
-
-                trial_text = ""
-                if joined_at:
-                    trial_end = joined_at + datetime.timedelta(
-                        days=TRIAL_PERIOD_DAYS
-                    )
-                    days_remaining = (
-                        trial_end.date()
-                        - datetime.datetime.now(
-                            datetime.timezone.utc
-                        ).date()
-                    ).days
-
-                    if days_remaining > 0:
-                        trial_text = (
-                            f"\nTrial ends: `{trial_end.date()}` "
-                            f"({days_remaining} day(s) remaining)"
-                        )
-                    elif days_remaining == 0:
-                        trial_text = (
-                            f"\nTrial ends: `{trial_end.date()}` (today)"
-                        )
-                    else:
-                        trial_text = (
-                            f"\nTrial ended: `{trial_end.date()}` "
-                            f"({abs(days_remaining)} day(s) overdue)"
-                        )
-
-                await interaction.followup.send(
-                    f"`{result['rsn']}` is still a Trial Member "
-                    f"(`{result['wom_role']}`). No tenure role was changed."
-                    f"{trial_text}",
-                    ephemeral=True
-                )
-            else:
-                await interaction.followup.send(
-                    f"`{result['rsn']}` has WOM rank "
-                    f"`{result['wom_role']}`. That rank is intentionally "
-                    f"unmanaged by Novus Sync, so no Discord roles were changed.",
-                    ephemeral=True
-                )
-            return
 
         if status == "non_clan_ignored":
             await interaction.followup.send(
@@ -2210,7 +2157,7 @@ class TasksCog(commands.Cog):
         if status == "not_current_member":
             await interaction.followup.send(
                 f"{member.mention} is not an active Novus member. "
-                "Both the Discord Member role and a primary RSN in the "
+                "The Discord Member role and at least one linked RSN in the "
                 "current Novus WOM group are required. No account links "
                 "or Discord roles were changed.",
                 ephemeral=True
@@ -2881,7 +2828,6 @@ class TasksCog(commands.Cog):
             )
             return
 
-        forget_unmatched_alt_links(c, guild.id, group_data.get("memberships", []))
         await self.prepare_tenure_history(c, guild, group_data)
 
         c.execute(
@@ -3603,9 +3549,6 @@ class TasksCog(commands.Cog):
         )
         c = conn.cursor()
 
-        forget_unmatched_alt_links(
-            c, guild.id, group_data.get("memberships", [])
-        )
         await self.prepare_tenure_history(c, guild, group_data)
 
         c.execute(

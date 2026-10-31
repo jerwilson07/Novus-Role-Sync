@@ -1645,6 +1645,303 @@ class TasksCog(commands.Cog):
         await interaction.followup.send(response, ephemeral=True)
 
     # ========================================================
+    # /TENURE
+    # ========================================================
+
+    @app_commands.command(
+        name="tenure",
+        description="Check a Novus member's linked account ranks and tenure."
+    )
+    @app_commands.describe(
+        member="Novus Discord member to inspect."
+    )
+    async def tenure(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member
+    ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(
+            ephemeral=True,
+            thinking=True
+        )
+
+        guild = interaction.guild
+
+        if guild is None:
+            await interaction.followup.send(
+                "This command can only be used inside the Novus server.",
+                ephemeral=True
+            )
+            return
+
+        conn = sqlite3.connect(
+            "wom_multi.db"
+        )
+
+        try:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT group_id
+                FROM guild_configs
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+            row = c.fetchone()
+
+            if not row or not row[0]:
+                await interaction.followup.send(
+                    "No Wise Old Man group is configured.",
+                    ephemeral=True
+                )
+                return
+
+            group_data, api_status = await self.get_wom_group(
+                row[0]
+            )
+
+            if not isinstance(
+                group_data,
+                dict
+            ):
+                await interaction.followup.send(
+                    "Could not retrieve the Novus WOM group.",
+                    ephemeral=True
+                )
+                return
+
+            await self.prepare_tenure_history(
+                c,
+                guild,
+                group_data
+            )
+
+            accounts = self.get_linked_account_tenures(
+                c,
+                guild.id,
+                group_data.get("id"),
+                member.id,
+                group_data.get(
+                    "memberships",
+                    []
+                )
+            )
+
+            if not accounts:
+                await interaction.followup.send(
+                    "No linked account for that member is currently in the Novus WOM clan.",
+                    ephemeral=True
+                )
+                return
+
+            c.execute(
+                """
+                SELECT wom_role, discord_role_id
+                FROM role_mappings
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+
+            tenure_rank_by_role_id = {
+                discord_role_id: wom_role.lower()
+                for wom_role, discord_role_id
+                in c.fetchall()
+                if wom_role.lower()
+                    in NOVUS_TENURE_ROLES
+            }
+
+            discord_tenure_ranks = [
+                tenure_rank_by_role_id[
+                    role.id
+                ]
+                for role in member.roles
+                if role.id
+                    in tenure_rank_by_role_id
+            ]
+
+            current_discord_rank = (
+                max(
+                    discord_tenure_ranks,
+                    key=lambda rank:
+                        TENURE_RANK_ORDER[
+                            rank
+                        ]
+                )
+                if discord_tenure_ranks
+                else None
+            )
+
+            basis = (
+                self.get_highest_discord_tenure_basis(
+                    accounts
+                )
+            )
+
+            lines = [
+                f"Novus Tenure - {member.display_name}"
+            ]
+
+            for account in accounts:
+                label = (
+                    "Primary"
+                    if account[
+                        "account_type"
+                    ] == "primary"
+                    else "Alt"
+                )
+
+                joined = (
+                    str(
+                        account[
+                            "joined_at"
+                        ].date()
+                    )
+                    if account.get(
+                        "joined_at"
+                    )
+                    else "unknown"
+                )
+
+                prior_days = int(
+                    account.get(
+                        "prior_service",
+                        datetime.timedelta(0)
+                    ).total_seconds()
+                    / 86400
+                )
+
+                expected = account.get(
+                    "expected_rank"
+                )
+                wom_role = (
+                    account.get(
+                        "wom_role"
+                    )
+                    or "unknown"
+                )
+
+                account_lines = [
+                    "",
+                    f"{label}: {account['rsn']}",
+                    (
+                        f"WOM rank: {wom_role} | "
+                        f"current stint: {joined} | "
+                        f"previous service: {prior_days}d"
+                    ),
+                ]
+
+                if expected:
+                    account_lines.append(
+                        f"Tenure-qualified rank: {expected}"
+                    )
+
+                    next_rank = account.get(
+                        "next_rank"
+                    )
+                    next_date = account.get(
+                        "next_eligible_at"
+                    )
+
+                    if (
+                        next_rank
+                        and next_date
+                    ):
+                        account_lines.append(
+                            f"Next milestone: {next_rank} on {next_date.date()}"
+                        )
+
+                    if (
+                        wom_role
+                            in TENURE_RANK_ORDER
+                        and TENURE_RANK_ORDER[
+                            wom_role
+                        ] < TENURE_RANK_ORDER[
+                            expected
+                        ]
+                    ):
+                        due_date = account.get(
+                            "eligible_at"
+                        )
+                        due_text = (
+                            f"In-game promotion due: "
+                            f"{wom_role} -> {expected}"
+                        )
+                        if due_date:
+                            due_text += (
+                                f" on {due_date.date()}"
+                            )
+                        account_lines.append(
+                            due_text
+                        )
+
+                lines.extend(
+                    account_lines
+                )
+
+            lines.extend(
+                [
+                    "",
+                    (
+                        "Discord tenure: "
+                        f"{current_discord_rank or 'none'}"
+                    ),
+                ]
+            )
+
+            if basis:
+                lines.append(
+                    (
+                        "Discord tenure basis: "
+                        f"{basis['rsn']} "
+                        f"({basis['account_type']}) -> "
+                        f"{basis['expected_rank']}"
+                    )
+                )
+
+                if (
+                    current_discord_rank
+                    and TENURE_RANK_ORDER[
+                        current_discord_rank
+                    ] > TENURE_RANK_ORDER[
+                        basis["expected_rank"]
+                    ]
+                ):
+                    lines.append(
+                        "Higher existing Discord tenure retained; automatic downgrades are disabled."
+                    )
+
+            response = "\n".join(
+                lines
+            )
+
+            if len(response) > 1950:
+                response = (
+                    response[:1900]
+                    + "\n\n...additional account details omitted."
+                )
+
+            conn.commit()
+
+            await interaction.followup.send(
+                response,
+                ephemeral=True
+            )
+
+        finally:
+            conn.close()
+
+    # ========================================================
     # /TENURECREDIT
     # ========================================================
 

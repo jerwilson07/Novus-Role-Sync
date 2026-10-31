@@ -1790,8 +1790,8 @@ class ConfigCog(commands.Cog):
     # ========================================================
 
     @app_commands.command(
-        name="audit",
-        description="Run a combined Novus WOM/Discord link audit."
+        name="linkaudit",
+        description="Legacy WOM/Discord link audit."
     )
     async def audit(
         self,

@@ -119,23 +119,6 @@ def build_wom_headers():
     return headers
 
 
-def months_between(start: datetime.datetime, end: datetime.datetime) -> int:
-    """
-    Returns the number of fully completed calendar months between two dates.
-    """
-
-    months = (
-        (end.year - start.year) * 12
-        + end.month
-        - start.month
-    )
-
-    if end.day < start.day:
-        months -= 1
-
-    return max(months, 0)
-
-
 def expected_tenure_rank(
     joined_at: datetime.datetime,
     now: datetime.datetime | None = None
@@ -145,8 +128,17 @@ def expected_tenure_rank(
         return "squire"
 
     now = now or datetime.datetime.now(
-        datetime.timezone.utc
+        ZoneInfo("America/New_York")
     )
+
+    if now.tzinfo is None:
+        now = now.replace(
+            tzinfo=ZoneInfo("America/New_York")
+        )
+    else:
+        now = now.astimezone(
+            ZoneInfo("America/New_York")
+        )
 
     for role_name, required_months in PROMOTION_THRESHOLDS:
         eligible_at = add_calendar_months(
@@ -761,7 +753,7 @@ class TasksCog(commands.Cog):
         ]
 
         today = datetime.datetime.now(
-            datetime.timezone.utc
+            ZoneInfo("America/New_York")
         ).date()
 
         due_today = []
@@ -2306,6 +2298,18 @@ class TasksCog(commands.Cog):
                 f"\nExpected Tenure Rank: `{expected_tenure}`"
             )
 
+            basis_rsn = result.get(
+                "tenure_basis_rsn"
+            )
+            basis_type = result.get(
+                "tenure_basis_type"
+            )
+            if basis_rsn:
+                response += (
+                    f"\nDiscord Tenure Basis: `{basis_rsn}` "
+                    f"({basis_type})"
+                )
+
         response += (
             f"\nDiscord Tenure Before Sync: "
             f"`{current_tenure or 'none'}`"
@@ -2326,15 +2330,16 @@ class TasksCog(commands.Cog):
             )
 
         if result.get("wom_tenure_mismatch"):
-            direction = result.get(
-                "wom_tenure_direction",
-                "mismatched"
-            )
-            response += (
-                f"\nWOM Tenure Mismatch: `{result['wom_role']}` is "
-                f"**{direction}** relative to the expected "
-                f"`{expected_tenure}` rank."
-            )
+            response += "\nWOM Tenure Mismatch:"
+            for account in result.get(
+                "wom_tenure_mismatches",
+                []
+            ):
+                response += (
+                    f"\n- `{account['rsn']}` ({account['account_type']}): "
+                    f"`{account['wom_role']}` -> expected "
+                    f"`{account['expected_rank']}`"
+                )
 
         added_text = (
             ", ".join(role.mention for role in added)
@@ -2946,7 +2951,8 @@ class TasksCog(commands.Cog):
 
             if result.get("tenure_status") == "promoted":
                 automatic_promotions.append(
-                    f"- {member.mention} (`{result['rsn']}`): "
+                    f"- {member.mention} "
+                    f"(basis `{result.get('tenure_basis_rsn') or result['rsn']}`): "
                     f"`{result.get('current_discord_tenure_rank') or 'none'}` "
                     f"-> `{result['expected_tenure_rank']}`"
                 )
@@ -2963,12 +2969,16 @@ class TasksCog(commands.Cog):
                 )
 
             if result.get("wom_tenure_mismatch"):
-                wom_mismatches.append(
-                    f"- {member.mention} (`{result['rsn']}`): WOM "
-                    f"`{result['wom_role']}`, expected "
-                    f"`{result['expected_tenure_rank']}` "
-                    f"({result['wom_tenure_direction']})"
-                )
+                for account in result.get(
+                    "wom_tenure_mismatches",
+                    []
+                ):
+                    wom_mismatches.append(
+                        f"- {member.mention} "
+                        f"(`{account['rsn']}` {account['account_type']}): WOM "
+                        f"`{account['wom_role']}`, expected "
+                        f"`{account['expected_rank']}` (behind)"
+                    )
 
         promotion_audit = (
             self.get_promotion_audit_entries(
@@ -3704,7 +3714,8 @@ class TasksCog(commands.Cog):
 
             if tenure_status == "promoted":
                 automatic_promotions.append(
-                    f"- {member.mention} (`{result['rsn']}`): "
+                    f"- {member.mention} "
+                    f"(basis `{result.get('tenure_basis_rsn') or result['rsn']}`): "
                     f"`{result.get('current_discord_tenure_rank') or 'none'}` "
                     f"-> `{result['expected_tenure_rank']}`"
                 )
@@ -3727,12 +3738,16 @@ class TasksCog(commands.Cog):
                 )
 
             if result.get("wom_tenure_mismatch"):
-                wom_rank_mismatches.append(
-                    f"- {member.mention} (`{result['rsn']}`): WOM "
-                    f"`{result['wom_role']}`, expected "
-                    f"`{result['expected_tenure_rank']}` "
-                    f"({result['wom_tenure_direction']})"
-                )
+                for account in result.get(
+                    "wom_tenure_mismatches",
+                    []
+                ):
+                    wom_rank_mismatches.append(
+                        f"- {member.mention} "
+                        f"(`{account['rsn']}` {account['account_type']}): WOM "
+                        f"`{account['wom_role']}`, expected "
+                        f"`{account['expected_rank']}` (behind)"
+                    )
 
             if (
                 result.get("staff_roles_added")

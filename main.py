@@ -601,10 +601,16 @@ class WOMBot(
                         f"{filename}: {e}"
                     )
 
-        # Novus staff only use these four operational commands.
-        # Keep the other command implementations in the repository so
-        # configuration can be restored later without rewriting bot logic.
-        allowed_commands = {"audit", "syncall", "autolink", "trials"}
+        # Keep the operational Novus staff commands visible while leaving
+        # configuration/maintenance commands implemented but hidden.
+        allowed_commands = {
+            "audit",
+            "syncall",
+            "autolink",
+            "trials",
+            "tenure",
+            "promotions",
+        }
         registered_commands = self.tree.get_commands()
         registered_names = {command.name for command in registered_commands}
         missing_commands = allowed_commands - registered_names
@@ -627,7 +633,7 @@ class WOMBot(
             await self.tree.sync()
 
             logger.info(
-                "Registered only the four Novus commands: %s",
+                "Registered Novus operational commands: %s",
                 ", ".join(sorted(allowed_commands))
             )
 

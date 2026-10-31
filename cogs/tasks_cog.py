@@ -439,10 +439,11 @@ class TasksCog(commands.Cog):
         wom_by_username: dict
     ):
         """
-        Resolve and update alt RSNs/WOM IDs.
+        Resolve and refresh linked alt identities.
 
-        Alts are informational only. They never return a rank and therefore
-        can never affect Discord roles.
+        Alts temporarily outside Novus remain linked so their independent
+        tenure history can resume if they later rejoin. Only current in-clan
+        alts participate in tenure and promotion calculations.
         """
 
         cursor.execute(
@@ -459,7 +460,6 @@ class TasksCog(commands.Cog):
         )
 
         alts = cursor.fetchall()
-
         verified = []
         missing = []
 
@@ -471,27 +471,28 @@ class TasksCog(commands.Cog):
                     alt_wom_id
                 )
 
-            if membership is None:
+            if membership is None and alt_rsn:
                 membership = wom_by_username.get(
                     alt_rsn.lower()
                 )
 
             if membership is None:
-                # Unlinked alts outside Novus do not belong in Novus Sync.
-                cursor.execute(
-                    """
-                    DELETE FROM alt_links
-                    WHERE guild_id = ? AND discord_id = ? AND rsn = ?
-                    """,
-                    (guild_id, discord_id, alt_rsn),
+                missing.append(
+                    alt_rsn
                 )
                 continue
 
-            current_alt_rsn = (
-                membership["player"]["username"]
+            player = membership.get(
+                "player",
+                {}
             )
-            current_alt_id = (
-                membership["player"]["id"]
+            current_alt_rsn = player.get(
+                "username",
+                alt_rsn
+            )
+            current_alt_id = player.get(
+                "id",
+                alt_wom_id
             )
 
             cursor.execute(
@@ -511,9 +512,409 @@ class TasksCog(commands.Cog):
                 )
             )
 
-            verified.append(current_alt_rsn)
+            verified.append(
+                current_alt_rsn
+            )
 
         return verified, missing
+
+    def get_linked_account_tenures(
+        self,
+        cursor,
+        guild_id: int,
+        group_id: int,
+        discord_id: int,
+        memberships: list
+    ):
+        """Return independent tenure snapshots for every linked in-clan RSN."""
+
+        wom_by_id = {
+            membership["player"]["id"]: membership
+            for membership in memberships
+            if isinstance(membership, dict)
+            and isinstance(membership.get("player"), dict)
+            and membership["player"].get("id") is not None
+        }
+
+        wom_by_username = {
+            membership["player"]["username"].lower(): membership
+            for membership in memberships
+            if isinstance(membership, dict)
+            and isinstance(membership.get("player"), dict)
+            and membership["player"].get("username")
+        }
+
+        cursor.execute(
+            """
+            SELECT rsn, wom_id
+            FROM links
+            WHERE guild_id = ?
+            AND discord_id = ?
+            """,
+            (
+                guild_id,
+                discord_id
+            )
+        )
+        primary = cursor.fetchone()
+
+        cursor.execute(
+            """
+            SELECT rsn, wom_id
+            FROM alt_links
+            WHERE guild_id = ?
+            AND discord_id = ?
+            ORDER BY rowid
+            """,
+            (
+                guild_id,
+                discord_id
+            )
+        )
+        alts = cursor.fetchall()
+
+        account_rows = []
+
+        if primary:
+            account_rows.append(
+                (
+                    "primary",
+                    primary[0],
+                    primary[1]
+                )
+            )
+
+        account_rows.extend(
+            (
+                "alt",
+                alt_rsn,
+                alt_wom_id
+            )
+            for alt_rsn, alt_wom_id in alts
+        )
+
+        snapshots = []
+        seen_player_ids = set()
+
+        for account_type, stored_rsn, stored_wom_id in account_rows:
+            membership = None
+
+            if stored_wom_id is not None:
+                membership = wom_by_id.get(
+                    stored_wom_id
+                )
+
+            if membership is None and stored_rsn:
+                membership = wom_by_username.get(
+                    stored_rsn.lower()
+                )
+
+            if membership is None:
+                continue
+
+            player = membership.get(
+                "player",
+                {}
+            )
+            player_id = player.get(
+                "id"
+            )
+
+            if player_id in seen_player_ids:
+                continue
+
+            if player_id is not None:
+                seen_player_ids.add(
+                    player_id
+                )
+
+            current_rsn = player.get(
+                "username",
+                stored_rsn
+            )
+            wom_role = (
+                membership.get(
+                    "role",
+                    ""
+                ).lower()
+            )
+            joined_at = get_membership_joined_at(
+                membership
+            )
+
+            effective_joined_at = None
+            prior_service = datetime.timedelta(0)
+            expected_rank = None
+            eligible_at = None
+            next_rank = None
+            next_eligible_at = None
+
+            if joined_at is not None:
+                (
+                    effective_joined_at,
+                    prior_service
+                ) = cumulative_effective_join(
+                    cursor,
+                    guild_id,
+                    group_id,
+                    player_id,
+                    joined_at
+                )
+
+                if wom_role not in NOVUS_TRIAL_WOM_RANKS:
+                    expected_rank = expected_tenure_rank(
+                        effective_joined_at
+                    )
+                    eligible_at = tenure_eligible_at(
+                        effective_joined_at,
+                        expected_rank
+                    )
+
+                    next_rank = next_tenure_rank(
+                        expected_rank
+                    )
+
+                    if next_rank:
+                        next_eligible_at = tenure_eligible_at(
+                            effective_joined_at,
+                            next_rank
+                        )
+
+            snapshots.append(
+                {
+                    "account_type": account_type,
+                    "rsn": current_rsn,
+                    "player_id": player_id,
+                    "wom_role": wom_role,
+                    "joined_at": joined_at,
+                    "effective_joined_at": effective_joined_at,
+                    "prior_service": prior_service,
+                    "expected_rank": expected_rank,
+                    "eligible_at": eligible_at,
+                    "next_rank": next_rank,
+                    "next_eligible_at": next_eligible_at,
+                    "membership": membership,
+                }
+            )
+
+        return snapshots
+
+    def get_highest_discord_tenure_basis(
+        self,
+        account_tenures: list
+    ):
+        """Choose the highest independently earned linked-account tenure rank."""
+
+        eligible = [
+            account
+            for account in account_tenures
+            if account.get(
+                "expected_rank"
+            ) in TENURE_RANK_ORDER
+        ]
+
+        if not eligible:
+            return None
+
+        return max(
+            eligible,
+            key=lambda account: TENURE_RANK_ORDER[
+                account["expected_rank"]
+            ]
+        )
+
+    def get_promotion_audit_entries(
+        self,
+        cursor,
+        guild: discord.Guild,
+        group_data: dict,
+        upcoming_days: int = 14
+    ):
+        """
+        Audit in-game promotions for primary and alt RSNs separately.
+
+        Each account is compared only with its own WOM rank and its own
+        cumulative tenure. Discord role state does not determine whether an
+        in-game promotion is due.
+        """
+
+        memberships = group_data.get(
+            "memberships",
+            []
+        )
+        group_id = group_data.get(
+            "id"
+        )
+
+        cursor.execute(
+            """
+            SELECT DISTINCT discord_id
+            FROM links
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+
+        discord_ids = [
+            row[0]
+            for row in cursor.fetchall()
+        ]
+
+        today = datetime.datetime.now(
+            datetime.timezone.utc
+        ).date()
+
+        due_today = []
+        overdue = []
+        upcoming = []
+        missing_join_dates = []
+        active_accounts = 0
+
+        for discord_id in discord_ids:
+            member = guild.get_member(
+                discord_id
+            )
+
+            if (
+                member is None
+                or has_non_clan_role(member)
+                or not has_novus_member_role(member)
+            ):
+                continue
+
+            accounts = self.get_linked_account_tenures(
+                cursor,
+                guild.id,
+                group_id,
+                discord_id,
+                memberships
+            )
+
+            active_accounts += len(
+                accounts
+            )
+
+            for account in accounts:
+                wom_role = account.get(
+                    "wom_role"
+                )
+                joined_at = account.get(
+                    "joined_at"
+                )
+                expected_rank = account.get(
+                    "expected_rank"
+                )
+
+                if wom_role in NOVUS_TRIAL_WOM_RANKS:
+                    continue
+
+                if joined_at is None:
+                    missing_join_dates.append(
+                        {
+                            "member": member,
+                            **account,
+                        }
+                    )
+                    continue
+
+                # Staff/special WOM ranks still contribute to Discord tenure,
+                # but they are not waiting for a normal in-game tenure rank.
+                if (
+                    wom_role not in TENURE_RANK_ORDER
+                    or expected_rank not in TENURE_RANK_ORDER
+                ):
+                    continue
+
+                current_level = TENURE_RANK_ORDER[
+                    wom_role
+                ]
+                expected_level = TENURE_RANK_ORDER[
+                    expected_rank
+                ]
+
+                if current_level < expected_level:
+                    eligible_at = tenure_eligible_at(
+                        account["effective_joined_at"],
+                        expected_rank
+                    )
+                    eligible_date = eligible_at.date()
+
+                    entry = {
+                        "member": member,
+                        **account,
+                        "current_rank": wom_role,
+                        "target_rank": expected_rank,
+                        "eligible_at": eligible_at,
+                        "overdue_days": max(
+                            (
+                                today
+                                - eligible_date
+                            ).days,
+                            0
+                        ),
+                    }
+
+                    if eligible_date == today:
+                        due_today.append(
+                            entry
+                        )
+                    elif eligible_date < today:
+                        overdue.append(
+                            entry
+                        )
+
+                    continue
+
+                next_rank = next_tenure_rank(
+                    wom_role
+                )
+
+                if not next_rank:
+                    continue
+
+                next_eligible_at = tenure_eligible_at(
+                    account["effective_joined_at"],
+                    next_rank
+                )
+
+                days_until = (
+                    next_eligible_at.date()
+                    - today
+                ).days
+
+                if (
+                    days_until >= 1
+                    and days_until <= upcoming_days
+                ):
+                    upcoming.append(
+                        {
+                            "member": member,
+                            **account,
+                            "current_rank": wom_role,
+                            "target_rank": next_rank,
+                            "eligible_at": next_eligible_at,
+                            "days_until": days_until,
+                        }
+                    )
+
+        due_today.sort(
+            key=lambda entry: entry["rsn"].lower()
+        )
+        overdue.sort(
+            key=lambda entry: entry["overdue_days"],
+            reverse=True
+        )
+        upcoming.sort(
+            key=lambda entry: entry["days_until"]
+        )
+
+        return {
+            "due_today": due_today,
+            "overdue": overdue,
+            "upcoming": upcoming,
+            "missing_join_dates": missing_join_dates,
+            "active_accounts": active_accounts,
+        }
 
     # ========================================================
     # ROLE SYNC ENGINE

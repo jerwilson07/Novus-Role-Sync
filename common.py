@@ -60,42 +60,13 @@ def forget_non_clan_links(cursor, guild) -> tuple[int, int]:
 
 
 def forget_unmatched_alt_links(cursor, guild_id: int, memberships: list) -> int:
-    """Forget linked alts absent from a successfully fetched Novus WOM roster.
+    """Legacy compatibility no-op.
 
-    Match by stable WOM ID first or RSN as a fallback. Do not remove primary
-    accounts or any account when WOM returns an empty/malformed roster.
+    Linked alts are retained when they temporarily leave the WOM roster so
+    their independent tenure history remains associated with the same Discord
+    member if they later rejoin. Out-of-clan alts are simply ignored by sync.
     """
-    if not memberships or not all(
-        isinstance(entry, dict)
-        and isinstance(entry.get("player"), dict)
-        and entry["player"].get("username")
-        and entry["player"].get("id") is not None
-        for entry in memberships
-    ):
-        return 0
-
-    current_ids = {entry["player"]["id"] for entry in memberships}
-    current_names = {
-        entry["player"]["username"].casefold()
-        for entry in memberships
-    }
-
-    cursor.execute(
-        "SELECT discord_id, rsn, wom_id FROM alt_links WHERE guild_id = ?",
-        (guild_id,),
-    )
-
-    removed = 0
-    for discord_id, rsn, wom_id in cursor.fetchall():
-        if wom_id in current_ids or (rsn and rsn.casefold() in current_names):
-            continue
-        cursor.execute(
-            "DELETE FROM alt_links WHERE guild_id = ? AND discord_id = ? AND rsn = ?",
-            (guild_id, discord_id, rsn),
-        )
-        removed += cursor.rowcount
-
-    return removed
+    return 0
 
 
 

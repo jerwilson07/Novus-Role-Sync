@@ -930,16 +930,30 @@ class TasksCog(commands.Cog):
         """
         Sync one linked Discord member.
 
-        Tenure roles are based on WOM clientSyncJoinedAt, not the visible WOM
-        clan rank. Tenure may move upward automatically, but never downward.
+        Primary and alt accounts keep separate cumulative tenure. The Discord
+        tenure role is based on whichever current linked in-clan account has
+        independently earned the highest tenure rank. Discord tenure never
+        moves downward automatically.
         """
 
-        if has_non_clan_role(member):
-            forget_member_links(cursor, guild.id, member.id)
-            return {"status": "non_clan_ignored"}
+        if has_non_clan_role(
+            member
+        ):
+            forget_member_links(
+                cursor,
+                guild.id,
+                member.id
+            )
+            return {
+                "status": "non_clan_ignored"
+            }
 
-        if not has_novus_member_role(member):
-            return {"status": "not_current_member"}
+        if not has_novus_member_role(
+            member
+        ):
+            return {
+                "status": "not_current_member"
+            }
 
         cursor.execute(
             """
@@ -971,11 +985,23 @@ class TasksCog(commands.Cog):
         wom_by_id = {
             membership["player"]["id"]: membership
             for membership in memberships
+            if isinstance(membership, dict)
+            and isinstance(
+                membership.get("player"),
+                dict
+            )
+            and membership["player"].get("id") is not None
         }
 
         wom_by_username = {
             membership["player"]["username"].lower(): membership
             for membership in memberships
+            if isinstance(membership, dict)
+            and isinstance(
+                membership.get("player"),
+                dict
+            )
+            and membership["player"].get("username")
         }
 
         # ----------------------------------------------------
@@ -985,83 +1011,96 @@ class TasksCog(commands.Cog):
         membership = None
 
         if wom_id:
-            membership = wom_by_id.get(wom_id)
+            membership = wom_by_id.get(
+                wom_id
+            )
 
-        if membership is None:
+        if (
+            membership is None
+            and rsn
+        ):
             membership = wom_by_username.get(
                 rsn.lower()
             )
 
-        if membership is None:
-            # Verified Discord access alone does not establish clan membership.
-            # Retain the link for a possible future return; don't report it.
-            return {"status": "not_current_member"}
+        current_rsn = rsn
+        current_wom_id = wom_id
+        current_wom_role = ""
 
-        player = membership.get(
-            "player",
-            {}
-        )
-
-        current_rsn = player.get(
-            "username",
-            rsn
-        )
-
-        current_wom_id = player.get(
-            "id"
-        )
-
-        current_wom_role = (
-            membership.get(
-                "role",
-                ""
-            ).lower()
-        )
-
-        # Keep database current if WOM ID or RSN changed.
-        if (
-            current_wom_id != wom_id
-            or current_rsn.lower() != rsn.lower()
-        ):
-            cursor.execute(
-                """
-                UPDATE links
-                SET rsn = ?, wom_id = ?
-                WHERE guild_id = ?
-                AND discord_id = ?
-                """,
-                (
-                    current_rsn,
-                    current_wom_id,
-                    guild.id,
-                    member.id
-                )
+        if membership is not None:
+            player = membership.get(
+                "player",
+                {}
             )
+
+            current_rsn = player.get(
+                "username",
+                rsn
+            )
+
+            current_wom_id = player.get(
+                "id"
+            )
+
+            current_wom_role = (
+                membership.get(
+                    "role",
+                    ""
+                ).lower()
+            )
+
+            if (
+                current_wom_id != wom_id
+                or (
+                    current_rsn
+                    and rsn
+                    and current_rsn.lower()
+                        != rsn.lower()
+                )
+            ):
+                cursor.execute(
+                    """
+                    UPDATE links
+                    SET rsn = ?, wom_id = ?
+                    WHERE guild_id = ?
+                    AND discord_id = ?
+                    """,
+                    (
+                        current_rsn,
+                        current_wom_id,
+                        guild.id,
+                        member.id
+                    )
+                )
 
         # ----------------------------------------------------
         # ALT ACCOUNTS
         # ----------------------------------------------------
 
-        verified_alts, missing_alts = (
-            self.sync_alt_links_in_database(
+        (
+            verified_alts,
+            missing_alts
+        ) = self.sync_alt_links_in_database(
+            cursor,
+            guild.id,
+            member.id,
+            wom_by_id,
+            wom_by_username
+        )
+
+        account_tenures = (
+            self.get_linked_account_tenures(
                 cursor,
                 guild.id,
+                group_data.get("id"),
                 member.id,
-                wom_by_id,
-                wom_by_username
+                memberships
             )
         )
 
-        # Trials and the owner rank intentionally stay outside the tenure
-        # synchronization engine. Trial timing is handled separately.
-        if current_wom_role in IGNORED_WOM_RANKS:
+        if not account_tenures:
             return {
-                "status": "ignored_rank",
-                "rsn": current_rsn,
-                "wom_role": current_wom_role,
-                "joined_at": get_membership_joined_at(membership),
-                "verified_alts": verified_alts,
-                "missing_alts": missing_alts,
+                "status": "not_current_member"
             }
 
         # ----------------------------------------------------
@@ -1078,25 +1117,38 @@ class TasksCog(commands.Cog):
         )
 
         configured_map = {
-            wom_role.lower(): guild.get_role(discord_role_id)
-            for wom_role, discord_role_id in cursor.fetchall()
-            if guild.get_role(discord_role_id)
+            wom_role.lower(): guild.get_role(
+                discord_role_id
+            )
+            for wom_role, discord_role_id
+            in cursor.fetchall()
+            if guild.get_role(
+                discord_role_id
+            )
         }
 
         tenure_role_by_id = {
             role.id: wom_role
-            for wom_role, role in configured_map.items()
+            for wom_role, role
+            in configured_map.items()
             if wom_role in NOVUS_TENURE_ROLES
             and role is not None
         }
 
         staff_roles = {
-            guild.get_role(role_id)
-            for role_id in NOVUS_STAFF_WOM_ROLES.values()
-            if guild.get_role(role_id)
+            guild.get_role(
+                role_id
+            )
+            for role_id
+            in NOVUS_STAFF_WOM_ROLES.values()
+            if guild.get_role(
+                role_id
+            )
         }
 
-        member_roles = set(member.roles)
+        member_roles = set(
+            member.roles
+        )
 
         tenure_roles_to_add = []
         tenure_roles_to_remove = []
@@ -1104,15 +1156,21 @@ class TasksCog(commands.Cog):
         staff_roles_to_remove = []
 
         # ----------------------------------------------------
-        # STAFF ROLE SYNC
+        # STAFF ROLE SYNC - PRIMARY ACCOUNT ONLY
         # ----------------------------------------------------
 
         staff_target_role = None
 
-        if current_wom_role in NOVUS_STAFF_WOM_ROLES:
-            staff_role_id = NOVUS_STAFF_WOM_ROLES[
-                current_wom_role
-            ]
+        if (
+            membership is not None
+            and current_wom_role
+                in NOVUS_STAFF_WOM_ROLES
+        ):
+            staff_role_id = (
+                NOVUS_STAFF_WOM_ROLES[
+                    current_wom_role
+                ]
+            )
 
             staff_target_role = guild.get_role(
                 staff_role_id
@@ -1142,34 +1200,53 @@ class TasksCog(commands.Cog):
                         role
                     )
 
-        elif current_wom_role in NOVUS_TENURE_ROLES:
-            # A normal tenure WOM rank means WOM no longer identifies this
-            # account as staff, so stale Novus staff roles can be removed.
+        elif (
+            membership is not None
+            and current_wom_role
+                in NOVUS_TENURE_ROLES
+        ):
             for role in staff_roles:
                 if role in member_roles:
                     staff_roles_to_remove.append(
                         role
                     )
 
-        # Specialty/status WOM ranks are deliberately left alone. They do not
-        # cause specialty Discord roles or existing staff roles to be changed.
+        # All other specialty/status roles are left alone. They may coexist
+        # with the underlying tenure role.
 
         # ----------------------------------------------------
-        # TENURE SYNC - PROMOTIONS ONLY
+        # TENURE SYNC - HIGHEST LINKED ACCOUNT, NEVER DOWNGRADE
         # ----------------------------------------------------
 
-        joined_at = get_membership_joined_at(membership)
-        effective_joined_at, prior_service = cumulative_effective_join(
-            cursor, guild.id, group_data.get("id"), current_wom_id, joined_at
+        basis = (
+            self.get_highest_discord_tenure_basis(
+                account_tenures
+            )
         )
 
-        expected_rank = None
-        expected_role = None
+        expected_rank = (
+            basis.get(
+                "expected_rank"
+            )
+            if basis
+            else None
+        )
+
+        expected_role = (
+            configured_map.get(
+                expected_rank
+            )
+            if expected_rank
+            else None
+        )
+
         current_discord_tenure_rank = None
-        tenure_status = "missing_join_date"
+        tenure_status = "no_tenure_account"
 
         discord_tenure_ranks = [
-            tenure_role_by_id[role.id]
+            tenure_role_by_id[
+                role.id
+            ]
             for role in member.roles
             if role.id in tenure_role_by_id
         ]
@@ -1177,129 +1254,165 @@ class TasksCog(commands.Cog):
         if discord_tenure_ranks:
             current_discord_tenure_rank = max(
                 discord_tenure_ranks,
-                key=lambda rank: TENURE_RANK_ORDER[rank]
+                key=lambda rank:
+                    TENURE_RANK_ORDER[
+                        rank
+                    ]
             )
 
-        if joined_at is not None:
-            expected_rank = expected_tenure_rank(
-                effective_joined_at
-            )
-
-            expected_role = configured_map.get(
-                expected_rank
-            )
-
+        if expected_rank is not None:
             if expected_role is None:
                 tenure_status = "not_mapped"
             else:
-                expected_level = TENURE_RANK_ORDER[
-                    expected_rank
-                ]
+                expected_level = (
+                    TENURE_RANK_ORDER[
+                        expected_rank
+                    ]
+                )
 
-                if current_discord_tenure_rank is None:
-                    tenure_roles_to_add.append(
-                        expected_role
-                    )
+                current_level = (
+                    TENURE_RANK_ORDER[
+                        current_discord_tenure_rank
+                    ]
+                    if current_discord_tenure_rank
+                    else -1
+                )
+
+                if current_level < expected_level:
+                    if expected_role not in member_roles:
+                        tenure_roles_to_add.append(
+                            expected_role
+                        )
+
+                    for role in member.roles:
+                        mapped_rank = (
+                            tenure_role_by_id.get(
+                                role.id
+                            )
+                        )
+
+                        if (
+                            mapped_rank is not None
+                            and TENURE_RANK_ORDER[
+                                mapped_rank
+                            ] < expected_level
+                        ):
+                            tenure_roles_to_remove.append(
+                                role
+                            )
+
                     tenure_status = "promoted"
 
                 else:
-                    current_level = TENURE_RANK_ORDER[
-                        current_discord_tenure_rank
-                    ]
+                    # Keep the highest existing tenure role even if the
+                    # account that originally earned it later leaves Novus.
+                    # Only lower duplicate tenure roles are removed.
+                    retained_level = max(
+                        current_level,
+                        expected_level
+                    )
 
-                    if current_level < expected_level:
-                        # Safe upward movement: add the rank supported by tenure
-                        # and remove only lower tenure roles being replaced.
-                        if expected_role not in member_roles:
-                            tenure_roles_to_add.append(
-                                expected_role
-                            )
-
-                        for role in member.roles:
-                            mapped_rank = tenure_role_by_id.get(
+                    for role in member.roles:
+                        mapped_rank = (
+                            tenure_role_by_id.get(
                                 role.id
                             )
-
-                            if (
-                                mapped_rank is not None
-                                and TENURE_RANK_ORDER[mapped_rank] < expected_level
-                            ):
-                                tenure_roles_to_remove.append(
-                                    role
-                                )
-
-                        tenure_status = "promoted"
-
-                    elif current_level == expected_level:
-                        # If duplicate lower tenure roles exist, safely clean
-                        # them up without moving the member backward.
-                        for role in member.roles:
-                            mapped_rank = tenure_role_by_id.get(
-                                role.id
-                            )
-
-                            if (
-                                mapped_rank is not None
-                                and TENURE_RANK_ORDER[mapped_rank] < expected_level
-                            ):
-                                tenure_roles_to_remove.append(
-                                    role
-                                )
-
-                        tenure_status = (
-                            "duplicate_cleanup"
-                            if tenure_roles_to_remove
-                            else "current"
                         )
 
+                        if (
+                            mapped_rank is not None
+                            and TENURE_RANK_ORDER[
+                                mapped_rank
+                            ] < retained_level
+                        ):
+                            tenure_roles_to_remove.append(
+                                role
+                            )
+
+                    if tenure_roles_to_remove:
+                        tenure_status = (
+                            "duplicate_cleanup"
+                        )
+                    elif current_level > expected_level:
+                        tenure_status = (
+                            "retained_rank"
+                        )
                     else:
-                        # WOM group activity may omit earlier in-game clan
-                        # stints. Retain the assigned rank without alleging
-                        # a premature promotion.
-                        tenure_status = "retained_rank"
+                        tenure_status = (
+                            "current"
+                        )
 
-        wom_tenure_mismatch = False
-        wom_tenure_direction = None
+        # ----------------------------------------------------
+        # PER-ACCOUNT IN-GAME TENURE MISMATCHES
+        # ----------------------------------------------------
 
-        if (
-            expected_rank is not None
-            and current_wom_role in TENURE_RANK_ORDER
-            and TENURE_RANK_ORDER[current_wom_role]
-                < TENURE_RANK_ORDER[expected_rank]
-        ):
-            # A lower WOM rank can genuinely lag calculated service.
-            # A higher WOM rank could reflect historical service omitted
-            # from the WOM group activity log, so it is not a mismatch.
-            wom_tenure_mismatch = True
-            wom_tenure_direction = "behind"
+        wom_tenure_mismatches = []
 
-        roles_to_add = list(dict.fromkeys(
-            tenure_roles_to_add
-            + staff_roles_to_add
-        ))
+        for account in account_tenures:
+            wom_role = account.get(
+                "wom_role"
+            )
+            account_expected = account.get(
+                "expected_rank"
+            )
 
-        roles_to_remove = list(dict.fromkeys(
-            tenure_roles_to_remove
-            + staff_roles_to_remove
-        ))
+            if (
+                wom_role in TENURE_RANK_ORDER
+                and account_expected
+                    in TENURE_RANK_ORDER
+                and TENURE_RANK_ORDER[
+                    wom_role
+                ] < TENURE_RANK_ORDER[
+                    account_expected
+                ]
+            ):
+                wom_tenure_mismatches.append(
+                    account
+                )
+
+        wom_tenure_mismatch = bool(
+            wom_tenure_mismatches
+        )
+
+        wom_tenure_direction = (
+            "behind"
+            if wom_tenure_mismatch
+            else None
+        )
+
+        roles_to_add = list(
+            dict.fromkeys(
+                tenure_roles_to_add
+                + staff_roles_to_add
+            )
+        )
+
+        roles_to_remove = list(
+            dict.fromkeys(
+                tenure_roles_to_remove
+                + staff_roles_to_remove
+            )
+        )
 
         # ----------------------------------------------------
         # APPLY DISCORD CHANGES
         # ----------------------------------------------------
 
         try:
-            # Add the new/higher role first. If Discord rejects the add, the
-            # member keeps their existing tenure role instead of losing it.
             if roles_to_add:
                 await member.add_roles(
                     *roles_to_add,
-                    reason="Novus role synchronization"
+                    reason=(
+                        "Novus role synchronization"
+                    )
                 )
 
             if roles_to_remove:
                 await member.remove_roles(
                     *roles_to_remove,
-                    reason="Novus role synchronization"
+                    reason=(
+                        "Novus role synchronization"
+                    )
                 )
 
         except discord.Forbidden:
@@ -1327,15 +1440,58 @@ class TasksCog(commands.Cog):
             "status": "success",
             "rsn": current_rsn,
             "wom_role": current_wom_role,
-            "joined_at": joined_at,
-            "effective_joined_at": effective_joined_at,
-            "prior_tenure_days": prior_service.total_seconds() / 86400,
+            "joined_at": (
+                get_membership_joined_at(
+                    membership
+                )
+                if membership is not None
+                else None
+            ),
+            "effective_joined_at": (
+                basis.get(
+                    "effective_joined_at"
+                )
+                if basis
+                else None
+            ),
+            "prior_tenure_days": (
+                basis.get(
+                    "prior_service",
+                    datetime.timedelta(0)
+                ).total_seconds() / 86400
+                if basis
+                else 0
+            ),
             "expected_tenure_rank": expected_rank,
             "expected_tenure_role": expected_role,
-            "current_discord_tenure_rank": current_discord_tenure_rank,
+            "current_discord_tenure_rank": (
+                current_discord_tenure_rank
+            ),
             "tenure_status": tenure_status,
-            "wom_tenure_mismatch": wom_tenure_mismatch,
-            "wom_tenure_direction": wom_tenure_direction,
+            "tenure_basis_rsn": (
+                basis.get(
+                    "rsn"
+                )
+                if basis
+                else None
+            ),
+            "tenure_basis_type": (
+                basis.get(
+                    "account_type"
+                )
+                if basis
+                else None
+            ),
+            "account_tenures": account_tenures,
+            "wom_tenure_mismatch": (
+                wom_tenure_mismatch
+            ),
+            "wom_tenure_mismatches": (
+                wom_tenure_mismatches
+            ),
+            "wom_tenure_direction": (
+                wom_tenure_direction
+            ),
             "staff_target_role": staff_target_role,
             "tenure_roles_added": tenure_roles_to_add,
             "tenure_roles_removed": tenure_roles_to_remove,

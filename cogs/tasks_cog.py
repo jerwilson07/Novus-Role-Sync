@@ -3659,15 +3659,10 @@ class TasksCog(commands.Cog):
                 removed_users_count += 1
                 continue
 
-            if not is_active_novus_member_link(
-                member, stored_rsn, stored_wom_id, memberships
+            if not has_novus_member_role(
+                member
             ):
-                # Former Novus members may retain Verified on Discord.
-                # Do not sync, flag or count them.
                 continue
-
-            active_links_checked += 1
-            eligible_links.append((discord_id, stored_rsn, stored_wom_id))
 
             result = await self.sync_one_member(
                 guild,
@@ -3677,9 +3672,19 @@ class TasksCog(commands.Cog):
             )
 
             if result["status"] in (
-                "ignored_rank", "non_clan_ignored", "not_current_member"
+                "non_clan_ignored",
+                "not_current_member"
             ):
                 continue
+
+            active_links_checked += 1
+            eligible_links.append(
+                (
+                    discord_id,
+                    stored_rsn,
+                    stored_wom_id
+                )
+            )
 
             if result["status"] != "success":
                 issue_line = format_sync_issue(
@@ -3844,6 +3849,24 @@ class TasksCog(commands.Cog):
                             f"Could not update nickname for {member} ({member.id}): {e}"
                         )
 
+        promotion_audit = (
+            self.get_promotion_audit_entries(
+                c,
+                guild,
+                group_data
+            )
+        )
+        due_today_promotions = (
+            promotion_audit[
+                "due_today"
+            ]
+        )
+        overdue_promotions = (
+            promotion_audit[
+                "overdue"
+            ]
+        )
+
         # ----------------------------------------------------
         # TRIAL MEMBERS ENDING SOON
         # ----------------------------------------------------
@@ -3992,6 +4015,8 @@ class TasksCog(commands.Cog):
 
         should_log = any((
             automatic_promotions,
+            due_today_promotions,
+            overdue_promotions,
             staff_updates,
             duplicate_cleanups,
             wom_rank_mismatches,
@@ -4022,8 +4047,52 @@ class TasksCog(commands.Cog):
 
             if automatic_promotions:
                 embed.add_field(
-                    name=f"Automatic Promotions ({len(automatic_promotions)})",
-                    value="\n".join(automatic_promotions)[:1024],
+                    name=(
+                        "Automatic Discord Tenure Promotions "
+                        f"({len(automatic_promotions)})"
+                    ),
+                    value="\n".join(
+                        automatic_promotions
+                    )[:1024],
+                    inline=False
+                )
+
+            if due_today_promotions:
+                embed.add_field(
+                    name=(
+                        "In-Game Promotions Due Today "
+                        f"({len(due_today_promotions)})"
+                    ),
+                    value="\n".join(
+                        (
+                            f"- {entry['member'].mention} "
+                            f"({entry['rsn']} {entry['account_type']}): "
+                            f"{entry['current_rank']} -> "
+                            f"{entry['target_rank']}"
+                        )
+                        for entry
+                        in due_today_promotions
+                    )[:1024],
+                    inline=False
+                )
+
+            if overdue_promotions:
+                embed.add_field(
+                    name=(
+                        "Overdue In-Game Promotions "
+                        f"({len(overdue_promotions)})"
+                    ),
+                    value="\n".join(
+                        (
+                            f"- {entry['member'].mention} "
+                            f"({entry['rsn']} {entry['account_type']}): "
+                            f"{entry['current_rank']} -> "
+                            f"{entry['target_rank']} "
+                            f"({entry['overdue_days']}d overdue)"
+                        )
+                        for entry
+                        in overdue_promotions
+                    )[:1024],
                     inline=False
                 )
 

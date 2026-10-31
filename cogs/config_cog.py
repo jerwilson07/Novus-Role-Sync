@@ -888,8 +888,7 @@ class ConfigCog(commands.Cog):
 
         if guild is None:
             await interaction.followup.send(
-                "This command can only be used "
-                "inside the Novus server.",
+                "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
             return
@@ -897,470 +896,894 @@ class ConfigCog(commands.Cog):
         conn = sqlite3.connect(
             "wom_multi.db"
         )
-        c = conn.cursor()
-        forget_non_clan_links(c, guild)
-        conn.commit()
-
-        c.execute(
-            """
-            SELECT group_id
-            FROM guild_configs
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
-        )
-
-        config = c.fetchone()
-
-        if not config or not config[0]:
-            conn.close()
-
-            await interaction.followup.send(
-                "No WOM group is configured.",
-                ephemeral=True
-            )
-            return
-
-        group_id = config[0]
-
-        url = (
-            f"https://api.wiseoldman.net/v2/groups/"
-            f"{group_id}"
-        )
 
         try:
-            async with self.bot.http_session.get(
-                url,
-                headers=build_wom_headers(),
-                timeout=30
-            ) as response:
-
-                if response.status != 200:
-                    conn.close()
-
-                    await interaction.followup.send(
-                        f"Wise Old Man returned API "
-                        f"error `{response.status}`.",
-                        ephemeral=True
-                    )
-                    return
-
-                data = await response.json()
-
-        except Exception as e:
-            logger.error(
-                f"/autolink WOM request failed: {e}"
+            c = conn.cursor()
+            forget_non_clan_links(
+                c,
+                guild
             )
-
-            conn.close()
-
-            await interaction.followup.send(
-                "Could not retrieve the Novus WOM group.",
-                ephemeral=True
-            )
-            return
-
-        memberships = data.get(
-            "memberships",
-            []
-        )
-
-        forget_unmatched_alt_links(c, guild.id, memberships)
-        conn.commit()
-
-        wom_by_username = {
-            membership["player"]["username"].lower():
-                membership
-            for membership in memberships
-        }
-
-        # Existing primary links are protected and will not be replaced.
-        c.execute(
-            """
-            SELECT discord_id, rsn, wom_id
-            FROM links
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
-        )
-
-        existing_rows = c.fetchall()
-        active_existing_rows = [
-            (discord_id, rsn, wom_id)
-            for discord_id, rsn, wom_id in existing_rows
-            if is_active_novus_member_link(
-                guild.get_member(discord_id), rsn, wom_id, memberships
-            )
-        ]
-        active_existing_ids = {row[0] for row in active_existing_rows}
-
-        existing_links = {
-            row[0]
-            for row in existing_rows
-        }
-
-        # Track every WOM account already associated with a Discord user.
-        claimed_wom_ids = {
-            wom_id
-            for _, _, wom_id in active_existing_rows
-            if wom_id is not None
-        }
-
-        claimed_wom_names = {
-            rsn.lower()
-            for _, rsn, _ in active_existing_rows
-            if rsn
-        }
-
-        c.execute(
-            """
-            SELECT discord_id, rsn, wom_id
-            FROM alt_links
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
-        )
-
-        existing_alt_rows = [
-            (rsn, wom_id)
-            for discord_id, rsn, wom_id in c.fetchall()
-            if discord_id in active_existing_ids
-        ]
-
-        claimed_wom_ids.update(
-            wom_id
-            for _, wom_id in existing_alt_rows
-            if wom_id is not None
-        )
-
-        claimed_wom_names.update(
-            rsn.lower()
-            for rsn, _ in existing_alt_rows
-            if rsn
-        )
-
-        linked_members = []
-        already_linked = []
-        unmatched_discord_members = []
-
-        for member in guild.members:
-
-            if member.bot or not has_novus_member_role(member):
-                continue
-
-            if member.id in existing_links:
-                if member.id in active_existing_ids:
-                    already_linked.append(member)
-                # Retain old links without counting former members.
-                continue
-
-            display_name = member.display_name
-
-            # Supported formats:
-            # Main RSN
-            # Main RSN | Alt RSN
-            # Main RSN / Alt RSN
-            # Either separator may be used more than once.
-            raw_parts = [
-                part.strip()
-                for part in re.split(r"[|/]", display_name)
-                if part.strip()
-            ]
-
-            if not raw_parts:
-                unmatched_discord_members.append(
-                    member
-                )
-                continue
-
-            accounts = [
-                sanitize_rsn(part)
-                for part in raw_parts
-            ]
-
-            primary_candidate = accounts[0]
-
-            primary_membership = (
-                wom_by_username.get(
-                    primary_candidate.lower()
-                )
-            )
-
-            # Never guess the primary identity.
-            if primary_membership is None:
-                unmatched_discord_members.append(
-                    member
-                )
-                continue
-
-            actual_primary_rsn = (
-                primary_membership[
-                    "player"
-                ]["username"]
-            )
-
-            primary_wom_id = (
-                primary_membership[
-                    "player"
-                ]["id"]
-            )
-
-            # Do not associate one WOM primary account with two Discord users.
-            if (
-                primary_wom_id in claimed_wom_ids
-                or actual_primary_rsn.lower() in claimed_wom_names
-            ):
-                unmatched_discord_members.append(
-                    member
-                )
-                continue
+            conn.commit()
 
             c.execute(
                 """
-                INSERT INTO links (
-                    guild_id,
-                    discord_id,
+                SELECT group_id
+                FROM guild_configs
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+
+            config = c.fetchone()
+
+            if not config or not config[0]:
+                await interaction.followup.send(
+                    "No WOM group is configured.",
+                    ephemeral=True
+                )
+                return
+
+            group_id = config[0]
+
+            url = (
+                f"https://api.wiseoldman.net/v2/groups/"
+                f"{group_id}"
+            )
+
+            try:
+                async with self.bot.http_session.get(
+                    url,
+                    headers=build_wom_headers(),
+                    timeout=30
+                ) as response:
+
+                    if response.status != 200:
+                        await interaction.followup.send(
+                            f"Wise Old Man returned API "
+                            f"error `{response.status}`.",
+                            ephemeral=True
+                        )
+                        return
+
+                    data = await response.json()
+
+            except Exception as e:
+                logger.error(
+                    f"/autolink WOM request failed: {e}"
+                )
+
+                await interaction.followup.send(
+                    "Could not retrieve the Novus WOM group.",
+                    ephemeral=True
+                )
+                return
+
+            memberships = data.get(
+                "memberships",
+                []
+            )
+
+            if not isinstance(
+                memberships,
+                list
+            ):
+                await interaction.followup.send(
+                    "Wise Old Man returned an invalid clan roster.",
+                    ephemeral=True
+                )
+                return
+
+            # Normalize Discord-style separators and OSRS spacing before
+            # matching, but only accept a unique exact normalized WOM match.
+            wom_by_id = {}
+            wom_by_key = {}
+
+            for membership in memberships:
+                if (
+                    not isinstance(
+                        membership,
+                        dict
+                    )
+                    or not isinstance(
+                        membership.get("player"),
+                        dict
+                    )
+                ):
+                    continue
+
+                player = membership[
+                    "player"
+                ]
+                player_id = player.get(
+                    "id"
+                )
+                username = player.get(
+                    "username"
+                )
+
+                if player_id is not None:
+                    wom_by_id[
+                        player_id
+                    ] = membership
+
+                if username:
+                    key = sanitize_rsn(
+                        username
+                    ).casefold()
+
+                    wom_by_key.setdefault(
+                        key,
+                        []
+                    ).append(
+                        membership
+                    )
+
+            def resolve_exact(
+                candidate
+            ):
+                if not candidate:
+                    return None
+
+                key = sanitize_rsn(
+                    candidate
+                ).casefold()
+
+                matches = wom_by_key.get(
+                    key,
+                    []
+                )
+
+                if len(matches) == 1:
+                    return matches[0]
+
+                return None
+
+            c.execute(
+                """
+                SELECT discord_id, rsn, wom_id
+                FROM links
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+
+            primary_rows = {
+                discord_id: (
                     rsn,
                     wom_id
                 )
-                VALUES (?, ?, ?, ?)
+                for (
+                    discord_id,
+                    rsn,
+                    wom_id
+                ) in c.fetchall()
+            }
+
+            c.execute(
+                """
+                SELECT discord_id, rsn, wom_id
+                FROM alt_links
+                WHERE guild_id = ?
                 """,
-                (
-                    guild.id,
-                    member.id,
-                    actual_primary_rsn,
-                    primary_wom_id
-                )
+                (guild.id,)
             )
 
-            claimed_wom_ids.add(
-                primary_wom_id
-            )
-            claimed_wom_names.add(
-                actual_primary_rsn.lower()
-            )
+            alt_rows = c.fetchall()
+            alts_by_discord = {}
 
-            verified_alts = []
-            missing_alts = []
-
-            for alt_candidate in accounts[1:]:
-
-                alt_membership = (
-                    wom_by_username.get(
-                        alt_candidate.lower()
-                    )
-                )
-
-                if alt_membership is None:
-                    missing_alts.append(
-                        alt_candidate
-                    )
-                    continue
-
-                actual_alt_rsn = (
-                    alt_membership[
-                        "player"
-                    ]["username"]
-                )
-
-                alt_wom_id = (
-                    alt_membership[
-                        "player"
-                    ]["id"]
-                )
-
-                # Never associate the same WOM account with two people.
-                if (
-                    alt_wom_id in claimed_wom_ids
-                    or actual_alt_rsn.lower() in claimed_wom_names
-                ):
-                    missing_alts.append(
-                        alt_candidate
-                    )
-                    continue
-
-                c.execute(
-                    """
-                    INSERT OR IGNORE INTO alt_links (
-                        guild_id,
-                        discord_id,
-                        rsn,
-                        wom_id
-                    )
-                    VALUES (?, ?, ?, ?)
-                    """,
+            for (
+                discord_id,
+                alt_rsn,
+                alt_wom_id
+            ) in alt_rows:
+                alts_by_discord.setdefault(
+                    discord_id,
+                    []
+                ).append(
                     (
-                        guild.id,
-                        member.id,
-                        actual_alt_rsn,
+                        alt_rsn,
                         alt_wom_id
                     )
                 )
 
-                claimed_wom_ids.add(
-                    alt_wom_id
+            # Only current in-clan associations claim a WOM identity. Stale
+            # saved links remain available for history, but cannot block a
+            # correct current match.
+            claimed_by_id = {}
+            claimed_by_key = {}
+
+            for (
+                discord_id,
+                (
+                    stored_rsn,
+                    stored_wom_id
                 )
-                claimed_wom_names.add(
-                    actual_alt_rsn.lower()
+            ) in primary_rows.items():
+                membership = find_primary_wom_membership(
+                    stored_rsn,
+                    stored_wom_id,
+                    memberships
                 )
 
-                verified_alts.append(
-                    actual_alt_rsn
+                if membership is None:
+                    continue
+
+                player = membership[
+                    "player"
+                ]
+                player_id = player.get(
+                    "id"
+                )
+                username = player.get(
+                    "username"
                 )
 
-            linked_members.append(
-                {
-                    "member": member,
-                    "primary": actual_primary_rsn,
-                    "alts": verified_alts,
-                }
-            )
+                if player_id is not None:
+                    claimed_by_id[
+                        player_id
+                    ] = discord_id
 
-        conn.commit()
+                if username:
+                    claimed_by_key[
+                        sanitize_rsn(
+                            username
+                        ).casefold()
+                    ] = discord_id
 
-        # Re-read all links after this run so the reverse WOM audit
-        # reflects both old and newly-created associations.
-        c.execute(
-            """
-            SELECT rsn, wom_id
-            FROM links
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
-        )
-        all_primary_links = c.fetchall()
+            for (
+                discord_id,
+                alt_rsn,
+                alt_wom_id
+            ) in alt_rows:
+                membership = None
 
-        c.execute(
-            """
-            SELECT rsn, wom_id
-            FROM alt_links
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
-        )
-        all_alt_links = c.fetchall()
+                if alt_wom_id is not None:
+                    membership = wom_by_id.get(
+                        alt_wom_id
+                    )
 
-        conn.close()
+                if (
+                    membership is None
+                    and alt_rsn
+                ):
+                    membership = resolve_exact(
+                        alt_rsn
+                    )
 
-        final_claimed_ids = {
-            wom_id
-            for _, wom_id in all_primary_links + all_alt_links
-            if wom_id is not None
-        }
+                if membership is None:
+                    continue
 
-        final_claimed_names = {
-            rsn.lower()
-            for rsn, _ in all_primary_links + all_alt_links
-            if rsn
-        }
+                player = membership[
+                    "player"
+                ]
+                player_id = player.get(
+                    "id"
+                )
+                username = player.get(
+                    "username"
+                )
 
-        unmatched_wom_accounts = []
+                if player_id is not None:
+                    claimed_by_id[
+                        player_id
+                    ] = discord_id
 
-        for membership in memberships:
-            player = membership.get(
-                "player",
-                {}
-            )
+                if username:
+                    claimed_by_key[
+                        sanitize_rsn(
+                            username
+                        ).casefold()
+                    ] = discord_id
 
-            wom_id = player.get(
-                "id"
-            )
-
-            username = player.get(
-                "username",
-                "Unknown"
-            )
-
-            if (
-                wom_id not in final_claimed_ids
-                and username.lower() not in final_claimed_names
+            def claimed_by_other(
+                membership,
+                discord_id
             ):
-                unmatched_wom_accounts.append(
-                    username
+                player = membership.get(
+                    "player",
+                    {}
+                )
+                player_id = player.get(
+                    "id"
+                )
+                username = player.get(
+                    "username"
+                )
+                key = (
+                    sanitize_rsn(
+                        username
+                    ).casefold()
+                    if username
+                    else None
                 )
 
-        unmatched_wom_accounts.sort(
-            key=str.lower
-        )
-
-        # ----------------------------------------------------
-        # BUILD REPORT
-        # ----------------------------------------------------
-
-        response = (
-            f"**Novus Auto-Link Complete**\n\n"
-            f"Current WOM clan accounts: "
-            f"**{len(memberships)}**\n"
-            f"New Discord members linked: "
-            f"**{len(linked_members)}**\n"
-            f"Already linked: "
-            f"**{len(already_linked)}**\n"
-            f"Discord members not confidently matched: "
-            f"**{len(unmatched_discord_members)}**\n"
-            f"WOM clan accounts still unmatched: "
-            f"**{len(unmatched_wom_accounts)}**"
-        )
-
-        if linked_members:
-            examples = []
-
-            for entry in linked_members[:10]:
-                text = (
-                    f"{entry['member'].mention} "
-                    f"-> `{entry['primary']}`"
+                id_owner = (
+                    claimed_by_id.get(
+                        player_id
+                    )
+                    if player_id is not None
+                    else None
+                )
+                name_owner = (
+                    claimed_by_key.get(
+                        key
+                    )
+                    if key
+                    else None
                 )
 
-                if entry["alts"]:
-                    text += (
-                        " | "
-                        + " | ".join(
-                            f"`{alt}`"
-                            for alt in entry["alts"]
+                return (
+                    (
+                        id_owner is not None
+                        and id_owner != discord_id
+                    )
+                    or (
+                        name_owner is not None
+                        and name_owner != discord_id
+                    )
+                )
+
+            def claim(
+                membership,
+                discord_id
+            ):
+                player = membership[
+                    "player"
+                ]
+                player_id = player.get(
+                    "id"
+                )
+                username = player.get(
+                    "username"
+                )
+
+                if player_id is not None:
+                    claimed_by_id[
+                        player_id
+                    ] = discord_id
+
+                if username:
+                    claimed_by_key[
+                        sanitize_rsn(
+                            username
+                        ).casefold()
+                    ] = discord_id
+
+            linked_members = []
+            repaired_members = []
+            refreshed_members = []
+            alt_links_added = []
+            unmatched_members = []
+
+            for member in guild.members:
+                if (
+                    member.bot
+                    or not has_novus_member_role(
+                        member
+                    )
+                ):
+                    continue
+
+                display_parts = [
+                    part.strip()
+                    for part in re.split(
+                        r"[|/]",
+                        member.display_name
+                    )
+                    if part.strip()
+                ]
+
+                existing_primary = (
+                    primary_rows.get(
+                        member.id
+                    )
+                )
+
+                existing_membership = None
+
+                if existing_primary:
+                    existing_membership = (
+                        find_primary_wom_membership(
+                            existing_primary[0],
+                            existing_primary[1],
+                            memberships
                         )
                     )
 
-                examples.append(
-                    text
+                primary_membership = (
+                    existing_membership
+                )
+                repaired = False
+                created = False
+
+                # If the saved primary is stale or absent, try conservative
+                # exact candidates from nickname, global display name, then
+                # Discord username. Never fuzzy-match or guess.
+                if primary_membership is None:
+                    candidate_strings = []
+
+                    if display_parts:
+                        candidate_strings.append(
+                            display_parts[0]
+                        )
+
+                    global_name = getattr(
+                        member,
+                        "global_name",
+                        None
+                    )
+
+                    if global_name:
+                        candidate_strings.append(
+                            global_name
+                        )
+
+                    if member.name:
+                        candidate_strings.append(
+                            member.name
+                        )
+
+                    seen_candidates = set()
+
+                    for candidate in candidate_strings:
+                        normalized = sanitize_rsn(
+                            candidate
+                        ).casefold()
+
+                        if normalized in seen_candidates:
+                            continue
+
+                        seen_candidates.add(
+                            normalized
+                        )
+
+                        candidate_membership = resolve_exact(
+                            candidate
+                        )
+
+                        if (
+                            candidate_membership is None
+                            or claimed_by_other(
+                                candidate_membership,
+                                member.id
+                            )
+                        ):
+                            continue
+
+                        primary_membership = (
+                            candidate_membership
+                        )
+                        break
+
+                if primary_membership is None:
+                    unmatched_members.append(
+                        member
+                    )
+                    continue
+
+                player = primary_membership[
+                    "player"
+                ]
+                actual_primary_rsn = player[
+                    "username"
+                ]
+                primary_wom_id = player[
+                    "id"
+                ]
+
+                if claimed_by_other(
+                    primary_membership,
+                    member.id
+                ):
+                    unmatched_members.append(
+                        member
+                    )
+                    continue
+
+                if existing_primary is None:
+                    c.execute(
+                        """
+                        INSERT INTO links (
+                            guild_id,
+                            discord_id,
+                            rsn,
+                            wom_id
+                        )
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            guild.id,
+                            member.id,
+                            actual_primary_rsn,
+                            primary_wom_id
+                        )
+                    )
+                    created = True
+                    linked_members.append(
+                        (
+                            member,
+                            actual_primary_rsn
+                        )
+                    )
+
+                else:
+                    old_rsn, old_wom_id = (
+                        existing_primary
+                    )
+
+                    if (
+                        old_wom_id != primary_wom_id
+                        or (
+                            old_rsn
+                            and old_rsn.casefold()
+                                != actual_primary_rsn.casefold()
+                        )
+                    ):
+                        c.execute(
+                            """
+                            UPDATE links
+                            SET rsn = ?, wom_id = ?
+                            WHERE guild_id = ?
+                            AND discord_id = ?
+                            """,
+                            (
+                                actual_primary_rsn,
+                                primary_wom_id,
+                                guild.id,
+                                member.id
+                            )
+                        )
+
+                        if existing_membership is None:
+                            repaired = True
+                            repaired_members.append(
+                                (
+                                    member,
+                                    old_rsn,
+                                    actual_primary_rsn
+                                )
+                            )
+                        else:
+                            refreshed_members.append(
+                                (
+                                    member,
+                                    actual_primary_rsn
+                                )
+                            )
+
+                claim(
+                    primary_membership,
+                    member.id
                 )
 
-            response += (
-                "\n\n**New Links**\n"
-                + "\n".join(examples)
+                # Only interpret nickname suffixes as alts when the first
+                # nickname segment resolves to this same primary account.
+                nickname_primary = (
+                    resolve_exact(
+                        display_parts[0]
+                    )
+                    if display_parts
+                    else None
+                )
+
+                if (
+                    nickname_primary is None
+                    or nickname_primary[
+                        "player"
+                    ].get("id")
+                        != primary_wom_id
+                ):
+                    continue
+
+                current_alt_rows = (
+                    alts_by_discord.get(
+                        member.id,
+                        []
+                    )
+                )
+
+                current_alt_ids = {
+                    alt_wom_id
+                    for _, alt_wom_id
+                    in current_alt_rows
+                    if alt_wom_id is not None
+                }
+
+                for alt_candidate in display_parts[1:]:
+                    alt_membership = resolve_exact(
+                        alt_candidate
+                    )
+
+                    if (
+                        alt_membership is None
+                        or claimed_by_other(
+                            alt_membership,
+                            member.id
+                        )
+                    ):
+                        continue
+
+                    alt_player = alt_membership[
+                        "player"
+                    ]
+                    alt_wom_id = alt_player[
+                        "id"
+                    ]
+                    actual_alt_rsn = alt_player[
+                        "username"
+                    ]
+
+                    if alt_wom_id == primary_wom_id:
+                        continue
+
+                    if alt_wom_id in current_alt_ids:
+                        c.execute(
+                            """
+                            UPDATE alt_links
+                            SET rsn = ?
+                            WHERE guild_id = ?
+                            AND discord_id = ?
+                            AND wom_id = ?
+                            """,
+                            (
+                                actual_alt_rsn,
+                                guild.id,
+                                member.id,
+                                alt_wom_id
+                            )
+                        )
+                        claim(
+                            alt_membership,
+                            member.id
+                        )
+                        continue
+
+                    c.execute(
+                        """
+                        INSERT OR IGNORE INTO alt_links (
+                            guild_id,
+                            discord_id,
+                            rsn,
+                            wom_id
+                        )
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            guild.id,
+                            member.id,
+                            actual_alt_rsn,
+                            alt_wom_id
+                        )
+                    )
+
+                    if c.rowcount:
+                        alt_links_added.append(
+                            (
+                                member,
+                                actual_alt_rsn
+                            )
+                        )
+                        current_alt_ids.add(
+                            alt_wom_id
+                        )
+
+                    claim(
+                        alt_membership,
+                        member.id
+                    )
+
+            conn.commit()
+
+            # Current roster audit after repairs/new links.
+            c.execute(
+                """
+                SELECT discord_id, rsn, wom_id
+                FROM links
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+            all_primary_rows = c.fetchall()
+
+            c.execute(
+                """
+                SELECT discord_id, rsn, wom_id
+                FROM alt_links
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+            all_alt_rows = c.fetchall()
+
+            active_linked_ids = set()
+            active_linked_names = set()
+
+            for (
+                discord_id,
+                stored_rsn,
+                stored_wom_id
+            ) in (
+                all_primary_rows
+                + all_alt_rows
+            ):
+                membership = None
+
+                if stored_wom_id is not None:
+                    membership = wom_by_id.get(
+                        stored_wom_id
+                    )
+
+                if (
+                    membership is None
+                    and stored_rsn
+                ):
+                    membership = resolve_exact(
+                        stored_rsn
+                    )
+
+                if membership is None:
+                    continue
+
+                player = membership[
+                    "player"
+                ]
+                player_id = player.get(
+                    "id"
+                )
+                username = player.get(
+                    "username"
+                )
+
+                if player_id is not None:
+                    active_linked_ids.add(
+                        player_id
+                    )
+
+                if username:
+                    active_linked_names.add(
+                        sanitize_rsn(
+                            username
+                        ).casefold()
+                    )
+
+            unmatched_wom_accounts = []
+
+            for membership in memberships:
+                player = membership.get(
+                    "player",
+                    {}
+                )
+                wom_role = (
+                    membership.get(
+                        "role",
+                        ""
+                    ).lower()
+                )
+
+                # Trial accounts are intentionally handled by /trials and
+                # should not make /autolink look broken.
+                if (
+                    wom_role
+                    in NOVUS_TRIAL_WOM_RANKS
+                ):
+                    continue
+
+                player_id = player.get(
+                    "id"
+                )
+                username = player.get(
+                    "username"
+                )
+
+                if (
+                    player_id in active_linked_ids
+                    or (
+                        username
+                        and sanitize_rsn(
+                            username
+                        ).casefold()
+                            in active_linked_names
+                    )
+                ):
+                    continue
+
+                if username:
+                    unmatched_wom_accounts.append(
+                        username
+                    )
+
+            unmatched_wom_accounts.sort(
+                key=str.casefold
             )
 
-            if len(linked_members) > 10:
-                response += (
-                    f"\n...and "
-                    f"{len(linked_members) - 10} more."
-                )
-
-        if unmatched_wom_accounts:
-            wom_lines = [
-                f"- `{username}`"
-                for username in unmatched_wom_accounts[:30]
-            ]
-
-            response += (
-                "\n\n**WOM Accounts Still Unmatched**\n"
-                + "\n".join(wom_lines)
-            )
-
-            if len(unmatched_wom_accounts) > 30:
-                response += (
-                    f"\n...and "
-                    f"{len(unmatched_wom_accounts) - 30} more."
-                )
-
-        if len(response) > 1950:
             response = (
-                response[:1900]
-                + "\n\n...report shortened."
+                "**Novus Auto-Link Complete**\n\n"
+                f"Current WOM clan accounts: **{len(memberships)}**\n"
+                f"New Discord members linked: **{len(linked_members)}**\n"
+                f"Stale primary links repaired: **{len(repaired_members)}**\n"
+                f"Alt links added: **{len(alt_links_added)}**\n"
+                f"Discord members still unmatched: **{len(unmatched_members)}**\n"
+                f"Full WOM accounts still unmatched: **{len(unmatched_wom_accounts)}**"
             )
 
-        await interaction.followup.send(
-            response,
-            ephemeral=True
-        )
+            sections = []
+
+            if linked_members:
+                sections.append(
+                    "**New Primary Links**\n"
+                    + "\n".join(
+                        (
+                            f"- {member.mention} -> "
+                            f"`{rsn}`"
+                        )
+                        for member, rsn
+                        in linked_members[:15]
+                    )
+                )
+
+            if repaired_members:
+                sections.append(
+                    "**Repaired Stale Primary Links**\n"
+                    + "\n".join(
+                        (
+                            f"- {member.mention}: "
+                            f"`{old_rsn or 'unknown'}` -> "
+                            f"`{new_rsn}`"
+                        )
+                        for (
+                            member,
+                            old_rsn,
+                            new_rsn
+                        ) in repaired_members[:15]
+                    )
+                )
+
+            if alt_links_added:
+                sections.append(
+                    "**New Alt Links**\n"
+                    + "\n".join(
+                        (
+                            f"- {member.mention} -> "
+                            f"`{alt_rsn}`"
+                        )
+                        for (
+                            member,
+                            alt_rsn
+                        ) in alt_links_added[:15]
+                    )
+                )
+
+            if unmatched_wom_accounts:
+                sections.append(
+                    "**WOM Accounts Still Unmatched**\n"
+                    + "\n".join(
+                        f"- `{username}`"
+                        for username
+                        in unmatched_wom_accounts[:25]
+                    )
+                )
+
+            if sections:
+                response += (
+                    "\n\n"
+                    + "\n\n".join(
+                        sections
+                    )
+                )
+
+            if len(response) > 1950:
+                response = (
+                    response[:1900]
+                    + "\n\n...report shortened."
+                )
+
+            await interaction.followup.send(
+                response,
+                ephemeral=True
+            )
+
+        finally:
+            conn.close()
 
     # ========================================================
     # STAFF AUDIT

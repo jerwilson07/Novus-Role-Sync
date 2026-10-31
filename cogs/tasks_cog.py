@@ -3056,7 +3056,7 @@ class TasksCog(commands.Cog):
 
     @app_commands.command(
         name="promotions",
-        description="Show linked Novus members overdue for a tenure promotion."
+        description="Show primary/alt tenure promotions due, overdue, or coming up."
     )
     async def promotions(
         self,
@@ -3088,294 +3088,171 @@ class TasksCog(commands.Cog):
         conn = sqlite3.connect(
             "wom_multi.db"
         )
-        c = conn.cursor()
 
-        c.execute(
-            """
-            SELECT group_id
-            FROM guild_configs
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
-        )
-
-        config = c.fetchone()
-
-        if not config or not config[0]:
-            conn.close()
-            await interaction.followup.send(
-                "No Wise Old Man group is configured.",
-                ephemeral=True
+        try:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT group_id
+                FROM guild_configs
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
             )
-            return
+            config = c.fetchone()
 
-        group_data, api_status = await self.get_wom_group(
-            config[0]
-        )
+            if not config or not config[0]:
+                await interaction.followup.send(
+                    "No Wise Old Man group is configured.",
+                    ephemeral=True
+                )
+                return
 
-        if group_data is None:
-            conn.close()
-            await interaction.followup.send(
-                "Could not retrieve the Novus WOM group.",
-                ephemeral=True
-            )
-            return
-
-        memberships = group_data.get(
-            "memberships",
-            []
-        )
-        await self.prepare_tenure_history(c, guild, group_data)
-
-        wom_by_id = {
-            membership["player"]["id"]: membership
-            for membership in memberships
-        }
-
-        wom_by_username = {
-            membership["player"]["username"].lower(): membership
-            for membership in memberships
-        }
-
-        c.execute(
-            """
-            SELECT discord_id, rsn, wom_id
-            FROM links
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
-        )
-
-        primary_links = c.fetchall()
-
-        c.execute(
-            """
-            SELECT wom_role, discord_role_id
-            FROM role_mappings
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
-        )
-
-        tenure_rank_by_role_id = {
-            discord_role_id: wom_role.lower()
-            for wom_role, discord_role_id in c.fetchall()
-            if wom_role.lower() in NOVUS_TENURE_ROLES
-        }
-
-        overdue_members = []
-        missing_join_date_members = []
-        trial_members_excluded = 0
-        checked_tenure_members = 0
-        active_primary_members = 0
-
-        now = datetime.datetime.now(
-            datetime.timezone.utc
-        )
-
-        for discord_id, stored_rsn, stored_wom_id in primary_links:
-            member = guild.get_member(
-                discord_id
+            group_data, api_status = await self.get_wom_group(
+                config[0]
             )
 
-            if not is_active_novus_member_link(
-                member, stored_rsn, stored_wom_id, memberships
+            if not isinstance(
+                group_data,
+                dict
             ):
-                continue
-
-            active_primary_members += 1
-            membership = None
-
-            if stored_wom_id:
-                membership = wom_by_id.get(
-                    stored_wom_id
+                await interaction.followup.send(
+                    "Could not retrieve the Novus WOM group.",
+                    ephemeral=True
                 )
+                return
 
-            if membership is None and stored_rsn:
-                membership = wom_by_username.get(
-                    stored_rsn.lower()
-                )
-
-            if membership is None:
-                continue
-
-            player = membership.get(
-                "player",
-                {}
+            await self.prepare_tenure_history(
+                c,
+                guild,
+                group_data
             )
 
-            current_rsn = player.get(
-                "username",
-                stored_rsn
-            )
-            current_wom_id = player.get(
-                "id"
+            audit = (
+                self.get_promotion_audit_entries(
+                    c,
+                    guild,
+                    group_data,
+                    upcoming_days=14
+                )
             )
 
-            if (
-                current_rsn
-                and (
-                    current_rsn.lower() != stored_rsn.lower()
-                    or current_wom_id != stored_wom_id
-                )
-            ):
-                c.execute(
-                    """
-                    UPDATE links
-                    SET rsn = ?, wom_id = ?
-                    WHERE guild_id = ?
-                    AND discord_id = ?
-                    """,
-                    (
-                        current_rsn,
-                        current_wom_id,
-                        guild.id,
-                        discord_id
+            due_today = audit[
+                "due_today"
+            ]
+            overdue = audit[
+                "overdue"
+            ]
+            upcoming = audit[
+                "upcoming"
+            ]
+
+            response = (
+                "**Novus Promotion Audit**\n"
+                "Active linked in-clan accounts checked: "
+                f"{audit['active_accounts']}\n"
+                f"Due today: {len(due_today)} | "
+                f"Overdue: {len(overdue)} | "
+                f"Coming up (14d): {len(upcoming)}"
+            )
+
+            sections = []
+
+            if due_today:
+                sections.append(
+                    "**Due Today**\n"
+                    + "\n".join(
+                        (
+                            f"- {entry['member'].mention} "
+                            f"({entry['rsn']} {entry['account_type']}): "
+                            f"{entry['current_rank']} -> "
+                            f"{entry['target_rank']} "
+                            f"today ({entry['eligible_at'].date()})"
+                        )
+                        for entry
+                        in due_today
                     )
                 )
 
-            current_wom_rank = (
-                membership.get(
-                    "role",
-                    ""
-                ).lower()
-            )
-
-            if current_wom_rank in NOVUS_TRIAL_WOM_RANKS:
-                trial_members_excluded += 1
-                continue
-
-            if current_wom_rank == "owner":
-                continue
-
-            joined_at = get_membership_joined_at(
-                membership
-            )
-
-            if joined_at is None:
-                missing_join_date_members.append(
-                    f"- {member.mention} (`{current_rsn}`)"
+            if overdue:
+                sections.append(
+                    "**Overdue**\n"
+                    + "\n".join(
+                        (
+                            f"- {entry['member'].mention} "
+                            f"({entry['rsn']} {entry['account_type']}): "
+                            f"{entry['current_rank']} -> "
+                            f"{entry['target_rank']} | "
+                            f"due {entry['eligible_at'].date()} | "
+                            f"{entry['overdue_days']}d overdue"
+                        )
+                        for entry
+                        in overdue
+                    )
                 )
-                continue
 
-            checked_tenure_members += 1
+            if upcoming:
+                sections.append(
+                    "**Coming Up (Next 14 Days)**\n"
+                    + "\n".join(
+                        (
+                            f"- {entry['member'].mention} "
+                            f"({entry['rsn']} {entry['account_type']}): "
+                            f"{entry['current_rank']} -> "
+                            f"{entry['target_rank']} on "
+                            f"{entry['eligible_at'].date()} "
+                            f"({entry['days_until']}d)"
+                        )
+                        for entry
+                        in upcoming
+                    )
+                )
 
-            effective_joined_at, prior_service = cumulative_effective_join(
-                c, guild.id, group_data.get("id"), current_wom_id, joined_at
-            )
-            expected_rank = expected_tenure_rank(
-                effective_joined_at
-            )
-            expected_level = TENURE_RANK_ORDER[
-                expected_rank
+            missing_join = audit[
+                "missing_join_dates"
             ]
 
-            discord_tenure_ranks = [
-                tenure_rank_by_role_id[role.id]
-                for role in member.roles
-                if role.id in tenure_rank_by_role_id
-            ]
-
-            current_tenure_rank = None
-            current_level = -1
-
-            if discord_tenure_ranks:
-                current_tenure_rank = max(
-                    discord_tenure_ranks,
-                    key=lambda rank: TENURE_RANK_ORDER[rank]
-                )
-                current_level = TENURE_RANK_ORDER[
-                    current_tenure_rank
-                ]
-
-            if current_level < expected_level:
-                eligible_at = tenure_eligible_at(
-                    effective_joined_at,
-                    expected_rank
-                )
-                overdue_days = max(
-                    (now - eligible_at).days,
-                    0
+            if missing_join:
+                sections.append(
+                    "**Missing WOM Join Date**\n"
+                    + "\n".join(
+                        (
+                            f"- {entry['member'].mention} "
+                            f"({entry['rsn']} "
+                            f"{entry['account_type']})"
+                        )
+                        for entry
+                        in missing_join
+                    )
                 )
 
-                overdue_members.append(
-                    {
-                        "member": member,
-                        "rsn": current_rsn,
-                        "current": current_tenure_rank,
-                        "expected": expected_rank,
-                        "joined": joined_at,
-                        "prior_tenure_days": prior_service.days,
-                        "eligible": eligible_at,
-                        "overdue_days": overdue_days,
-                    }
+            if not sections:
+                sections.append(
+                    "No linked primary or alt account has an actionable tenure promotion right now."
                 )
 
-        conn.commit()
-        conn.close()
-
-        overdue_members.sort(
-            key=lambda entry: entry["overdue_days"],
-            reverse=True
-        )
-
-        summary = (
-            f"**Novus Promotion Audit**\n\n"
-            f"Active Novus primary accounts: **{active_primary_members}**\n"
-            f"Tenure members evaluated: **{checked_tenure_members}**\n"
-            f"Promotions due: **{len(overdue_members)}**"
-        )
-
-        if trial_members_excluded:
-            summary += (
-                f"\nTrial members excluded: **{trial_members_excluded}**"
-            )
-
-        if missing_join_date_members:
-            summary += (
-                f"\nMissing WOM join date: **{len(missing_join_date_members)}**"
-            )
-
-        sections = []
-
-        if overdue_members:
-            lines = []
-            for entry in overdue_members:
-                lines.append(
-                    f"{entry['member'].mention} (`{entry['rsn']}`)\n"
-                    f"`{entry['current'] or 'none'}` -> `{entry['expected']}`\n"
-                    f"Current stint joined: `{entry['joined'].date()}`\n"
-                    f"Previous service: **{entry['prior_tenure_days']} days**\n"
-                    f"Eligible: `{entry['eligible'].date()}`\n"
-                    f"Overdue: **{entry['overdue_days']} day(s)**"
+            response += (
+                "\n\n"
+                + "\n\n".join(
+                    sections
                 )
-            sections.append(
-                "**Promotions Due**\n"
-                + "\n\n".join(lines)
-            )
-        else:
-            sections.append(
-                "No linked tenure members are currently overdue for promotion."
             )
 
-        if missing_join_date_members:
-            sections.append(
-                "**Missing WOM Join Date**\n"
-                + "\n".join(missing_join_date_members)
+            if len(response) > 1950:
+                response = (
+                    response[:1900]
+                    + "\n\n...additional promotion details omitted."
+                )
+
+            conn.commit()
+
+            await interaction.followup.send(
+                response,
+                ephemeral=True
             )
 
-        response = summary + "\n\n" + "\n\n".join(sections)
-
-        if len(response) > 1950:
-            response = (
-                response[:1900]
-                + "\n\n...additional promotion details omitted."
-            )
-
-        await interaction.followup.send(
-            response,
-            ephemeral=True
-        )
+        finally:
+            conn.close()
 
     # ========================================================
     # /TRIALS

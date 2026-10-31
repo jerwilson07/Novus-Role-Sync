@@ -9,7 +9,7 @@ import math
 
 from common import (
     sanitize_rsn, WOM_API_KEY, has_non_clan_role,
-    forget_non_clan_links, forget_unmatched_alt_links,
+    forget_non_clan_links,
     has_novus_member_role, is_active_novus_member_link,
     find_primary_wom_membership,
 )
@@ -844,8 +844,8 @@ class ConfigCog(commands.Cog):
                 f"**Primary RSN:** `{primary_rsn}`\n"
                 f"**Alt accounts:**\n"
                 f"{alt_text}\n\n"
-                f"Only the primary account will determine "
-                f"the member's Discord rank.",
+                f"Primary and alt tenure stay separate; the highest independently earned "
+                f"linked-account tenure can raise the member's Discord tenure role.",
                 ephemeral=True
             )
 
@@ -1893,9 +1893,6 @@ class ConfigCog(commands.Cog):
             []
         )
 
-        forget_unmatched_alt_links(c, guild.id, memberships)
-        conn.commit()
-
         c.execute(
             "SELECT discord_id, rsn, wom_id FROM alt_links WHERE guild_id = ?",
             (guild.id,),
@@ -2286,12 +2283,10 @@ class ConfigCog(commands.Cog):
             for membership in memberships
         }
 
-        # Current WOM membership is required for an alt to remain tracked.
+        # Keep saved alt links for history; only current WOM alts are shown as active.
         conn = sqlite3.connect("wom_multi.db")
         try:
             c = conn.cursor()
-            forget_unmatched_alt_links(c, guild.id, memberships)
-            conn.commit()
             c.execute(
                 """
                 SELECT rsn, wom_id FROM alt_links
@@ -2393,8 +2388,9 @@ class ConfigCog(commands.Cog):
             )
 
         response += (
-            "\n\nOnly the primary account determines "
-            "the member's Discord rank."
+            "\n\nPrimary and alt tenure stay separate. The highest independently "
+            "earned linked-account tenure can raise the Discord tenure role; "
+            "tenure is never combined between accounts."
         )
 
         if len(response) > 1950:
@@ -2445,8 +2441,8 @@ class ConfigCog(commands.Cog):
             "Run one combined audit for unmatched WOM accounts, broken links, missing alts, and membership conflicts.\n\n"
 
             "**/promotions**\n"
-            "Show linked primary accounts that are overdue "
-            "for a tenure promotion.\n\n"
+            "Show linked primary and alt accounts that are due today, overdue, "
+            "or coming up for a tenure promotion.\n\n"
 
             "**/trials**\n"
             "Show current Trial Members and how many days remain in their 30-day trial.\n\n"
@@ -2462,7 +2458,8 @@ class ConfigCog(commands.Cog):
             "**/linkuser @member RSN**\n"
             "Manually link a member. Put the primary RSN first, "
             "then optional alts separated by `|` or `/`. "
-            "Only the primary determines Discord rank.\n\n"
+            "Primary and alt tenure are separate; the highest independently earned "
+            "linked-account tenure can set the Discord tenure role.\n\n"
 
             "**/unlinkuser @member**\n"
             "Remove the member's primary and alt account links.\n\n"

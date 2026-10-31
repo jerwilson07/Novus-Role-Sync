@@ -2906,12 +2906,13 @@ class TasksCog(commands.Cog):
                 forget_member_links(c, guild.id, member.id)
                 continue
 
-            if not is_active_novus_member_link(
-                member, rsn, wom_id, memberships
+            if (
+                member is None
+                or not has_novus_member_role(
+                    member
+                )
             ):
                 continue
-
-            checked += 1
 
             result = await self.sync_one_member(
                 guild,
@@ -2921,9 +2922,12 @@ class TasksCog(commands.Cog):
             )
 
             if result["status"] in (
-                "ignored_rank", "non_clan_ignored", "not_current_member"
+                "non_clan_ignored",
+                "not_current_member"
             ):
                 continue
+
+            checked += 1
 
             if result["status"] != "success":
                 issue_line = format_sync_issue(
@@ -2966,6 +2970,24 @@ class TasksCog(commands.Cog):
                     f"({result['wom_tenure_direction']})"
                 )
 
+        promotion_audit = (
+            self.get_promotion_audit_entries(
+                c,
+                guild,
+                group_data
+            )
+        )
+        due_today_promotions = (
+            promotion_audit[
+                "due_today"
+            ]
+        )
+        overdue_promotions = (
+            promotion_audit[
+                "overdue"
+            ]
+        )
+
         now = datetime.datetime.now().isoformat()
 
         c.execute(
@@ -2992,8 +3014,9 @@ class TasksCog(commands.Cog):
             f"Clan members: **{clan_members}**\n"
             f"Linked primary members: **{checked}**\n"
             f"Members changed: **{changed}**\n"
-            f"Automatic tenure promotions: **{len(automatic_promotions)}**\n"
-
+            f"Automatic Discord tenure promotions: **{len(automatic_promotions)}**\n"
+            f"In-game promotions due today: **{len(due_today_promotions)}**\n"
+            f"In-game promotions overdue: **{len(overdue_promotions)}**\n"
             f"WOM tenure mismatches: **{len(wom_mismatches)}**\n"
             f"Missing WOM join date: **{len(missing_join_dates)}**"
         )
@@ -3002,8 +3025,40 @@ class TasksCog(commands.Cog):
 
         if automatic_promotions:
             sections.append(
-                "**Automatic Promotions**\n"
+                "**Automatic Discord Tenure Promotions**\n"
                 + "\n".join(automatic_promotions)
+            )
+
+        if due_today_promotions:
+            sections.append(
+                "**In-Game Promotions Due Today**\n"
+                + "\n".join(
+                    (
+                        f"- {entry['member'].mention} "
+                        f"({entry['rsn']} {entry['account_type']}): "
+                        f"{entry['current_rank']} -> "
+                        f"{entry['target_rank']} - "
+                        f"{entry['eligible_at'].date()}"
+                    )
+                    for entry
+                    in due_today_promotions
+                )
+            )
+
+        if overdue_promotions:
+            sections.append(
+                "**Overdue In-Game Promotions**\n"
+                + "\n".join(
+                    (
+                        f"- {entry['member'].mention} "
+                        f"({entry['rsn']} {entry['account_type']}): "
+                        f"{entry['current_rank']} -> "
+                        f"{entry['target_rank']} - "
+                        f"{entry['overdue_days']}d overdue"
+                    )
+                    for entry
+                    in overdue_promotions
+                )
             )
 
         if wom_mismatches:

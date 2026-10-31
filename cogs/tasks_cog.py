@@ -67,7 +67,6 @@ NOVUS_TRIAL_WOM_RANKS = {
 # Known WOM ranks intentionally left unmanaged by Novus Sync.
 # These should not appear as routine skipped-sync noise.
 IGNORED_WOM_RANKS = {
-    "owner",
     "gnome_child",
 }
 
@@ -137,14 +136,25 @@ def months_between(start: datetime.datetime, end: datetime.datetime) -> int:
     return max(months, 0)
 
 
-def expected_tenure_rank(joined_at: datetime.datetime) -> str:
-    completed_months = months_between(
-        joined_at,
-        datetime.datetime.now(datetime.timezone.utc)
+def expected_tenure_rank(
+    joined_at: datetime.datetime,
+    now: datetime.datetime | None = None
+) -> str:
+    """Return the tenure rank earned on the exact calendar eligibility date."""
+    if joined_at is None:
+        return "squire"
+
+    now = now or datetime.datetime.now(
+        datetime.timezone.utc
     )
 
     for role_name, required_months in PROMOTION_THRESHOLDS:
-        if completed_months >= required_months:
+        eligible_at = add_calendar_months(
+            joined_at,
+            required_months
+        )
+
+        if now.date() >= eligible_at.date():
             return role_name
 
     return "squire"
@@ -218,6 +228,28 @@ def tenure_eligible_at(joined_at: datetime.datetime, rank: str):
         joined_at,
         required_months
     )
+
+
+def next_tenure_rank(rank: str):
+    """Return the next normal tenure rank, or None at Paladin."""
+    ordered = [
+        "squire",
+        "duellist",
+        "inquisitor",
+        "expert",
+        "knight",
+        "paladin",
+    ]
+
+    try:
+        index = ordered.index(rank)
+    except ValueError:
+        return None
+
+    if index + 1 >= len(ordered):
+        return None
+
+    return ordered[index + 1]
 
 
 # Sync result categories used by both automatic and manual sync reports.

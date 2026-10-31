@@ -2371,6 +2371,441 @@ class TasksCog(commands.Cog):
         )
 
     # ========================================================
+    # /AUDIT
+    # ========================================================
+
+    @app_commands.command(
+        name="audit",
+        description="Show actionable Novus tenure, promotion, and link issues."
+    )
+    async def audit(
+        self,
+        interaction: discord.Interaction
+    ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(
+            ephemeral=True,
+            thinking=True
+        )
+
+        guild = interaction.guild
+
+        if guild is None:
+            await interaction.followup.send(
+                "This command can only be used inside the Novus server.",
+                ephemeral=True
+            )
+            return
+
+        conn = sqlite3.connect(
+            "wom_multi.db"
+        )
+
+        try:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT group_id
+                FROM guild_configs
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+            row = c.fetchone()
+
+            if not row or not row[0]:
+                await interaction.followup.send(
+                    "No Wise Old Man group is configured.",
+                    ephemeral=True
+                )
+                return
+
+            group_data, api_status = await self.get_wom_group(
+                row[0]
+            )
+
+            if not isinstance(
+                group_data,
+                dict
+            ):
+                await interaction.followup.send(
+                    "Could not retrieve the Novus WOM group.",
+                    ephemeral=True
+                )
+                return
+
+            await self.prepare_tenure_history(
+                c,
+                guild,
+                group_data
+            )
+
+            memberships = group_data.get(
+                "memberships",
+                []
+            )
+
+            promotion_audit = (
+                self.get_promotion_audit_entries(
+                    c,
+                    guild,
+                    group_data
+                )
+            )
+
+            c.execute(
+                """
+                SELECT wom_role, discord_role_id
+                FROM role_mappings
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+
+            tenure_rank_by_role_id = {
+                discord_role_id: wom_role.lower()
+                for wom_role, discord_role_id
+                in c.fetchall()
+                if wom_role.lower()
+                    in NOVUS_TENURE_ROLES
+            }
+
+            c.execute(
+                """
+                SELECT discord_id, rsn, wom_id
+                FROM links
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+
+            primary_links = c.fetchall()
+
+            discord_mismatches = []
+            inactive_links = []
+            linked_ids = set()
+            linked_names = set()
+            linked_discord_members = 0
+
+            for (
+                discord_id,
+                rsn,
+                wom_id
+            ) in primary_links:
+                if wom_id is not None:
+                    linked_ids.add(
+                        wom_id
+                    )
+
+                if rsn:
+                    linked_names.add(
+                        rsn.casefold()
+                    )
+
+                member = guild.get_member(
+                    discord_id
+                )
+
+                if (
+                    member is None
+                    or has_non_clan_role(
+                        member
+                    )
+                    or not has_novus_member_role(
+                        member
+                    )
+                ):
+                    continue
+
+                linked_discord_members += 1
+
+                accounts = (
+                    self.get_linked_account_tenures(
+                        c,
+                        guild.id,
+                        group_data.get("id"),
+                        discord_id,
+                        memberships
+                    )
+                )
+
+                if not accounts:
+                    inactive_links.append(
+                        (
+                            f"- {member.mention}: "
+                            "no linked RSN is currently in Novus"
+                        )
+                    )
+                    continue
+
+                basis = (
+                    self.get_highest_discord_tenure_basis(
+                        accounts
+                    )
+                )
+
+                if basis:
+                    current_ranks = [
+                        tenure_rank_by_role_id[
+                            role.id
+                        ]
+                        for role in member.roles
+                        if role.id
+                            in tenure_rank_by_role_id
+                    ]
+
+                    current_rank = (
+                        max(
+                            current_ranks,
+                            key=lambda rank:
+                                TENURE_RANK_ORDER[
+                                    rank
+                                ]
+                        )
+                        if current_ranks
+                        else None
+                    )
+
+                    current_level = (
+                        TENURE_RANK_ORDER[
+                            current_rank
+                        ]
+                        if current_rank
+                        else -1
+                    )
+
+                    expected_level = (
+                        TENURE_RANK_ORDER[
+                            basis[
+                                "expected_rank"
+                            ]
+                        ]
+                    )
+
+                    if (
+                        current_level
+                        < expected_level
+                    ):
+                        discord_mismatches.append(
+                            (
+                                f"- {member.mention}: "
+                                f"{current_rank or 'none'} -> "
+                                f"{basis['expected_rank']} "
+                                f"(basis {basis['rsn']})"
+                            )
+                        )
+
+            c.execute(
+                """
+                SELECT rsn, wom_id
+                FROM alt_links
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+
+            alt_links = c.fetchall()
+
+            for (
+                alt_rsn,
+                alt_wom_id
+            ) in alt_links:
+                if alt_wom_id is not None:
+                    linked_ids.add(
+                        alt_wom_id
+                    )
+
+                if alt_rsn:
+                    linked_names.add(
+                        alt_rsn.casefold()
+                    )
+
+            unmatched = []
+
+            for membership in memberships:
+                player = membership.get(
+                    "player",
+                    {}
+                )
+
+                wom_role = (
+                    membership.get(
+                        "role",
+                        ""
+                    ).lower()
+                )
+
+                if (
+                    wom_role
+                    in NOVUS_TRIAL_WOM_RANKS
+                ):
+                    continue
+
+                player_id = player.get(
+                    "id"
+                )
+                rsn = player.get(
+                    "username"
+                )
+
+                if (
+                    player_id in linked_ids
+                    or (
+                        rsn
+                        and rsn.casefold()
+                            in linked_names
+                    )
+                ):
+                    continue
+
+                if rsn:
+                    unmatched.append(
+                        (
+                            f"- {rsn} "
+                            f"({wom_role or 'unknown rank'})"
+                        )
+                    )
+
+            due_today = (
+                promotion_audit[
+                    "due_today"
+                ]
+            )
+            overdue = (
+                promotion_audit[
+                    "overdue"
+                ]
+            )
+
+            response = (
+                "**Novus Audit**\n"
+                f"WOM accounts: {len(memberships)} | "
+                f"Linked Discord members: {linked_discord_members} | "
+                f"Saved alts: {len(alt_links)}\n"
+                f"Due today: {len(due_today)} | "
+                f"Overdue: {len(overdue)} | "
+                f"Discord tenure mismatches: {len(discord_mismatches)} | "
+                f"Unlinked full clan accounts: {len(unmatched)}"
+            )
+
+            sections = []
+
+            if due_today:
+                sections.append(
+                    "**Due Today**\n"
+                    + "\n".join(
+                        (
+                            f"- {entry['member'].mention} "
+                            f"({entry['rsn']} {entry['account_type']}): "
+                            f"{entry['current_rank']} -> "
+                            f"{entry['target_rank']} - "
+                            f"{entry['eligible_at'].date()}"
+                        )
+                        for entry
+                        in due_today
+                    )
+                )
+
+            if overdue:
+                sections.append(
+                    "**Overdue Promotions**\n"
+                    + "\n".join(
+                        (
+                            f"- {entry['member'].mention} "
+                            f"({entry['rsn']} {entry['account_type']}): "
+                            f"{entry['current_rank']} -> "
+                            f"{entry['target_rank']} - "
+                            f"{entry['overdue_days']}d overdue"
+                        )
+                        for entry
+                        in overdue
+                    )
+                )
+
+            if discord_mismatches:
+                sections.append(
+                    "**Discord Tenure Needs Sync**\n"
+                    + "\n".join(
+                        discord_mismatches
+                    )
+                )
+
+            if unmatched:
+                sections.append(
+                    "**Unlinked Full Clan Accounts**\n"
+                    + "\n".join(
+                        unmatched
+                    )
+                )
+
+            if inactive_links:
+                sections.append(
+                    (
+                        "**Linked Discord Members With "
+                        "No Active Linked RSN**\n"
+                    )
+                    + "\n".join(
+                        inactive_links
+                    )
+                )
+
+            missing_join = (
+                promotion_audit[
+                    "missing_join_dates"
+                ]
+            )
+
+            if missing_join:
+                sections.append(
+                    "**Missing WOM Join Date**\n"
+                    + "\n".join(
+                        (
+                            f"- {entry['member'].mention} "
+                            f"({entry['rsn']} "
+                            f"{entry['account_type']})"
+                        )
+                        for entry
+                        in missing_join
+                    )
+                )
+
+            if not sections:
+                sections.append(
+                    "No actionable tenure, promotion, or linking issues found."
+                )
+
+            response += (
+                "\n\n"
+                + "\n\n".join(
+                    sections
+                )
+            )
+
+            if len(response) > 1950:
+                response = (
+                    response[:1900]
+                    + "\n\n...additional audit details omitted."
+                )
+
+            conn.commit()
+
+            await interaction.followup.send(
+                response,
+                ephemeral=True
+            )
+
+        finally:
+            conn.close()
+
+    # ========================================================
     # /SYNCALL
     # ========================================================
 

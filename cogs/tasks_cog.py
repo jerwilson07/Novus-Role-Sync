@@ -389,6 +389,70 @@ class TasksCog(commands.Cog):
                 try:
                     cursor = conn.cursor()
                     people, accounts = forget_non_clan_links(cursor, guild)
+
+                    migration_key = (
+                        f"mod_chat_log_channel_v1:{guild.id}"
+                    )
+                    cursor.execute(
+                        """
+                        SELECT value
+                        FROM bot_stats
+                        WHERE key = ?
+                        """,
+                        (migration_key,)
+                    )
+                    migration_done = cursor.fetchone()
+
+                    if not migration_done:
+                        target_channel = guild.get_channel(
+                            NOVUS_MOD_CHAT_CHANNEL_ID
+                        )
+
+                        if target_channel is not None:
+                            bot_member = guild.get_member(
+                                self.bot.user.id
+                            )
+                            permissions = target_channel.permissions_for(
+                                bot_member
+                            )
+
+                            if (
+                                permissions.send_messages
+                                and permissions.embed_links
+                            ):
+                                cursor.execute(
+                                    """
+                                    UPDATE guild_configs
+                                    SET log_channel_id = ?
+                                    WHERE guild_id = ?
+                                    """,
+                                    (
+                                        NOVUS_MOD_CHAT_CHANNEL_ID,
+                                        guild.id
+                                    )
+                                )
+
+                                if cursor.rowcount:
+                                    cursor.execute(
+                                        """
+                                        INSERT OR REPLACE INTO bot_stats
+                                        (key, value)
+                                        VALUES (?, ?)
+                                        """,
+                                        (
+                                            migration_key,
+                                            str(
+                                                NOVUS_MOD_CHAT_CHANNEL_ID
+                                            )
+                                        )
+                                    )
+                                    logger.info(
+                                        "Moved Novus sync log channel to "
+                                        "#mod-chat (%s) for guild %s",
+                                        NOVUS_MOD_CHAT_CHANNEL_ID,
+                                        guild.id
+                                    )
+
                     conn.commit()
                 finally:
                     conn.close()

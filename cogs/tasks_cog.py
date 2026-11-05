@@ -3131,6 +3131,184 @@ class TasksCog(commands.Cog):
             ]
         )
 
+        # ----------------------------------------------------
+        # DAILY LINKING / ROSTER EXCEPTIONS
+        # ----------------------------------------------------
+
+        c.execute(
+            """
+            SELECT discord_id, rsn, wom_id
+            FROM links
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+        current_primary_links = c.fetchall()
+
+        c.execute(
+            """
+            SELECT discord_id, rsn, wom_id
+            FROM alt_links
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+        current_alt_links = c.fetchall()
+
+        linked_wom_ids = set()
+        linked_rsn_keys = set()
+        linked_members_without_active_rsn = []
+
+        wom_by_id_for_audit = {
+            membership["player"]["id"]: membership
+            for membership in memberships
+            if isinstance(membership, dict)
+            and isinstance(
+                membership.get("player"),
+                dict
+            )
+            and membership["player"].get("id") is not None
+        }
+        wom_by_name_for_audit = {
+            membership["player"]["username"].casefold(): membership
+            for membership in memberships
+            if isinstance(membership, dict)
+            and isinstance(
+                membership.get("player"),
+                dict
+            )
+            and membership["player"].get("username")
+        }
+
+        for (
+            linked_discord_id,
+            linked_rsn,
+            linked_wom_id
+        ) in (
+            current_primary_links
+            + current_alt_links
+        ):
+            membership = None
+
+            if linked_wom_id is not None:
+                membership = wom_by_id_for_audit.get(
+                    linked_wom_id
+                )
+
+            if (
+                membership is None
+                and linked_rsn
+            ):
+                membership = wom_by_name_for_audit.get(
+                    linked_rsn.casefold()
+                )
+
+            if membership is None:
+                continue
+
+            player = membership.get(
+                "player",
+                {}
+            )
+            active_wom_id = player.get(
+                "id"
+            )
+            active_rsn = player.get(
+                "username"
+            )
+
+            if active_wom_id is not None:
+                linked_wom_ids.add(
+                    active_wom_id
+                )
+
+            if active_rsn:
+                linked_rsn_keys.add(
+                    active_rsn.casefold()
+                )
+
+        # A linked Discord Member with no currently active primary or alt RSN
+        # needs staff attention even though the saved history should remain.
+        for (
+            linked_discord_id,
+            linked_rsn,
+            linked_wom_id
+        ) in current_primary_links:
+            linked_member = guild.get_member(
+                linked_discord_id
+            )
+
+            if (
+                linked_member is None
+                or has_non_clan_role(
+                    linked_member
+                )
+                or not has_novus_member_role(
+                    linked_member
+                )
+            ):
+                continue
+
+            active_accounts = (
+                self.get_linked_account_tenures(
+                    c,
+                    guild.id,
+                    group_data.get("id"),
+                    linked_discord_id,
+                    memberships
+                )
+            )
+
+            if not active_accounts:
+                linked_members_without_active_rsn.append(
+                    f"- {linked_member.mention}: "
+                    "no linked RSN is currently active in Novus"
+                )
+
+        unlinked_full_wom_accounts = []
+
+        for membership in memberships:
+            wom_role = (
+                membership.get(
+                    "role",
+                    ""
+                ).lower()
+            )
+
+            if wom_role in NOVUS_TRIAL_WOM_RANKS:
+                continue
+
+            player = membership.get(
+                "player",
+                {}
+            )
+            player_id = player.get(
+                "id"
+            )
+            rsn = player.get(
+                "username"
+            )
+
+            if (
+                player_id in linked_wom_ids
+                or (
+                    rsn
+                    and rsn.casefold()
+                        in linked_rsn_keys
+                )
+            ):
+                continue
+
+            if rsn:
+                unlinked_full_wom_accounts.append(
+                    f"- `{rsn}` "
+                    f"({wom_role or 'unknown rank'})"
+                )
+
+        unlinked_full_wom_accounts.sort(
+            key=str.casefold
+        )
+
         now = datetime.datetime.now().isoformat()
 
         c.execute(
@@ -4034,8 +4212,8 @@ class TasksCog(commands.Cog):
             if rsn
         }
 
-        now_utc = datetime.datetime.now(
-            datetime.timezone.utc
+        now_local = datetime.datetime.now(
+            ZoneInfo("America/New_York")
         )
         trials_ending_soon = []
 
@@ -4076,7 +4254,7 @@ class TasksCog(commands.Cog):
             )
             days_remaining = (
                 trial_end.date()
-                - now_utc.date()
+                - now_local.date()
             ).days
 
             if days_remaining > TRIAL_ENDING_SOON_DAYS:
@@ -4178,6 +4356,8 @@ class TasksCog(commands.Cog):
             trial_lines,
             skipped_members,
             failed_members,
+            unlinked_full_wom_accounts,
+            linked_members_without_active_rsn,
             removed_users_count,
         ))
 
@@ -4191,7 +4371,8 @@ class TasksCog(commands.Cog):
             embed.description = (
                 f"Checked **{active_links_checked}** active Novus members | "
                 f"**{len(group_data.get('memberships', []))}** WOM clan accounts\n"
-                f"Tenure roles only move upward automatically."
+                "Actionable daily exceptions and automatic changes are shown below. "
+                "Tenure roles only move upward automatically."
             )
 
             embed.set_footer(
@@ -4269,6 +4450,30 @@ class TasksCog(commands.Cog):
                 embed.add_field(
                     name=f"Trials Ending Soon ({len(trial_lines)})",
                     value="\n".join(trial_lines)[:1024],
+                    inline=False
+                )
+
+            if unlinked_full_wom_accounts:
+                embed.add_field(
+                    name=(
+                        "Unlinked Full Clan Accounts "
+                        f"({len(unlinked_full_wom_accounts)})"
+                    ),
+                    value="\n".join(
+                        unlinked_full_wom_accounts
+                    )[:1024],
+                    inline=False
+                )
+
+            if linked_members_without_active_rsn:
+                embed.add_field(
+                    name=(
+                        "Linked Members With No Active RSN "
+                        f"({len(linked_members_without_active_rsn)})"
+                    ),
+                    value="\n".join(
+                        linked_members_without_active_rsn
+                    )[:1024],
                     inline=False
                 )
 
@@ -4404,7 +4609,7 @@ class TasksCog(commands.Cog):
 
     @tasks.loop(
         time=datetime.time(
-            hour=17,
+            hour=12,
             minute=0,
             tzinfo=ZoneInfo("America/New_York")
         )
@@ -4413,7 +4618,7 @@ class TasksCog(commands.Cog):
         await self.bot.wait_until_ready()
 
         logger.info(
-            "Daily sync started."
+            "Daily noon Eastern sync started."
         )
 
         conn = sqlite3.connect(
@@ -4488,7 +4693,7 @@ class TasksCog(commands.Cog):
         conn.close()
 
         logger.info(
-            "Daily sync finished. "
+            "Daily noon Eastern sync finished. "
             f"Global sync time updated to "
             f"{current_time_iso}."
         )

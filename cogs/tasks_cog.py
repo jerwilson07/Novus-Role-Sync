@@ -2894,6 +2894,7 @@ class TasksCog(commands.Cog):
         checked = 0
         changed = 0
         automatic_promotions = []
+        wom_name_updates = []
         wom_mismatches = []
         missing_join_dates = []
         mapping_issues = []
@@ -2941,8 +2942,36 @@ class TasksCog(commands.Cog):
                     skipped_members.append(issue_line)
                 continue
 
-            if result["roles_added"] or result["roles_removed"]:
+            if (
+                result["roles_added"]
+                or result["roles_removed"]
+                or result.get(
+                    "nickname_updated_from_wom"
+                )
+            ):
                 changed += 1
+
+            if result.get(
+                "primary_rsn_changed"
+            ):
+                rename_status = (
+                    "Discord nickname updated"
+                    if result.get(
+                        "nickname_updated_from_wom"
+                    )
+                    else (
+                        "Discord nickname update failed"
+                        if result.get(
+                            "nickname_update_failed"
+                        )
+                        else "saved RSN updated"
+                    )
+                )
+                wom_name_updates.append(
+                    f"- {member.mention}: "
+                    f"`{result.get('previous_primary_rsn') or 'unknown'}` "
+                    f"-> `{result['rsn']}` ({rename_status})"
+                )
 
             if result.get("tenure_status") == "promoted":
                 automatic_promotions.append(

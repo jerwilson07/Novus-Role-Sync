@@ -1012,6 +1012,10 @@ class TasksCog(commands.Cog):
         current_rsn = rsn
         current_wom_id = wom_id
         current_wom_role = ""
+        primary_rsn_changed = False
+        previous_primary_rsn = rsn
+        nickname_updated_from_wom = False
+        nickname_update_failed = False
 
         if membership is not None:
             player = membership.get(
@@ -1035,14 +1039,15 @@ class TasksCog(commands.Cog):
                 ).lower()
             )
 
+            primary_rsn_changed = bool(
+                current_rsn
+                and rsn
+                and current_rsn != rsn
+            )
+
             if (
                 current_wom_id != wom_id
-                or (
-                    current_rsn
-                    and rsn
-                    and current_rsn.lower()
-                        != rsn.lower()
-                )
+                or primary_rsn_changed
             ):
                 cursor.execute(
                     """
@@ -1058,6 +1063,46 @@ class TasksCog(commands.Cog):
                         member.id
                     )
                 )
+
+            # A WOM rename is authoritative for the member's Novus server
+            # nickname. Use the exact spelling/capitalization WOM reports.
+            # This changes only the nickname in this Discord server; bots
+            # cannot change a user's global Discord username.
+            if (
+                primary_rsn_changed
+                and current_rsn
+                and member.nick != current_rsn
+            ):
+                try:
+                    await member.edit(
+                        nick=current_rsn,
+                        reason=(
+                            "Primary RSN renamed in Wise Old Man"
+                        )
+                    )
+                    nickname_updated_from_wom = True
+                except discord.Forbidden:
+                    nickname_update_failed = True
+                    logger.warning(
+                        "Could not update Novus nickname for %s (%s) "
+                        "after WOM rename %r -> %r: missing role hierarchy "
+                        "or Manage Nicknames permission.",
+                        member,
+                        member.id,
+                        previous_primary_rsn,
+                        current_rsn,
+                    )
+                except Exception as e:
+                    nickname_update_failed = True
+                    logger.error(
+                        "Nickname update failed for %s (%s) after WOM "
+                        "rename %r -> %r: %s",
+                        member,
+                        member.id,
+                        previous_primary_rsn,
+                        current_rsn,
+                        e,
+                    )
 
         # ----------------------------------------------------
         # ALT ACCOUNTS
@@ -1488,6 +1533,10 @@ class TasksCog(commands.Cog):
             "verified_alts": verified_alts,
             "missing_alts": missing_alts,
             "user_dm_on": user_dm_on,
+            "primary_rsn_changed": primary_rsn_changed,
+            "previous_primary_rsn": previous_primary_rsn,
+            "nickname_updated_from_wom": nickname_updated_from_wom,
+            "nickname_update_failed": nickname_update_failed,
         }
 
     # ========================================================
@@ -2971,6 +3020,7 @@ class TasksCog(commands.Cog):
             f"Linked primary members: **{checked}**\n"
             f"Members changed: **{changed}**\n"
             f"Automatic Discord tenure promotions: **{len(automatic_promotions)}**\n"
+            f"WOM primary-name updates: **{len(wom_name_updates)}**\n"
             f"In-game promotions due today: **{len(due_today_promotions)}**\n"
             f"In-game promotions overdue: **{len(overdue_promotions)}**\n"
             f"WOM tenure mismatches: **{len(wom_mismatches)}**\n"
@@ -2978,6 +3028,14 @@ class TasksCog(commands.Cog):
         )
 
         sections = []
+
+        if wom_name_updates:
+            sections.append(
+                "**WOM Primary Name Updates**\n"
+                + "\n".join(
+                    wom_name_updates
+                )
+            )
 
         if automatic_promotions:
             sections.append(
@@ -3566,6 +3624,7 @@ class TasksCog(commands.Cog):
         eligible_links = []
 
         automatic_promotions = []
+        wom_name_updates = []
         staff_updates = []
         duplicate_cleanups = []
         wom_rank_mismatches = []
@@ -3650,6 +3709,28 @@ class TasksCog(commands.Cog):
                 else:
                     skipped_members.append(issue_line)
                 continue
+
+            if result.get(
+                "primary_rsn_changed"
+            ):
+                rename_status = (
+                    "Discord nickname updated"
+                    if result.get(
+                        "nickname_updated_from_wom"
+                    )
+                    else (
+                        "Discord nickname update failed"
+                        if result.get(
+                            "nickname_update_failed"
+                        )
+                        else "saved RSN updated"
+                    )
+                )
+                wom_name_updates.append(
+                    f"- {member.mention}: "
+                    f"`{result.get('previous_primary_rsn') or 'unknown'}` "
+                    f"-> `{result['rsn']}` ({rename_status})"
+                )
 
             tenure_status = result.get(
                 "tenure_status"
@@ -3741,70 +3822,37 @@ class TasksCog(commands.Cog):
                         f"Could not DM {member.id}: {e}"
                     )
 
-            # Optional nickname enforcement uses the linked account
-            # structure: Primary | Alt | Alt.
+            # Optional continuous nickname enforcement also uses the
+            # exact primary WOM RSN. It never appends linked alts.
             if nickname_enforcement:
-                c.execute(
-                    """
-                    SELECT rsn
-                    FROM alt_links
-                    WHERE guild_id = ?
-                    AND discord_id = ?
-                    ORDER BY rowid
-                    """,
-                    (
-                        guild.id,
-                        member.id
-                    )
+                desired_nickname = result.get(
+                    "rsn"
                 )
 
-                nickname_parts = [
-                    result["rsn"]
-                ]
-
-                nickname_parts.extend(
-                    row[0]
-                    for row in c.fetchall()
-                    if row[0]
-                )
-
-                desired_nickname = " | ".join(
-                    nickname_parts
-                )
-
-                if len(desired_nickname) > 32:
-                    fitted_parts = []
-
-                    for account_name in nickname_parts:
-                        candidate = " | ".join(
-                            fitted_parts + [account_name]
-                        )
-
-                        if len(candidate) <= 32:
-                            fitted_parts.append(
-                                account_name
-                            )
-                        else:
-                            break
-
-                    if fitted_parts:
-                        desired_nickname = " | ".join(
-                            fitted_parts
-                        )
-                    else:
-                        desired_nickname = result["rsn"][:32]
-
-                if member.nick != desired_nickname:
+                if (
+                    desired_nickname
+                    and member.nick != desired_nickname
+                ):
                     try:
                         await member.edit(
                             nick=desired_nickname,
-                            reason="Novus linked account nickname enforcement"
+                            reason=(
+                                "Novus WOM primary RSN nickname enforcement"
+                            )
                         )
                     except discord.Forbidden:
-                        pass
+                        logger.warning(
+                            "Could not enforce WOM nickname for %s (%s): "
+                            "missing role hierarchy or Manage Nicknames permission.",
+                            member,
+                            member.id,
+                        )
                     except Exception as e:
                         logger.error(
-                            f"Could not update nickname for {member} ({member.id}): {e}"
+                            "Could not enforce WOM nickname for %s (%s): %s",
+                            member,
+                            member.id,
+                            e,
                         )
 
         promotion_audit = (
@@ -3973,6 +4021,7 @@ class TasksCog(commands.Cog):
 
         should_log = any((
             automatic_promotions,
+            wom_name_updates,
             due_today_promotions,
             overdue_promotions,
             staff_updates,
@@ -4002,6 +4051,15 @@ class TasksCog(commands.Cog):
             embed.set_footer(
                 text="Novus Tenure Sync"
             )
+
+            if wom_name_updates:
+                embed.add_field(
+                    name=f"WOM Primary Name Updates ({len(wom_name_updates)})",
+                    value="\n".join(
+                        wom_name_updates
+                    )[:1024],
+                    inline=False
+                )
 
             if automatic_promotions:
                 embed.add_field(

@@ -528,7 +528,7 @@ class TasksCog(commands.Cog):
                                     )
 
                     council_notice_key = (
-                        f"inactive_member_cleanup_notice_v1:{guild.id}"
+                        f"inactive_member_cleanup_notice_v2:{guild.id}"
                     )
                     cursor.execute(
                         """
@@ -558,16 +558,19 @@ class TasksCog(commands.Cog):
                                 try:
                                     await council_channel.send(
                                         "**Novus Sync Update**\n\n"
-                                        "If a linked Discord member has **no active linked RSN "
-                                        "remaining in the Novus WOM roster**, Novus Sync will now "
-                                        "automatically remove their **Member** role and any tenure "
-                                        "role they currently hold (**Squire, Duellist, Inquisitor, "
-                                        "Expert, Knight, or Paladin**).\n\n"
-                                        "Their saved RSN links and tenure history are **not deleted**, "
-                                        "so if they rejoin Novus later, their prior service can still "
-                                        "be recognized. Staff/special roles are left untouched.\n\n"
-                                        "These removals will be shown in sync reports under "
-                                        "**Inactive Members Cleaned**."
+                                        "Novus Sync now automatically cleans stale Discord clan roles "
+                                        "based on the current WOM roster.\n\n"
+                                        "• Full members with **no active linked RSN** in Novus will "
+                                        "lose their **Member** role and any tenure role (**Squire, "
+                                        "Duellist, Inquisitor, Expert, Knight, or Paladin**).\n"
+                                        "• Trial members will keep **Trial Member** only while their "
+                                        "saved linked RSN is currently in WOM as **gnome_child**. "
+                                        "If that linked trial RSN leaves, is kicked, or is no longer "
+                                        "gnome_child, **Trial Member** is removed automatically.\n\n"
+                                        "Saved RSN links and tenure history are preserved, and staff/"
+                                        "special roles are left untouched. Cleanup actions will appear "
+                                        "in sync reports under **Inactive Members Cleaned** and "
+                                        "**Inactive Trials Cleaned**."
                                     )
                                     cursor.execute(
                                         """
@@ -3553,11 +3556,35 @@ class TasksCog(commands.Cog):
         automatic_promotions = []
         wom_name_updates = []
         inactive_member_cleanups = []
+        inactive_trial_cleanups = []
         wom_mismatches = []
         missing_join_dates = []
         mapping_issues = []
         skipped_members = []
         failed_members = []
+
+        trial_cleanup_result = (
+            await self.cleanup_inactive_trial_roles(
+                c,
+                guild,
+                group_data
+            )
+        )
+        inactive_trial_cleanups.extend(
+            trial_cleanup_result.get(
+                "cleaned",
+                []
+            )
+        )
+        failed_members.extend(
+            trial_cleanup_result.get(
+                "failed",
+                []
+            )
+        )
+        changed += len(
+            inactive_trial_cleanups
+        )
         for discord_id, rsn, wom_id in linked_primaries:
             member = guild.get_member(discord_id)
 
@@ -3744,6 +3771,7 @@ class TasksCog(commands.Cog):
             f"Members changed: **{changed}**\n"
             f"Automatic Discord tenure promotions: **{len(automatic_promotions)}**\n"
             f"Inactive members cleaned: **{len(inactive_member_cleanups)}**\n"
+            f"Inactive trials cleaned: **{len(inactive_trial_cleanups)}**\n"
             f"WOM primary-name updates: **{len(wom_name_updates)}**\n"
             f"In-game promotions due today: **{len(due_today_promotions)}**\n"
             f"In-game promotions overdue: **{len(overdue_promotions)}**\n"
@@ -3758,6 +3786,14 @@ class TasksCog(commands.Cog):
                 "**Inactive Members Cleaned**\n"
                 + "\n".join(
                     inactive_member_cleanups
+                )
+            )
+
+        if inactive_trial_cleanups:
+            sections.append(
+                "**Inactive Trials Cleaned**\n"
+                + "\n".join(
+                    inactive_trial_cleanups
                 )
             )
 
@@ -4079,10 +4115,9 @@ class TasksCog(commands.Cog):
     ):
         """Remove stale Discord Trial Member roles.
 
-        A Trial Member role is retained only when the Discord member can be
-        conservatively matched to a current WOM trial account by saved account
-        link or exact normalized Discord name. Saved links/history are never
-        deleted by this cleanup.
+        Trial Member is valid only when the Discord user has a saved linked RSN
+        whose current WOM role is gnome_child. No nickname/name guessing is used.
+        Saved links/history are preserved.
         """
 
         trial_role = next(
@@ -4106,22 +4141,17 @@ class TasksCog(commands.Cog):
                 "role_missing": True,
             }
 
-        trial_memberships = [
-            membership
-            for membership in group_data.get(
-                "memberships",
-                []
-            )
+        memberships = group_data.get(
+            "memberships",
+            []
+        )
+
+        wom_by_id = {
+            membership["player"]["id"]: membership
+            for membership in memberships
             if isinstance(
                 membership,
                 dict
-            )
-            and (
-                membership.get(
-                    "role",
-                    ""
-                ).casefold()
-                in NOVUS_TRIAL_WOM_RANKS
             )
             and isinstance(
                 membership.get(
@@ -4129,27 +4159,25 @@ class TasksCog(commands.Cog):
                 ),
                 dict
             )
-        ]
-
-        active_trial_ids = {
-            membership["player"].get(
-                "id"
-            )
-            for membership in trial_memberships
-            if membership["player"].get(
+            and membership["player"].get(
                 "id"
             ) is not None
         }
 
-        active_trial_keys = {
-            sanitize_rsn(
-                membership["player"].get(
-                    "username",
-                    ""
-                )
-            ).casefold()
-            for membership in trial_memberships
-            if membership["player"].get(
+        wom_by_name = {
+            membership["player"]["username"].casefold(): membership
+            for membership in memberships
+            if isinstance(
+                membership,
+                dict
+            )
+            and isinstance(
+                membership.get(
+                    "player"
+                ),
+                dict
+            )
+            and membership["player"].get(
                 "username"
             )
         }
@@ -4209,61 +4237,31 @@ class TasksCog(commands.Cog):
                 member.id,
                 []
             ):
-                if (
-                    saved_wom_id is not None
-                    and saved_wom_id
-                        in active_trial_ids
-                ):
-                    still_active_trial = True
-                    break
+                membership = None
+
+                if saved_wom_id is not None:
+                    membership = wom_by_id.get(
+                        saved_wom_id
+                    )
 
                 if (
-                    saved_rsn
-                    and sanitize_rsn(
-                        saved_rsn
+                    membership is None
+                    and saved_rsn
+                ):
+                    membership = wom_by_name.get(
+                        saved_rsn.casefold()
+                    )
+
+                if (
+                    membership is not None
+                    and membership.get(
+                        "role",
+                        ""
                     ).casefold()
-                        in active_trial_keys
+                        in NOVUS_TRIAL_WOM_RANKS
                 ):
                     still_active_trial = True
                     break
-
-            if not still_active_trial:
-                candidate_names = []
-
-                if member.display_name:
-                    candidate_names.extend(
-                        part.strip()
-                        for part in re.split(
-                            r"[|/]",
-                            member.display_name
-                        )
-                        if part.strip()
-                    )
-
-                global_name = getattr(
-                    member,
-                    "global_name",
-                    None
-                )
-                if global_name:
-                    candidate_names.append(
-                        global_name
-                    )
-
-                if member.name:
-                    candidate_names.append(
-                        member.name
-                    )
-
-                for candidate in candidate_names:
-                    if (
-                        sanitize_rsn(
-                            candidate
-                        ).casefold()
-                        in active_trial_keys
-                    ):
-                        still_active_trial = True
-                        break
 
             if still_active_trial:
                 continue
@@ -4272,8 +4270,8 @@ class TasksCog(commands.Cog):
                 await member.remove_roles(
                     trial_role,
                     reason=(
-                        "No current Novus WOM trial account "
-                        "matches this Discord Trial Member"
+                        "No saved linked RSN currently has "
+                        "the Novus WOM gnome_child trial role"
                     )
                 )
                 cleaned.append(
@@ -4371,6 +4369,15 @@ class TasksCog(commands.Cog):
                 ephemeral=True
             )
             return
+
+        trial_cleanup_result = (
+            await self.cleanup_inactive_trial_roles(
+                c,
+                guild,
+                group_data
+            )
+        )
+        conn.commit()
 
         c.execute(
             """
@@ -4480,8 +4487,37 @@ class TasksCog(commands.Cog):
         )
 
         if not trials:
+            response = (
+                "**Novus Trial Members**\n\n"
+                "No current Trial Members found in WOM."
+            )
+
+            if trial_cleanup_result.get(
+                "cleaned"
+            ):
+                response += (
+                    "\n\n**Stale Trial Roles Removed**\n"
+                    + "\n".join(
+                        trial_cleanup_result[
+                            "cleaned"
+                        ]
+                    )
+                )
+
+            if trial_cleanup_result.get(
+                "failed"
+            ):
+                response += (
+                    "\n\n**Trial Cleanup Failed**\n"
+                    + "\n".join(
+                        trial_cleanup_result[
+                            "failed"
+                        ]
+                    )
+                )
+
             await interaction.followup.send(
-                "**Novus Trial Members**\n\nNo current Trial Members found in WOM.",
+                response[:1950],
                 ephemeral=True
             )
             return
@@ -4525,6 +4561,30 @@ class TasksCog(commands.Cog):
             f"Current trials: **{len(trials)}**\n\n"
             + "\n\n".join(lines)
         )
+
+        if trial_cleanup_result.get(
+            "cleaned"
+        ):
+            response += (
+                "\n\n**Stale Trial Roles Removed**\n"
+                + "\n".join(
+                    trial_cleanup_result[
+                        "cleaned"
+                    ]
+                )
+            )
+
+        if trial_cleanup_result.get(
+            "failed"
+        ):
+            response += (
+                "\n\n**Trial Cleanup Failed**\n"
+                + "\n".join(
+                    trial_cleanup_result[
+                        "failed"
+                    ]
+                )
+            )
 
         if len(response) > 1950:
             response = (
@@ -4613,6 +4673,14 @@ class TasksCog(commands.Cog):
 
         await self.prepare_tenure_history(c, guild, group_data)
 
+        trial_cleanup_result = (
+            await self.cleanup_inactive_trial_roles(
+                c,
+                guild,
+                group_data
+            )
+        )
+
         c.execute(
             """
             SELECT discord_id, rsn, wom_id
@@ -4631,13 +4699,24 @@ class TasksCog(commands.Cog):
         wom_name_updates = []
         autolink_updates = []
         inactive_member_cleanups = []
+        inactive_trial_cleanups = list(
+            trial_cleanup_result.get(
+                "cleaned",
+                []
+            )
+        )
         staff_updates = []
         duplicate_cleanups = []
         wom_rank_mismatches = []
         missing_join_dates = []
         tenure_mapping_issues = []
         skipped_members = []
-        failed_members = []
+        failed_members = list(
+            trial_cleanup_result.get(
+                "failed",
+                []
+            )
+        )
         removed_users_count = 0
 
         if autolink_result:
@@ -5080,6 +5159,7 @@ class TasksCog(commands.Cog):
         actual_role_changes = (
             automatic_promotions
             or inactive_member_cleanups
+            or inactive_trial_cleanups
             or staff_updates
             or duplicate_cleanups
         )
@@ -5105,6 +5185,7 @@ class TasksCog(commands.Cog):
             wom_name_updates,
             autolink_updates,
             inactive_member_cleanups,
+            inactive_trial_cleanups,
             due_today_promotions,
             overdue_promotions,
             staff_updates,
@@ -5166,6 +5247,18 @@ class TasksCog(commands.Cog):
                     ),
                     value="\n".join(
                         inactive_member_cleanups
+                    )[:1024],
+                    inline=False
+                )
+
+            if inactive_trial_cleanups:
+                embed.add_field(
+                    name=(
+                        "Inactive Trials Cleaned "
+                        f"({len(inactive_trial_cleanups)})"
+                    ),
+                    value="\n".join(
+                        inactive_trial_cleanups
                     )[:1024],
                     inline=False
                 )
@@ -5335,7 +5428,7 @@ class TasksCog(commands.Cog):
         )
 
         return (
-            len(automatic_promotions) + len(inactive_member_cleanups) + len(staff_updates) + len(duplicate_cleanups),
+            len(automatic_promotions) + len(inactive_member_cleanups) + len(inactive_trial_cleanups) + len(staff_updates) + len(duplicate_cleanups),
             len(skipped_members) + len(failed_members),
             active_links_checked
         )

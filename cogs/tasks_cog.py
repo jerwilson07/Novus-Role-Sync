@@ -4420,7 +4420,7 @@ class TasksCog(commands.Cog):
                 c,
                 guild,
                 group_data,
-                upcoming_days=7
+                upcoming_days=0
             )
         )
         due_today_promotions = (
@@ -4433,12 +4433,6 @@ class TasksCog(commands.Cog):
                 "overdue"
             ]
         )
-        upcoming_promotions = (
-            promotion_audit[
-                "upcoming"
-            ]
-        )
-
         link_audit = self.get_link_audit_entries(
             c,
             guild,
@@ -4607,7 +4601,6 @@ class TasksCog(commands.Cog):
             autolink_updates,
             due_today_promotions,
             overdue_promotions,
-            upcoming_promotions,
             staff_updates,
             duplicate_cleanups,
             wom_rank_mismatches,
@@ -4706,27 +4699,6 @@ class TasksCog(commands.Cog):
                         )
                         for entry
                         in overdue_promotions
-                    )[:1024],
-                    inline=False
-                )
-
-            if upcoming_promotions:
-                embed.add_field(
-                    name=(
-                        "Promotions Coming Up - 7 Days "
-                        f"({len(upcoming_promotions)})"
-                    ),
-                    value="\n".join(
-                        (
-                            f"- {entry['member'].mention} "
-                            f"({entry['rsn']} {entry['account_type']}): "
-                            f"{entry['current_rank']} -> "
-                            f"{entry['target_rank']} on "
-                            f"{entry['eligible_at'].date()} "
-                            f"({entry['days_until']}d)"
-                        )
-                        for entry
-                        in upcoming_promotions
                     )[:1024],
                     inline=False
                 )

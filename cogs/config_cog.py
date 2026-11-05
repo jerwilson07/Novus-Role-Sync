@@ -861,37 +861,35 @@ class ConfigCog(commands.Cog):
     # AUTOMATIC USER LINKING
     # ========================================================
 
-    @app_commands.command(
-        name="autolink",
-        description="Automatically link Discord members to Novus WOM accounts."
-    )
-    async def autolink(
+    async def run_autolink_for_guild(
         self,
-        interaction: discord.Interaction
+        guild: discord.Guild,
+        data: dict
     ):
-        if not has_novus_command_permission(
-            interaction.user
-        ):
-            await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
-                "to use this command.",
-                ephemeral=True
-            )
-            return
+        """Run the same conservative auto-link engine used by /autolink."""
 
-        await interaction.response.defer(
-            ephemeral=True,
-            thinking=True
+        memberships = data.get(
+            "memberships",
+            []
         )
 
-        guild = interaction.guild
+        result = {
+            "linked_members": [],
+            "repaired_members": [],
+            "refreshed_members": [],
+            "alt_links_added": [],
+            "unmatched_members": [],
+            "unmatched_wom_accounts": [],
+        }
 
-        if guild is None:
-            await interaction.followup.send(
-                "This command can only be used inside the Novus server.",
-                ephemeral=True
+        if not isinstance(
+            memberships,
+            list
+        ):
+            result["error"] = (
+                "Wise Old Man returned an invalid clan roster."
             )
-            return
+            return result
 
         conn = sqlite3.connect(
             "wom_multi.db"
@@ -899,82 +897,12 @@ class ConfigCog(commands.Cog):
 
         try:
             c = conn.cursor()
+
             forget_non_clan_links(
                 c,
                 guild
             )
-            conn.commit()
 
-            c.execute(
-                """
-                SELECT group_id
-                FROM guild_configs
-                WHERE guild_id = ?
-                """,
-                (guild.id,)
-            )
-
-            config = c.fetchone()
-
-            if not config or not config[0]:
-                await interaction.followup.send(
-                    "No WOM group is configured.",
-                    ephemeral=True
-                )
-                return
-
-            group_id = config[0]
-
-            url = (
-                f"https://api.wiseoldman.net/v2/groups/"
-                f"{group_id}"
-            )
-
-            try:
-                async with self.bot.http_session.get(
-                    url,
-                    headers=build_wom_headers(),
-                    timeout=30
-                ) as response:
-
-                    if response.status != 200:
-                        await interaction.followup.send(
-                            f"Wise Old Man returned API "
-                            f"error `{response.status}`.",
-                            ephemeral=True
-                        )
-                        return
-
-                    data = await response.json()
-
-            except Exception as e:
-                logger.error(
-                    f"/autolink WOM request failed: {e}"
-                )
-
-                await interaction.followup.send(
-                    "Could not retrieve the Novus WOM group.",
-                    ephemeral=True
-                )
-                return
-
-            memberships = data.get(
-                "memberships",
-                []
-            )
-
-            if not isinstance(
-                memberships,
-                list
-            ):
-                await interaction.followup.send(
-                    "Wise Old Man returned an invalid clan roster.",
-                    ephemeral=True
-                )
-                return
-
-            # Normalize Discord-style separators and OSRS spacing before
-            # matching, but only accept a unique exact normalized WOM match.
             wom_by_id = {}
             wom_by_key = {}
 
@@ -1086,9 +1014,6 @@ class ConfigCog(commands.Cog):
                     )
                 )
 
-            # Only current in-clan associations claim a WOM identity. Stale
-            # saved links remain available for history, but cannot block a
-            # correct current match.
             claimed_by_id = {}
             claimed_by_key = {}
 
@@ -1249,11 +1174,21 @@ class ConfigCog(commands.Cog):
                         ).casefold()
                     ] = discord_id
 
-            linked_members = []
-            repaired_members = []
-            refreshed_members = []
-            alt_links_added = []
-            unmatched_members = []
+            linked_members = result[
+                "linked_members"
+            ]
+            repaired_members = result[
+                "repaired_members"
+            ]
+            refreshed_members = result[
+                "refreshed_members"
+            ]
+            alt_links_added = result[
+                "alt_links_added"
+            ]
+            unmatched_members = result[
+                "unmatched_members"
+            ]
 
             for member in guild.members:
                 if (
@@ -1293,12 +1228,7 @@ class ConfigCog(commands.Cog):
                 primary_membership = (
                     existing_membership
                 )
-                repaired = False
-                created = False
 
-                # If the saved primary is stale or absent, try conservative
-                # exact candidates from nickname, global display name, then
-                # Discord username. Never fuzzy-match or guess.
                 if primary_membership is None:
                     candidate_strings = []
 
@@ -1398,7 +1328,7 @@ class ConfigCog(commands.Cog):
                             primary_wom_id
                         )
                     )
-                    created = True
+
                     linked_members.append(
                         (
                             member,
@@ -1450,7 +1380,6 @@ class ConfigCog(commands.Cog):
                         )
 
                         if existing_membership is None:
-                            repaired = True
                             repaired_members.append(
                                 (
                                     member,
@@ -1471,8 +1400,6 @@ class ConfigCog(commands.Cog):
                     member.id
                 )
 
-                # Only interpret nickname suffixes as alts when the first
-                # nickname segment resolves to this same primary account.
                 nickname_primary = (
                     resolve_exact(
                         display_parts[0]
@@ -1503,6 +1430,7 @@ class ConfigCog(commands.Cog):
                     in current_alt_rows
                     if alt_wom_id is not None
                 }
+
                 current_alt_names_by_id = {
                     alt_wom_id: alt_rsn
                     for alt_rsn, alt_wom_id
@@ -1538,11 +1466,12 @@ class ConfigCog(commands.Cog):
                         continue
 
                     if alt_wom_id in current_alt_ids:
-                        stored_alt_rsn = current_alt_names_by_id.get(
-                            alt_wom_id
+                        stored_alt_rsn = (
+                            current_alt_names_by_id.get(
+                                alt_wom_id
+                            )
                         )
 
-                        # Ignore capitalization-only WOM differences for alts.
                         if not (
                             stored_alt_rsn
                             and actual_alt_rsn
@@ -1596,6 +1525,7 @@ class ConfigCog(commands.Cog):
                                 actual_alt_rsn
                             )
                         )
+
                         current_alt_ids.add(
                             alt_wom_id
                         )
@@ -1605,9 +1535,6 @@ class ConfigCog(commands.Cog):
                         member.id
                     )
 
-            conn.commit()
-
-            # Current roster audit after repairs/new links.
             c.execute(
                 """
                 SELECT discord_id, rsn, wom_id
@@ -1679,7 +1606,9 @@ class ConfigCog(commands.Cog):
                         ).casefold()
                     )
 
-            unmatched_wom_accounts = []
+            unmatched_wom_accounts = result[
+                "unmatched_wom_accounts"
+            ]
 
             for membership in memberships:
                 player = membership.get(
@@ -1693,8 +1622,6 @@ class ConfigCog(commands.Cog):
                     ).lower()
                 )
 
-                # Trial accounts are intentionally handled by /trials and
-                # should not make /autolink look broken.
                 if (
                     wom_role
                     in NOVUS_TRIAL_WOM_RANKS
@@ -1729,94 +1656,222 @@ class ConfigCog(commands.Cog):
                 key=str.casefold
             )
 
-            response = (
-                "**Novus Auto-Link Complete**\n\n"
-                f"Current WOM clan accounts: **{len(memberships)}**\n"
-                f"New Discord members linked: **{len(linked_members)}**\n"
-                f"Stale primary links repaired: **{len(repaired_members)}**\n"
-                f"Alt links added: **{len(alt_links_added)}**\n"
-                f"Discord members still unmatched: **{len(unmatched_members)}**\n"
-                f"Full WOM accounts still unmatched: **{len(unmatched_wom_accounts)}**"
-            )
+            conn.commit()
 
-            sections = []
-
-            if linked_members:
-                sections.append(
-                    "**New Primary Links**\n"
-                    + "\n".join(
-                        (
-                            f"- {member.mention} -> "
-                            f"`{rsn}`"
-                        )
-                        for member, rsn
-                        in linked_members[:15]
-                    )
-                )
-
-            if repaired_members:
-                sections.append(
-                    "**Repaired Stale Primary Links**\n"
-                    + "\n".join(
-                        (
-                            f"- {member.mention}: "
-                            f"`{old_rsn or 'unknown'}` -> "
-                            f"`{new_rsn}`"
-                        )
-                        for (
-                            member,
-                            old_rsn,
-                            new_rsn
-                        ) in repaired_members[:15]
-                    )
-                )
-
-            if alt_links_added:
-                sections.append(
-                    "**New Alt Links**\n"
-                    + "\n".join(
-                        (
-                            f"- {member.mention} -> "
-                            f"`{alt_rsn}`"
-                        )
-                        for (
-                            member,
-                            alt_rsn
-                        ) in alt_links_added[:15]
-                    )
-                )
-
-            if unmatched_wom_accounts:
-                sections.append(
-                    "**WOM Accounts Still Unmatched**\n"
-                    + "\n".join(
-                        f"- `{username}`"
-                        for username
-                        in unmatched_wom_accounts[:25]
-                    )
-                )
-
-            if sections:
-                response += (
-                    "\n\n"
-                    + "\n\n".join(
-                        sections
-                    )
-                )
-
-            if len(response) > 1950:
-                response = (
-                    response[:1900]
-                    + "\n\n...report shortened."
-                )
-
-            await interaction.followup.send(
-                response,
-                ephemeral=True
-            )
+            return result
 
         finally:
             conn.close()
+
+    def format_autolink_result(
+        self,
+        result: dict
+    ) -> str:
+        if result.get(
+            "error"
+        ):
+            return result[
+                "error"
+            ]
+
+        linked_members = result[
+            "linked_members"
+        ]
+        repaired_members = result[
+            "repaired_members"
+        ]
+        alt_links_added = result[
+            "alt_links_added"
+        ]
+        unmatched_members = result[
+            "unmatched_members"
+        ]
+        unmatched_wom_accounts = result[
+            "unmatched_wom_accounts"
+        ]
+
+        response = (
+            "**Novus Auto-Link Complete**\n\n"
+            f"New Discord members linked: **{len(linked_members)}**\n"
+            f"Stale primary links repaired: **{len(repaired_members)}**\n"
+            f"Alt links added: **{len(alt_links_added)}**\n"
+            f"Discord members still unmatched: **{len(unmatched_members)}**\n"
+            f"Full WOM accounts still unmatched: **{len(unmatched_wom_accounts)}**"
+        )
+
+        sections = []
+
+        if linked_members:
+            sections.append(
+                "**New Primary Links**\n"
+                + "\n".join(
+                    (
+                        f"- {member.mention} -> "
+                        f"`{rsn}`"
+                    )
+                    for member, rsn
+                    in linked_members[:15]
+                )
+            )
+
+        if repaired_members:
+            sections.append(
+                "**Repaired Stale Primary Links**\n"
+                + "\n".join(
+                    (
+                        f"- {member.mention}: "
+                        f"`{old_rsn or 'unknown'}` -> "
+                        f"`{new_rsn}`"
+                    )
+                    for (
+                        member,
+                        old_rsn,
+                        new_rsn
+                    ) in repaired_members[:15]
+                )
+            )
+
+        if alt_links_added:
+            sections.append(
+                "**New Alt Links**\n"
+                + "\n".join(
+                    (
+                        f"- {member.mention} -> "
+                        f"`{alt_rsn}`"
+                    )
+                    for (
+                        member,
+                        alt_rsn
+                    ) in alt_links_added[:15]
+                )
+            )
+
+        if unmatched_wom_accounts:
+            sections.append(
+                "**WOM Accounts Still Unmatched**\n"
+                + "\n".join(
+                    f"- `{username}`"
+                    for username
+                    in unmatched_wom_accounts[:25]
+                )
+            )
+
+        if sections:
+            response += (
+                "\n\n"
+                + "\n\n".join(
+                    sections
+                )
+            )
+
+        if len(response) > 1950:
+            response = (
+                response[:1900]
+                + "\n\n...report shortened."
+            )
+
+        return response
+
+    @app_commands.command(
+        name="autolink",
+        description="Automatically link Discord members to Novus WOM accounts."
+    )
+    async def autolink(
+        self,
+        interaction: discord.Interaction
+    ):
+        if not has_novus_command_permission(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "You must be a Trial Moderator, Moderator, or Council member "
+                "to use this command.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(
+            ephemeral=True,
+            thinking=True
+        )
+
+        guild = interaction.guild
+
+        if guild is None:
+            await interaction.followup.send(
+                "This command can only be used inside the Novus server.",
+                ephemeral=True
+            )
+            return
+
+        conn = sqlite3.connect(
+            "wom_multi.db"
+        )
+        try:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT group_id
+                FROM guild_configs
+                WHERE guild_id = ?
+                """,
+                (guild.id,)
+            )
+            config = c.fetchone()
+        finally:
+            conn.close()
+
+        if not config or not config[0]:
+            await interaction.followup.send(
+                "No WOM group is configured.",
+                ephemeral=True
+            )
+            return
+
+        url = (
+            f"https://api.wiseoldman.net/v2/groups/"
+            f"{config[0]}"
+        )
+
+        try:
+            async with self.bot.http_session.get(
+                url,
+                headers=build_wom_headers(),
+                timeout=30
+            ) as response:
+
+                if response.status != 200:
+                    await interaction.followup.send(
+                        f"Wise Old Man returned API "
+                        f"error `{response.status}`.",
+                        ephemeral=True
+                    )
+                    return
+
+                data = await response.json()
+
+        except Exception as e:
+            logger.error(
+                f"/autolink WOM request failed: {e}"
+            )
+
+            await interaction.followup.send(
+                "Could not retrieve the Novus WOM group.",
+                ephemeral=True
+            )
+            return
+
+        result = await self.run_autolink_for_guild(
+            guild,
+            data
+        )
+
+        await interaction.followup.send(
+            self.format_autolink_result(
+                result
+            ),
+            ephemeral=True
+        )
 
     # ========================================================
     # STAFF AUDIT

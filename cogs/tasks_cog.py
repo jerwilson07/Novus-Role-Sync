@@ -992,6 +992,200 @@ class TasksCog(commands.Cog):
             "active_accounts": active_accounts,
         }
 
+    def get_link_audit_entries(
+        self,
+        cursor,
+        guild: discord.Guild,
+        group_data: dict
+    ):
+        """Return actionable Discord/WOM linking exceptions for staff."""
+
+        memberships = group_data.get(
+            "memberships",
+            []
+        )
+
+        cursor.execute(
+            """
+            SELECT discord_id, rsn, wom_id
+            FROM links
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+        primary_links = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT discord_id, rsn, wom_id
+            FROM alt_links
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+        alt_links = cursor.fetchall()
+
+        wom_by_id = {
+            membership["player"]["id"]: membership
+            for membership in memberships
+            if isinstance(membership, dict)
+            and isinstance(
+                membership.get("player"),
+                dict
+            )
+            and membership["player"].get("id") is not None
+        }
+
+        wom_by_name = {
+            membership["player"]["username"].casefold(): membership
+            for membership in memberships
+            if isinstance(membership, dict)
+            and isinstance(
+                membership.get("player"),
+                dict
+            )
+            and membership["player"].get("username")
+        }
+
+        linked_wom_ids = set()
+        linked_rsn_keys = set()
+
+        for (
+            discord_id,
+            stored_rsn,
+            stored_wom_id
+        ) in (
+            primary_links
+            + alt_links
+        ):
+            membership = None
+
+            if stored_wom_id is not None:
+                membership = wom_by_id.get(
+                    stored_wom_id
+                )
+
+            if (
+                membership is None
+                and stored_rsn
+            ):
+                membership = wom_by_name.get(
+                    stored_rsn.casefold()
+                )
+
+            if membership is None:
+                continue
+
+            player = membership.get(
+                "player",
+                {}
+            )
+            player_id = player.get(
+                "id"
+            )
+            rsn = player.get(
+                "username"
+            )
+
+            if player_id is not None:
+                linked_wom_ids.add(
+                    player_id
+                )
+
+            if rsn:
+                linked_rsn_keys.add(
+                    rsn.casefold()
+                )
+
+        linked_members_without_active_rsn = []
+
+        for (
+            discord_id,
+            stored_rsn,
+            stored_wom_id
+        ) in primary_links:
+            member = guild.get_member(
+                discord_id
+            )
+
+            if (
+                member is None
+                or has_non_clan_role(
+                    member
+                )
+                or not has_novus_member_role(
+                    member
+                )
+            ):
+                continue
+
+            accounts = self.get_linked_account_tenures(
+                cursor,
+                guild.id,
+                group_data.get("id"),
+                discord_id,
+                memberships
+            )
+
+            if not accounts:
+                linked_members_without_active_rsn.append(
+                    f"- {member.mention}: "
+                    "no linked RSN is currently active in Novus"
+                )
+
+        unlinked_full_wom_accounts = []
+
+        for membership in memberships:
+            wom_role = (
+                membership.get(
+                    "role",
+                    ""
+                ).lower()
+            )
+
+            if wom_role in NOVUS_TRIAL_WOM_RANKS:
+                continue
+
+            player = membership.get(
+                "player",
+                {}
+            )
+            player_id = player.get(
+                "id"
+            )
+            rsn = player.get(
+                "username"
+            )
+
+            if (
+                player_id in linked_wom_ids
+                or (
+                    rsn
+                    and rsn.casefold()
+                        in linked_rsn_keys
+                )
+            ):
+                continue
+
+            if rsn:
+                unlinked_full_wom_accounts.append(
+                    f"- `{rsn}` "
+                    f"({wom_role or 'unknown rank'})"
+                )
+
+        unlinked_full_wom_accounts.sort(
+            key=str.casefold
+        )
+
+        return {
+            "unlinked_full_wom_accounts": (
+                unlinked_full_wom_accounts
+            ),
+            "linked_members_without_active_rsn": (
+                linked_members_without_active_rsn
+            ),
+        }
+
     # ========================================================
     # ROLE SYNC ENGINE
     # ========================================================
@@ -3131,182 +3325,20 @@ class TasksCog(commands.Cog):
             ]
         )
 
-        # ----------------------------------------------------
-        # DAILY LINKING / ROSTER EXCEPTIONS
-        # ----------------------------------------------------
-
-        c.execute(
-            """
-            SELECT discord_id, rsn, wom_id
-            FROM links
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
+        link_audit = self.get_link_audit_entries(
+            c,
+            guild,
+            group_data
         )
-        current_primary_links = c.fetchall()
-
-        c.execute(
-            """
-            SELECT discord_id, rsn, wom_id
-            FROM alt_links
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
+        unlinked_full_wom_accounts = (
+            link_audit[
+                "unlinked_full_wom_accounts"
+            ]
         )
-        current_alt_links = c.fetchall()
-
-        linked_wom_ids = set()
-        linked_rsn_keys = set()
-        linked_members_without_active_rsn = []
-
-        wom_by_id_for_audit = {
-            membership["player"]["id"]: membership
-            for membership in memberships
-            if isinstance(membership, dict)
-            and isinstance(
-                membership.get("player"),
-                dict
-            )
-            and membership["player"].get("id") is not None
-        }
-        wom_by_name_for_audit = {
-            membership["player"]["username"].casefold(): membership
-            for membership in memberships
-            if isinstance(membership, dict)
-            and isinstance(
-                membership.get("player"),
-                dict
-            )
-            and membership["player"].get("username")
-        }
-
-        for (
-            linked_discord_id,
-            linked_rsn,
-            linked_wom_id
-        ) in (
-            current_primary_links
-            + current_alt_links
-        ):
-            membership = None
-
-            if linked_wom_id is not None:
-                membership = wom_by_id_for_audit.get(
-                    linked_wom_id
-                )
-
-            if (
-                membership is None
-                and linked_rsn
-            ):
-                membership = wom_by_name_for_audit.get(
-                    linked_rsn.casefold()
-                )
-
-            if membership is None:
-                continue
-
-            player = membership.get(
-                "player",
-                {}
-            )
-            active_wom_id = player.get(
-                "id"
-            )
-            active_rsn = player.get(
-                "username"
-            )
-
-            if active_wom_id is not None:
-                linked_wom_ids.add(
-                    active_wom_id
-                )
-
-            if active_rsn:
-                linked_rsn_keys.add(
-                    active_rsn.casefold()
-                )
-
-        # A linked Discord Member with no currently active primary or alt RSN
-        # needs staff attention even though the saved history should remain.
-        for (
-            linked_discord_id,
-            linked_rsn,
-            linked_wom_id
-        ) in current_primary_links:
-            linked_member = guild.get_member(
-                linked_discord_id
-            )
-
-            if (
-                linked_member is None
-                or has_non_clan_role(
-                    linked_member
-                )
-                or not has_novus_member_role(
-                    linked_member
-                )
-            ):
-                continue
-
-            active_accounts = (
-                self.get_linked_account_tenures(
-                    c,
-                    guild.id,
-                    group_data.get("id"),
-                    linked_discord_id,
-                    memberships
-                )
-            )
-
-            if not active_accounts:
-                linked_members_without_active_rsn.append(
-                    f"- {linked_member.mention}: "
-                    "no linked RSN is currently active in Novus"
-                )
-
-        unlinked_full_wom_accounts = []
-
-        for membership in memberships:
-            wom_role = (
-                membership.get(
-                    "role",
-                    ""
-                ).lower()
-            )
-
-            if wom_role in NOVUS_TRIAL_WOM_RANKS:
-                continue
-
-            player = membership.get(
-                "player",
-                {}
-            )
-            player_id = player.get(
-                "id"
-            )
-            rsn = player.get(
-                "username"
-            )
-
-            if (
-                player_id in linked_wom_ids
-                or (
-                    rsn
-                    and rsn.casefold()
-                        in linked_rsn_keys
-                )
-            ):
-                continue
-
-            if rsn:
-                unlinked_full_wom_accounts.append(
-                    f"- `{rsn}` "
-                    f"({wom_role or 'unknown rank'})"
-                )
-
-        unlinked_full_wom_accounts.sort(
-            key=str.casefold
+        linked_members_without_active_rsn = (
+            link_audit[
+                "linked_members_without_active_rsn"
+            ]
         )
 
         now = datetime.datetime.now().isoformat()
@@ -3395,6 +3427,22 @@ class TasksCog(commands.Cog):
             sections.append(
                 "**WOM Tenure Mismatches**\n"
                 + "\n".join(wom_mismatches)
+            )
+
+        if unlinked_full_wom_accounts:
+            sections.append(
+                "**Unlinked Full Clan Accounts**\n"
+                + "\n".join(
+                    unlinked_full_wom_accounts
+                )
+            )
+
+        if linked_members_without_active_rsn:
+            sections.append(
+                "**Linked Members With No Active RSN**\n"
+                + "\n".join(
+                    linked_members_without_active_rsn
+                )
             )
 
         if missing_join_dates:

@@ -4034,6 +4034,32 @@ class TasksCog(commands.Cog):
                     pass
             return
 
+        # Noon workflow mirrors /autolink first, then /syncall-style syncing.
+        autolink_result = None
+        config_cog = self.bot.get_cog(
+            "ConfigCog"
+        )
+
+        if (
+            config_cog is not None
+            and hasattr(
+                config_cog,
+                "run_autolink_for_guild"
+            )
+        ):
+            try:
+                autolink_result = (
+                    await config_cog.run_autolink_for_guild(
+                        guild,
+                        group_data
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "Scheduled autolink failed for guild %s",
+                    guild.id
+                )
+
         conn = sqlite3.connect(
             "wom_multi.db"
         )
@@ -4057,6 +4083,7 @@ class TasksCog(commands.Cog):
 
         automatic_promotions = []
         wom_name_updates = []
+        autolink_updates = []
         staff_updates = []
         duplicate_cleanups = []
         wom_rank_mismatches = []
@@ -4065,6 +4092,36 @@ class TasksCog(commands.Cog):
         skipped_members = []
         failed_members = []
         removed_users_count = 0
+
+        if autolink_result:
+            for member, rsn in autolink_result.get(
+                "linked_members",
+                []
+            ):
+                autolink_updates.append(
+                    f"- Linked {member.mention} -> `{rsn}`"
+                )
+
+            for (
+                member,
+                old_rsn,
+                new_rsn
+            ) in autolink_result.get(
+                "repaired_members",
+                []
+            ):
+                autolink_updates.append(
+                    f"- Repaired {member.mention}: "
+                    f"`{old_rsn or 'unknown'}` -> `{new_rsn}`"
+                )
+
+            for member, alt_rsn in autolink_result.get(
+                "alt_links_added",
+                []
+            ):
+                autolink_updates.append(
+                    f"- Added alt for {member.mention}: `{alt_rsn}`"
+                )
 
         for discord_id, stored_rsn, stored_wom_id in links:
             member = guild.get_member(
@@ -4299,7 +4356,8 @@ class TasksCog(commands.Cog):
             self.get_promotion_audit_entries(
                 c,
                 guild,
-                group_data
+                group_data,
+                upcoming_days=7
             )
         )
         due_today_promotions = (
@@ -4310,6 +4368,27 @@ class TasksCog(commands.Cog):
         overdue_promotions = (
             promotion_audit[
                 "overdue"
+            ]
+        )
+        upcoming_promotions = (
+            promotion_audit[
+                "upcoming"
+            ]
+        )
+
+        link_audit = self.get_link_audit_entries(
+            c,
+            guild,
+            group_data
+        )
+        unlinked_full_wom_accounts = (
+            link_audit[
+                "unlinked_full_wom_accounts"
+            ]
+        )
+        linked_members_without_active_rsn = (
+            link_audit[
+                "linked_members_without_active_rsn"
             ]
         )
 
@@ -4459,11 +4538,13 @@ class TasksCog(commands.Cog):
         conn.commit()
         conn.close()
 
-        should_log = any((
+        actionable_items = any((
             automatic_promotions,
             wom_name_updates,
+            autolink_updates,
             due_today_promotions,
             overdue_promotions,
+            upcoming_promotions,
             staff_updates,
             duplicate_cleanups,
             wom_rank_mismatches,
@@ -4477,7 +4558,9 @@ class TasksCog(commands.Cog):
             removed_users_count,
         ))
 
-        if log_channel and should_log:
+        # The noon staff report posts every day. If there are no exceptions
+        # or automatic changes, it explicitly reports that no action is needed.
+        if log_channel:
             embed = discord.Embed(
                 title=f"Sync Complete for {guild.name}",
                 color=discord.Color.blue(),
@@ -4492,7 +4575,7 @@ class TasksCog(commands.Cog):
             )
 
             embed.set_footer(
-                text="Novus Tenure Sync"
+                text="Novus Noon Staff Sync"
             )
 
             if wom_name_updates:
@@ -4500,6 +4583,15 @@ class TasksCog(commands.Cog):
                     name=f"WOM Primary Name Updates ({len(wom_name_updates)})",
                     value="\n".join(
                         wom_name_updates
+                    )[:1024],
+                    inline=False
+                )
+
+            if autolink_updates:
+                embed.add_field(
+                    name=f"Auto-Link Updates ({len(autolink_updates)})",
+                    value="\n".join(
+                        autolink_updates
                     )[:1024],
                     inline=False
                 )
@@ -4551,6 +4643,27 @@ class TasksCog(commands.Cog):
                         )
                         for entry
                         in overdue_promotions
+                    )[:1024],
+                    inline=False
+                )
+
+            if upcoming_promotions:
+                embed.add_field(
+                    name=(
+                        "Promotions Coming Up - 7 Days "
+                        f"({len(upcoming_promotions)})"
+                    ),
+                    value="\n".join(
+                        (
+                            f"- {entry['member'].mention} "
+                            f"({entry['rsn']} {entry['account_type']}): "
+                            f"{entry['current_rank']} -> "
+                            f"{entry['target_rank']} on "
+                            f"{entry['eligible_at'].date()} "
+                            f"({entry['days_until']}d)"
+                        )
+                        for entry
+                        in upcoming_promotions
                     )[:1024],
                     inline=False
                 )
@@ -4641,6 +4754,16 @@ class TasksCog(commands.Cog):
                 embed.add_field(
                     name=f"Failed ({len(failed_members)})",
                     value="\n".join(failed_members)[:1024],
+                    inline=False
+                )
+
+            if not actionable_items:
+                embed.add_field(
+                    name="No Action Needed",
+                    value=(
+                        "No promotions, linking issues, trial deadlines, "
+                        "role mismatches, or sync failures need staff attention today."
+                    ),
                     inline=False
                 )
 

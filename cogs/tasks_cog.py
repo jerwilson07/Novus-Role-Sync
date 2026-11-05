@@ -11,7 +11,7 @@ import os
 import shutil
 
 from common import (
-    WOM_API_KEY, has_non_clan_role, forget_member_links,
+    WOM_API_KEY, sanitize_rsn, has_non_clan_role, forget_member_links,
     forget_non_clan_links,
     has_novus_member_role, is_active_novus_member_link,
     find_primary_wom_membership,
@@ -63,6 +63,9 @@ NOVUS_TENURE_ROLES = {
 NOVUS_TRIAL_WOM_RANKS = {
     "gnome_child",
 }
+
+# Discord role held by active trial members.
+NOVUS_TRIAL_DISCORD_ROLE_NAME = "trial member"
 
 # Default staff channel for the scheduled noon Novus report.
 NOVUS_MOD_CHAT_CHANNEL_ID = 1532835276567613531
@@ -4067,6 +4070,236 @@ class TasksCog(commands.Cog):
 
         finally:
             conn.close()
+
+    async def cleanup_inactive_trial_roles(
+        self,
+        cursor,
+        guild: discord.Guild,
+        group_data: dict
+    ):
+        """Remove stale Discord Trial Member roles.
+
+        A Trial Member role is retained only when the Discord member can be
+        conservatively matched to a current WOM trial account by saved account
+        link or exact normalized Discord name. Saved links/history are never
+        deleted by this cleanup.
+        """
+
+        trial_role = next(
+            (
+                role
+                for role in guild.roles
+                if getattr(
+                    role,
+                    "name",
+                    ""
+                ).strip().casefold()
+                    == NOVUS_TRIAL_DISCORD_ROLE_NAME
+            ),
+            None
+        )
+
+        if trial_role is None:
+            return {
+                "cleaned": [],
+                "failed": [],
+                "role_missing": True,
+            }
+
+        trial_memberships = [
+            membership
+            for membership in group_data.get(
+                "memberships",
+                []
+            )
+            if isinstance(
+                membership,
+                dict
+            )
+            and (
+                membership.get(
+                    "role",
+                    ""
+                ).casefold()
+                in NOVUS_TRIAL_WOM_RANKS
+            )
+            and isinstance(
+                membership.get(
+                    "player"
+                ),
+                dict
+            )
+        ]
+
+        active_trial_ids = {
+            membership["player"].get(
+                "id"
+            )
+            for membership in trial_memberships
+            if membership["player"].get(
+                "id"
+            ) is not None
+        }
+
+        active_trial_keys = {
+            sanitize_rsn(
+                membership["player"].get(
+                    "username",
+                    ""
+                )
+            ).casefold()
+            for membership in trial_memberships
+            if membership["player"].get(
+                "username"
+            )
+        }
+
+        cursor.execute(
+            """
+            SELECT discord_id, rsn, wom_id
+            FROM links
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+        primary_rows = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT discord_id, rsn, wom_id
+            FROM alt_links
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+        alt_rows = cursor.fetchall()
+
+        saved_accounts = {}
+
+        for (
+            discord_id,
+            rsn,
+            wom_id
+        ) in (
+            primary_rows
+            + alt_rows
+        ):
+            saved_accounts.setdefault(
+                discord_id,
+                []
+            ).append(
+                (
+                    rsn,
+                    wom_id
+                )
+            )
+
+        cleaned = []
+        failed = []
+
+        for member in list(
+            trial_role.members
+        ):
+            still_active_trial = False
+
+            for (
+                saved_rsn,
+                saved_wom_id
+            ) in saved_accounts.get(
+                member.id,
+                []
+            ):
+                if (
+                    saved_wom_id is not None
+                    and saved_wom_id
+                        in active_trial_ids
+                ):
+                    still_active_trial = True
+                    break
+
+                if (
+                    saved_rsn
+                    and sanitize_rsn(
+                        saved_rsn
+                    ).casefold()
+                        in active_trial_keys
+                ):
+                    still_active_trial = True
+                    break
+
+            if not still_active_trial:
+                candidate_names = []
+
+                if member.display_name:
+                    candidate_names.extend(
+                        part.strip()
+                        for part in re.split(
+                            r"[|/]",
+                            member.display_name
+                        )
+                        if part.strip()
+                    )
+
+                global_name = getattr(
+                    member,
+                    "global_name",
+                    None
+                )
+                if global_name:
+                    candidate_names.append(
+                        global_name
+                    )
+
+                if member.name:
+                    candidate_names.append(
+                        member.name
+                    )
+
+                for candidate in candidate_names:
+                    if (
+                        sanitize_rsn(
+                            candidate
+                        ).casefold()
+                        in active_trial_keys
+                    ):
+                        still_active_trial = True
+                        break
+
+            if still_active_trial:
+                continue
+
+            try:
+                await member.remove_roles(
+                    trial_role,
+                    reason=(
+                        "No current Novus WOM trial account "
+                        "matches this Discord Trial Member"
+                    )
+                )
+                cleaned.append(
+                    f"- {member.mention}: removed `{trial_role.name}`"
+                )
+            except discord.Forbidden:
+                failed.append(
+                    f"- {member.mention}: could not remove "
+                    f"`{trial_role.name}` (permission/role hierarchy)"
+                )
+            except Exception:
+                logger.exception(
+                    "Failed stale Trial Member cleanup for %s (%s)",
+                    member,
+                    member.id
+                )
+                failed.append(
+                    f"- {member.mention}: unexpected error removing "
+                    f"`{trial_role.name}`"
+                )
+
+        return {
+            "cleaned": cleaned,
+            "failed": failed,
+            "role_missing": False,
+        }
 
     # ========================================================
     # /TRIALS

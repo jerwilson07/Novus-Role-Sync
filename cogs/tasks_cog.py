@@ -524,6 +524,77 @@ class TasksCog(commands.Cog):
                                         NOVUS_MOD_CHAT_CHANNEL_ID
                                     )
 
+                    council_notice_key = (
+                        f"inactive_member_cleanup_notice_v1:{guild.id}"
+                    )
+                    cursor.execute(
+                        """
+                        SELECT value
+                        FROM bot_stats
+                        WHERE key = ?
+                        """,
+                        (council_notice_key,)
+                    )
+                    council_notice_sent = cursor.fetchone()
+
+                    if not council_notice_sent:
+                        council_channel = discord.utils.get(
+                            guild.text_channels,
+                            name="council-chat"
+                        )
+
+                        if council_channel is not None:
+                            bot_member = guild.get_member(
+                                self.bot.user.id
+                            )
+                            permissions = council_channel.permissions_for(
+                                bot_member
+                            )
+
+                            if permissions.send_messages:
+                                try:
+                                    await council_channel.send(
+                                        "**Novus Sync Update**\n\n"
+                                        "If a linked Discord member has **no active linked RSN "
+                                        "remaining in the Novus WOM roster**, Novus Sync will now "
+                                        "automatically remove their **Member** role and any tenure "
+                                        "role they currently hold (**Squire, Duellist, Inquisitor, "
+                                        "Expert, Knight, or Paladin**).\n\n"
+                                        "Their saved RSN links and tenure history are **not deleted**, "
+                                        "so if they rejoin Novus later, their prior service can still "
+                                        "be recognized. Staff/special roles are left untouched.\n\n"
+                                        "These removals will be shown in sync reports under "
+                                        "**Inactive Members Cleaned**."
+                                    )
+                                    cursor.execute(
+                                        """
+                                        INSERT OR REPLACE INTO bot_stats
+                                        (key, value)
+                                        VALUES (?, ?)
+                                        """,
+                                        (
+                                            council_notice_key,
+                                            datetime.datetime.now().isoformat()
+                                        )
+                                    )
+                                    logger.info(
+                                        "Sent inactive-member cleanup update "
+                                        "to #council-chat for guild %s",
+                                        guild.id
+                                    )
+                                except discord.Forbidden:
+                                    logger.warning(
+                                        "Could not send inactive-member cleanup "
+                                        "update to #council-chat for guild %s",
+                                        guild.id
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to send inactive-member cleanup "
+                                        "update to #council-chat for guild %s",
+                                        guild.id
+                                    )
+
                     conn.commit()
                 finally:
                     conn.close()

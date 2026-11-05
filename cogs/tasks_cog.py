@@ -453,6 +453,69 @@ class TasksCog(commands.Cog):
                                         guild.id
                                     )
 
+                    notice_key = (
+                        f"mod_chat_test_notice_v1:{guild.id}"
+                    )
+                    cursor.execute(
+                        """
+                        SELECT value
+                        FROM bot_stats
+                        WHERE key = ?
+                        """,
+                        (notice_key,)
+                    )
+                    notice_sent = cursor.fetchone()
+
+                    if not notice_sent:
+                        target_channel = guild.get_channel(
+                            NOVUS_MOD_CHAT_CHANNEL_ID
+                        )
+
+                        if target_channel is not None:
+                            bot_member = guild.get_member(
+                                self.bot.user.id
+                            )
+                            permissions = target_channel.permissions_for(
+                                bot_member
+                            )
+
+                            if permissions.send_messages:
+                                try:
+                                    await target_channel.send(
+                                        "Testing: WOM Sync logs will be posted here "
+                                        "daily at 12 PM EST following Auto-Link and "
+                                        "SyncAll runs performed internally."
+                                    )
+                                    cursor.execute(
+                                        """
+                                        INSERT OR REPLACE INTO bot_stats
+                                        (key, value)
+                                        VALUES (?, ?)
+                                        """,
+                                        (
+                                            notice_key,
+                                            datetime.datetime.now().isoformat()
+                                        )
+                                    )
+                                    logger.info(
+                                        "Sent one-time Novus Sync test notice "
+                                        "to #mod-chat (%s) for guild %s",
+                                        NOVUS_MOD_CHAT_CHANNEL_ID,
+                                        guild.id
+                                    )
+                                except discord.Forbidden:
+                                    logger.warning(
+                                        "Could not send one-time Novus Sync "
+                                        "test notice to #mod-chat (%s)",
+                                        NOVUS_MOD_CHAT_CHANNEL_ID
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to send one-time Novus Sync "
+                                        "test notice to #mod-chat (%s)",
+                                        NOVUS_MOD_CHAT_CHANNEL_ID
+                                    )
+
                     conn.commit()
                 finally:
                     conn.close()

@@ -558,19 +558,11 @@ class TasksCog(commands.Cog):
                                 try:
                                     await council_channel.send(
                                         "**Novus Sync Update**\n\n"
-                                        "Novus Sync now automatically cleans stale Discord clan roles "
-                                        "based on the current WOM roster.\n\n"
-                                        "• Full members with **no active linked RSN** in Novus will "
-                                        "lose their **Member** role and any tenure role (**Squire, "
-                                        "Duellist, Inquisitor, Expert, Knight, or Paladin**).\n"
-                                        "• Trial members will keep **Trial Member** only while their "
-                                        "saved linked RSN is currently in WOM as **gnome_child**. "
-                                        "If that linked trial RSN leaves, is kicked, or is no longer "
-                                        "gnome_child, **Trial Member** is removed automatically.\n\n"
-                                        "Saved RSN links and tenure history are preserved, and staff/"
-                                        "special roles are left untouched. Cleanup actions will appear "
-                                        "in sync reports under **Inactive Members Cleaned** and "
-                                        "**Inactive Trials Cleaned**."
+                                        "Novus Sync will now automatically remove stale **Member**, "
+                                        "tenure, and **Trial Member** Discord roles when the linked "
+                                        "account is no longer active in the appropriate WOM clan role. "
+                                        "Saved account/tenure history is preserved for future rejoins.\n\n"
+                                        "Cleanup actions will be included in the normal sync reports."
                                     )
                                     cursor.execute(
                                         """

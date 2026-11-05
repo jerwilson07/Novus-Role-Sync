@@ -64,6 +64,9 @@ NOVUS_TRIAL_WOM_RANKS = {
     "gnome_child",
 }
 
+# Default staff channel for the scheduled noon Novus report.
+NOVUS_MOD_CHAT_CHANNEL_ID = 1532835276567613531
+
 # Promotion thresholds measured from the in-game clan join date.
 #
 # Squire is the initial Full Member rank.
@@ -243,8 +246,9 @@ def build_wom_server_nickname(
 ) -> str:
     """Build a Discord server nickname from the current WOM primary + alts.
 
-    The primary always uses WOM's exact spelling/capitalization. Current
-    in-clan linked alts may remain after the primary. Preserve the member's
+    True RSN changes update the primary, while capitalization-only WOM
+    differences are ignored. Current in-clan linked alts may remain after the
+    primary. Preserve the member's
     existing '/' versus '|' separator style when possible.
     """
     if not primary_rsn:

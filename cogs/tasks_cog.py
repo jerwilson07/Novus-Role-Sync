@@ -4897,10 +4897,12 @@ class TasksCog(commands.Cog):
             if not guild:
                 continue
 
+            # The scheduled noon staff report always goes to #mod-chat.
+            # Other/manual logging can continue using the saved log channel.
             await self.sync_guild(
                 guild,
                 group_id,
-                log_channel_id,
+                NOVUS_MOD_CHAT_CHANNEL_ID,
                 nickname_enforcement,
                 dm_notifications_on
             )

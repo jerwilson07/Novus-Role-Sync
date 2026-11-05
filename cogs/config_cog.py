@@ -1411,13 +1411,28 @@ class ConfigCog(commands.Cog):
                         existing_primary
                     )
 
+                    same_rsn_ignoring_case = bool(
+                        old_rsn
+                        and actual_primary_rsn
+                        and old_rsn.casefold()
+                            == actual_primary_rsn.casefold()
+                    )
+
+                    stored_primary_rsn = (
+                        old_rsn
+                        if same_rsn_ignoring_case
+                        else actual_primary_rsn
+                    )
+
+                    true_name_change = bool(
+                        old_rsn
+                        and actual_primary_rsn
+                        and not same_rsn_ignoring_case
+                    )
+
                     if (
                         old_wom_id != primary_wom_id
-                        or (
-                            old_rsn
-                            and old_rsn.casefold()
-                                != actual_primary_rsn.casefold()
-                        )
+                        or true_name_change
                     ):
                         c.execute(
                             """
@@ -1427,7 +1442,7 @@ class ConfigCog(commands.Cog):
                             AND discord_id = ?
                             """,
                             (
-                                actual_primary_rsn,
+                                stored_primary_rsn,
                                 primary_wom_id,
                                 guild.id,
                                 member.id
@@ -1440,14 +1455,14 @@ class ConfigCog(commands.Cog):
                                 (
                                     member,
                                     old_rsn,
-                                    actual_primary_rsn
+                                    stored_primary_rsn
                                 )
                             )
-                        else:
+                        elif true_name_change:
                             refreshed_members.append(
                                 (
                                     member,
-                                    actual_primary_rsn
+                                    stored_primary_rsn
                                 )
                             )
 
@@ -1488,6 +1503,12 @@ class ConfigCog(commands.Cog):
                     in current_alt_rows
                     if alt_wom_id is not None
                 }
+                current_alt_names_by_id = {
+                    alt_wom_id: alt_rsn
+                    for alt_rsn, alt_wom_id
+                    in current_alt_rows
+                    if alt_wom_id is not None
+                }
 
                 for alt_candidate in display_parts[1:]:
                     alt_membership = resolve_exact(
@@ -1517,21 +1538,33 @@ class ConfigCog(commands.Cog):
                         continue
 
                     if alt_wom_id in current_alt_ids:
-                        c.execute(
-                            """
-                            UPDATE alt_links
-                            SET rsn = ?
-                            WHERE guild_id = ?
-                            AND discord_id = ?
-                            AND wom_id = ?
-                            """,
-                            (
-                                actual_alt_rsn,
-                                guild.id,
-                                member.id,
-                                alt_wom_id
-                            )
+                        stored_alt_rsn = current_alt_names_by_id.get(
+                            alt_wom_id
                         )
+
+                        # Ignore capitalization-only WOM differences for alts.
+                        if not (
+                            stored_alt_rsn
+                            and actual_alt_rsn
+                            and stored_alt_rsn.casefold()
+                                == actual_alt_rsn.casefold()
+                        ):
+                            c.execute(
+                                """
+                                UPDATE alt_links
+                                SET rsn = ?
+                                WHERE guild_id = ?
+                                AND discord_id = ?
+                                AND wom_id = ?
+                                """,
+                                (
+                                    actual_alt_rsn,
+                                    guild.id,
+                                    member.id,
+                                    alt_wom_id
+                                )
+                            )
+
                         claim(
                             alt_membership,
                             member.id

@@ -312,6 +312,8 @@ SKIPPED_SYNC_STATUSES = {
 FAILED_SYNC_STATUSES = {
     "forbidden",
     "error",
+    "inactive_cleanup_forbidden",
+    "inactive_cleanup_error",
 }
 
 
@@ -328,6 +330,12 @@ def format_sync_issue(member: discord.Member, result: dict) -> str:
         "unsupported_rank": "WOM rank is not managed by Novus Sync",
         "forbidden": "Discord permission or role hierarchy prevented the update",
         "error": "Unexpected role sync error",
+        "inactive_cleanup_forbidden": (
+            "Could not remove inactive Member/tenure roles due to Discord permissions"
+        ),
+        "inactive_cleanup_error": (
+            "Unexpected error while removing inactive Member/tenure roles"
+        ),
     }
 
     reason = reasons.get(
@@ -1321,6 +1329,104 @@ class TasksCog(commands.Cog):
     # ROLE SYNC ENGINE
     # ========================================================
 
+    async def remove_inactive_member_roles(
+        self,
+        cursor,
+        guild: discord.Guild,
+        member: discord.Member
+    ):
+        """Remove membership/tenure roles when no linked RSN is active in Novus.
+
+        Saved account links and tenure history are intentionally preserved so
+        a future rejoin can restore the correct earned tenure.
+        """
+
+        cursor.execute(
+            """
+            SELECT wom_role, discord_role_id
+            FROM role_mappings
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        )
+
+        mapped_tenure_role_ids = {
+            discord_role_id
+            for wom_role, discord_role_id
+            in cursor.fetchall()
+            if wom_role
+            and wom_role.casefold()
+                in NOVUS_TENURE_ROLES
+        }
+
+        roles_to_remove = []
+
+        for role in member.roles:
+            role_name = (
+                getattr(
+                    role,
+                    "name",
+                    ""
+                )
+                .strip()
+                .casefold()
+            )
+
+            if (
+                role_name == "member"
+                or role.id in mapped_tenure_role_ids
+                or role_name in NOVUS_TENURE_ROLES
+            ):
+                if (
+                    not getattr(
+                        role,
+                        "managed",
+                        False
+                    )
+                    and not role.is_default()
+                ):
+                    roles_to_remove.append(
+                        role
+                    )
+
+        if not roles_to_remove:
+            return {
+                "status": "inactive_member_cleaned",
+                "roles_removed": [],
+            }
+
+        try:
+            await member.remove_roles(
+                *roles_to_remove,
+                reason=(
+                    "No linked RSN is currently active "
+                    "in the Novus WOM roster"
+                )
+            )
+        except discord.Forbidden:
+            return {
+                "status": "inactive_cleanup_forbidden",
+                "roles_removed": [],
+            }
+        except Exception:
+            logger.exception(
+                "Failed inactive-member role cleanup for %s (%s)",
+                member,
+                member.id
+            )
+            return {
+                "status": "inactive_cleanup_error",
+                "roles_removed": [],
+            }
+
+        return {
+            "status": "inactive_member_cleaned",
+            "roles_removed": [
+                role.name
+                for role in roles_to_remove
+            ],
+        }
+
     async def sync_one_member(
         self,
         guild: discord.Guild,
@@ -1564,9 +1670,20 @@ class TasksCog(commands.Cog):
         )
 
         if not account_tenures:
-            return {
-                "status": "not_current_member"
-            }
+            cleanup_result = await self.remove_inactive_member_roles(
+                cursor,
+                guild,
+                member
+            )
+            cleanup_result.update(
+                {
+                    "rsn": current_rsn,
+                    "wom_role": current_wom_role,
+                    "verified_alts": verified_alts,
+                    "missing_alts": missing_alts,
+                }
+            )
+            return cleanup_result
 
         # ----------------------------------------------------
         # DISCORD ROLE CONFIG

@@ -236,6 +236,65 @@ def next_tenure_rank(rank: str):
         return None
 
     return ordered[index + 1]
+def build_wom_server_nickname(
+    primary_rsn: str,
+    active_alts: list[str] | None = None,
+    current_nickname: str | None = None
+) -> str:
+    """Build a Discord server nickname from the current WOM primary + alts.
+
+    The primary always uses WOM's exact spelling/capitalization. Current
+    in-clan linked alts may remain after the primary. Preserve the member's
+    existing '/' versus '|' separator style when possible.
+    """
+    if not primary_rsn:
+        return ""
+
+    active_alts = active_alts or []
+
+    if (
+        current_nickname
+        and "/" in current_nickname
+        and "|" not in current_nickname
+    ):
+        separator = " / "
+    else:
+        separator = " | "
+
+    parts = [primary_rsn]
+    seen = {
+        primary_rsn.casefold()
+    }
+
+    for alt_rsn in active_alts:
+        if not alt_rsn:
+            continue
+
+        key = alt_rsn.casefold()
+        if key in seen:
+            continue
+
+        candidate = separator.join(
+            parts + [alt_rsn]
+        )
+
+        # Discord server nicknames are limited to 32 characters. Keep only
+        # complete RSNs; never truncate an account name to squeeze an alt in.
+        if len(candidate) > 32:
+            break
+
+        parts.append(
+            alt_rsn
+        )
+        seen.add(
+            key
+        )
+
+    return separator.join(
+        parts
+    )
+
+
 
 
 # Sync result categories used by both automatic and manual sync reports.
@@ -1064,18 +1123,40 @@ class TasksCog(commands.Cog):
                     )
                 )
 
-            # A WOM rename is authoritative for the member's Novus server
-            # nickname. Use the exact spelling/capitalization WOM reports.
-            # This changes only the nickname in this Discord server; bots
-            # cannot change a user's global Discord username.
+        # ----------------------------------------------------
+        # ALT ACCOUNTS
+        # ----------------------------------------------------
+
+        (
+            verified_alts,
+            missing_alts
+        ) = self.sync_alt_links_in_database(
+            cursor,
+            guild.id,
+            member.id,
+            wom_by_id,
+            wom_by_username
+        )
+
+        # WOM is authoritative for the primary RSN. Preserve any currently
+        # linked in-clan alts after the member's existing '|' or '/' separator.
+        if (
+            primary_rsn_changed
+            and current_rsn
+        ):
+            desired_nickname = build_wom_server_nickname(
+                current_rsn,
+                verified_alts,
+                member.nick
+            )
+
             if (
-                primary_rsn_changed
-                and current_rsn
-                and member.nick != current_rsn
+                desired_nickname
+                and member.nick != desired_nickname
             ):
                 try:
                     await member.edit(
-                        nick=current_rsn,
+                        nick=desired_nickname,
                         reason=(
                             "Primary RSN renamed in Wise Old Man"
                         )
@@ -1103,21 +1184,6 @@ class TasksCog(commands.Cog):
                         current_rsn,
                         e,
                     )
-
-        # ----------------------------------------------------
-        # ALT ACCOUNTS
-        # ----------------------------------------------------
-
-        (
-            verified_alts,
-            missing_alts
-        ) = self.sync_alt_links_in_database(
-            cursor,
-            guild.id,
-            member.id,
-            wom_by_id,
-            wom_by_username
-        )
 
         account_tenures = (
             self.get_linked_account_tenures(
@@ -3851,11 +3917,19 @@ class TasksCog(commands.Cog):
                         f"Could not DM {member.id}: {e}"
                     )
 
-            # Optional continuous nickname enforcement also uses the
-            # exact primary WOM RSN. It never appends linked alts.
+            # Optional continuous enforcement keeps the exact current WOM
+            # primary RSN plus any currently linked in-clan alts. Preserve the
+            # member's existing '/' versus '|' separator style.
             if nickname_enforcement:
-                desired_nickname = result.get(
-                    "rsn"
+                desired_nickname = build_wom_server_nickname(
+                    result.get(
+                        "rsn"
+                    ),
+                    result.get(
+                        "verified_alts",
+                        []
+                    ),
+                    member.nick
                 )
 
                 if (
@@ -3866,7 +3940,7 @@ class TasksCog(commands.Cog):
                         await member.edit(
                             nick=desired_nickname,
                             reason=(
-                                "Novus WOM primary RSN nickname enforcement"
+                                "Novus WOM linked-account nickname enforcement"
                             )
                         )
                     except discord.Forbidden:

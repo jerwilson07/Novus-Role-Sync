@@ -531,31 +531,51 @@ class TasksCog(commands.Cog):
                 "player",
                 {}
             )
-            current_alt_rsn = player.get(
+            wom_reported_alt_rsn = player.get(
                 "username",
                 alt_rsn
             )
+
+            if (
+                alt_rsn
+                and wom_reported_alt_rsn
+                and alt_rsn.casefold()
+                    == wom_reported_alt_rsn.casefold()
+            ):
+                current_alt_rsn = alt_rsn
+            else:
+                current_alt_rsn = wom_reported_alt_rsn
+
             current_alt_id = player.get(
                 "id",
                 alt_wom_id
             )
 
-            cursor.execute(
-                """
-                UPDATE alt_links
-                SET rsn = ?, wom_id = ?
-                WHERE guild_id = ?
-                AND discord_id = ?
-                AND rsn = ?
-                """,
-                (
-                    current_alt_rsn,
-                    current_alt_id,
-                    guild_id,
-                    discord_id,
-                    alt_rsn
+            if (
+                current_alt_id != alt_wom_id
+                or (
+                    current_alt_rsn
+                    and alt_rsn
+                    and current_alt_rsn.casefold()
+                        != alt_rsn.casefold()
                 )
-            )
+            ):
+                cursor.execute(
+                    """
+                    UPDATE alt_links
+                    SET rsn = ?, wom_id = ?
+                    WHERE guild_id = ?
+                    AND discord_id = ?
+                    AND rsn = ?
+                    """,
+                    (
+                        current_alt_rsn,
+                        current_alt_id,
+                        guild_id,
+                        discord_id,
+                        alt_rsn
+                    )
+                )
 
             verified.append(
                 current_alt_rsn
@@ -673,10 +693,21 @@ class TasksCog(commands.Cog):
                     player_id
                 )
 
-            current_rsn = player.get(
+            wom_reported_rsn = player.get(
                 "username",
                 stored_rsn
             )
+
+            if (
+                stored_rsn
+                and wom_reported_rsn
+                and stored_rsn.casefold()
+                    == wom_reported_rsn.casefold()
+            ):
+                current_rsn = stored_rsn
+            else:
+                current_rsn = wom_reported_rsn
+
             wom_role = (
                 membership.get(
                     "role",
@@ -1082,10 +1113,21 @@ class TasksCog(commands.Cog):
                 {}
             )
 
-            current_rsn = player.get(
+            wom_reported_rsn = player.get(
                 "username",
                 rsn
             )
+
+            if (
+                rsn
+                and wom_reported_rsn
+                and rsn.casefold()
+                    == wom_reported_rsn.casefold()
+            ):
+                # Case-only differences are not treated as name changes.
+                current_rsn = rsn
+            else:
+                current_rsn = wom_reported_rsn
 
             current_wom_id = player.get(
                 "id"
@@ -1101,7 +1143,8 @@ class TasksCog(commands.Cog):
             primary_rsn_changed = bool(
                 current_rsn
                 and rsn
-                and current_rsn != rsn
+                and current_rsn.casefold()
+                    != rsn.casefold()
             )
 
             if (

@@ -2754,12 +2754,44 @@ class TasksCog(commands.Cog):
             )
             return
 
+        if status == "inactive_member_cleaned":
+            removed_roles = result.get(
+                "roles_removed",
+                []
+            )
+            removed_text = (
+                ", ".join(
+                    f"`{role_name}`"
+                    for role_name in removed_roles
+                )
+                if removed_roles
+                else "no removable membership roles were present"
+            )
+            await interaction.followup.send(
+                f"{member.mention} has no linked RSN currently active in Novus. "
+                f"Removed: {removed_text}. Saved account links and tenure history "
+                "were preserved for a future rejoin.",
+                ephemeral=True
+            )
+            return
+
+        if status in (
+            "inactive_cleanup_forbidden",
+            "inactive_cleanup_error"
+        ):
+            await interaction.followup.send(
+                f"{member.mention} has no active linked RSN, but I could not "
+                "remove the Member/tenure roles. Check the bot's Manage Roles "
+                "permission and role hierarchy.",
+                ephemeral=True
+            )
+            return
+
         if status == "not_current_member":
             await interaction.followup.send(
                 f"{member.mention} is not an active Novus member. "
                 "The Discord Member role and at least one linked RSN in the "
-                "current Novus WOM group are required. No account links "
-                "or Discord roles were changed.",
+                "current Novus WOM group are required.",
                 ephemeral=True
             )
             return
@@ -3446,6 +3478,7 @@ class TasksCog(commands.Cog):
         changed = 0
         automatic_promotions = []
         wom_name_updates = []
+        inactive_member_cleanups = []
         wom_mismatches = []
         missing_join_dates = []
         mapping_issues = []
@@ -3480,6 +3513,26 @@ class TasksCog(commands.Cog):
                 continue
 
             checked += 1
+
+            if result["status"] == "inactive_member_cleaned":
+                changed += 1
+                removed_roles = result.get(
+                    "roles_removed",
+                    []
+                )
+                removed_text = (
+                    ", ".join(
+                        f"`{role_name}`"
+                        for role_name in removed_roles
+                    )
+                    if removed_roles
+                    else "no roles"
+                )
+                inactive_member_cleanups.append(
+                    f"- {member.mention}: removed {removed_text}; "
+                    "saved RSN/tenure history retained"
+                )
+                continue
 
             if result["status"] != "success":
                 issue_line = format_sync_issue(
@@ -3616,6 +3669,7 @@ class TasksCog(commands.Cog):
             f"Linked primary members: **{checked}**\n"
             f"Members changed: **{changed}**\n"
             f"Automatic Discord tenure promotions: **{len(automatic_promotions)}**\n"
+            f"Inactive members cleaned: **{len(inactive_member_cleanups)}**\n"
             f"WOM primary-name updates: **{len(wom_name_updates)}**\n"
             f"In-game promotions due today: **{len(due_today_promotions)}**\n"
             f"In-game promotions overdue: **{len(overdue_promotions)}**\n"
@@ -3624,6 +3678,14 @@ class TasksCog(commands.Cog):
         )
 
         sections = []
+
+        if inactive_member_cleanups:
+            sections.append(
+                "**Inactive Members Cleaned**\n"
+                + "\n".join(
+                    inactive_member_cleanups
+                )
+            )
 
         if wom_name_updates:
             sections.append(
@@ -4264,6 +4326,7 @@ class TasksCog(commands.Cog):
         automatic_promotions = []
         wom_name_updates = []
         autolink_updates = []
+        inactive_member_cleanups = []
         staff_updates = []
         duplicate_cleanups = []
         wom_rank_mismatches = []
@@ -4359,6 +4422,26 @@ class TasksCog(commands.Cog):
                 continue
 
             active_links_checked += 1
+
+            if result["status"] == "inactive_member_cleaned":
+                removed_roles = result.get(
+                    "roles_removed",
+                    []
+                )
+                removed_text = (
+                    ", ".join(
+                        f"`{role_name}`"
+                        for role_name in removed_roles
+                    )
+                    if removed_roles
+                    else "no roles"
+                )
+                inactive_member_cleanups.append(
+                    f"- {member.mention}: removed {removed_text}; "
+                    "saved RSN/tenure history retained"
+                )
+                continue
+
             eligible_links.append(
                 (
                     discord_id,
@@ -4692,6 +4775,7 @@ class TasksCog(commands.Cog):
 
         actual_role_changes = (
             automatic_promotions
+            or inactive_member_cleanups
             or staff_updates
             or duplicate_cleanups
         )
@@ -4716,6 +4800,7 @@ class TasksCog(commands.Cog):
             automatic_promotions,
             wom_name_updates,
             autolink_updates,
+            inactive_member_cleanups,
             due_today_promotions,
             overdue_promotions,
             staff_updates,
@@ -4765,6 +4850,18 @@ class TasksCog(commands.Cog):
                     name=f"Auto-Link Updates ({len(autolink_updates)})",
                     value="\n".join(
                         autolink_updates
+                    )[:1024],
+                    inline=False
+                )
+
+            if inactive_member_cleanups:
+                embed.add_field(
+                    name=(
+                        "Inactive Members Cleaned "
+                        f"({len(inactive_member_cleanups)})"
+                    ),
+                    value="\n".join(
+                        inactive_member_cleanups
                     )[:1024],
                     inline=False
                 )
@@ -4934,7 +5031,7 @@ class TasksCog(commands.Cog):
         )
 
         return (
-            len(automatic_promotions) + len(staff_updates) + len(duplicate_cleanups),
+            len(automatic_promotions) + len(inactive_member_cleanups) + len(staff_updates) + len(duplicate_cleanups),
             len(skipped_members) + len(failed_members),
             active_links_checked
         )

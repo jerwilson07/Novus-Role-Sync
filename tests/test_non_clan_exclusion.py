@@ -1,4 +1,4 @@
-"""Regression tests for Guest/Clan Friend exclusion and account-link cleanup."""
+"""Regression tests for Guest/Clan Friend exclusion and persistent account links."""
 
 import sqlite3
 import unittest
@@ -93,7 +93,7 @@ class NonClanExclusionTests(unittest.TestCase):
         self.assertEqual(self.count("links", 1, 30), 1)
         self.assertEqual(self.count("links", 2, 10), 1)
 
-    def test_alt_cleanup_only_removes_accounts_missing_from_clan(self):
+    def test_alt_links_are_retained_when_accounts_leave_clan(self):
         self.cur.execute(
             "UPDATE alt_links SET wom_id = ? WHERE guild_id = ? AND discord_id = ?",
             (12345, 1, 30),
@@ -102,19 +102,20 @@ class NonClanExclusionTests(unittest.TestCase):
             {"player": {"id": 12345, "username": "RenamedMemberAlt"}},
             {"player": {"id": 98765, "username": "OtherCurrentAccount"}},
         ]
-        self.assertEqual(forget_unmatched_alt_links(self.cur, 1, roster), 2)
+        self.assertEqual(forget_unmatched_alt_links(self.cur, 1, roster), 0)
         self.assertEqual(self.count("links", 1, 10), 1)
         self.assertEqual(self.count("links", 1, 20), 1)
         self.assertEqual(self.count("links", 1, 30), 1)
+        self.assertEqual(self.count("alt_links", 1, 10), 1)
+        self.assertEqual(self.count("alt_links", 1, 20), 1)
         self.assertEqual(self.count("alt_links", 1, 30), 1)
-        self.assertEqual(self.count("alt_links", 1, 10), 0)
-        self.assertEqual(self.count("alt_links", 1, 20), 0)
         self.assertEqual(self.count("links", 2, 10), 1)
-        self.assertEqual(forget_unmatched_alt_links(self.cur, 1, roster), 0)
 
-    def test_alt_cleanup_matches_case_insensitive_rsn(self):
+    def test_alt_link_retention_is_case_insensitive_and_non_destructive(self):
         roster = [{"player": {"id": 321, "username": "memberALT"}}]
-        self.assertEqual(forget_unmatched_alt_links(self.cur, 1, roster), 2)
+        self.assertEqual(forget_unmatched_alt_links(self.cur, 1, roster), 0)
+        self.assertEqual(self.count("alt_links", 1, 10), 1)
+        self.assertEqual(self.count("alt_links", 1, 20), 1)
         self.assertEqual(self.count("alt_links", 1, 30), 1)
 
     def test_alt_cleanup_does_not_purge_on_empty_or_invalid_roster(self):

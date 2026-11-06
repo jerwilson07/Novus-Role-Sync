@@ -3803,11 +3803,9 @@ class TasksCog(commands.Cog):
                 "**In-Game Promotions Due Today**\n"
                 + "\n".join(
                     (
-                        f"- {entry['member'].mention} "
-                        f"({entry['rsn']} {entry['account_type']}): "
-                        f"{entry['current_rank']} -> "
-                        f"{entry['target_rank']} - "
-                        f"{entry['eligible_at'].date()}"
+                        f"- {entry['member'].mention}: "
+                        f"{entry['current_rank']} → "
+                        f"{entry['target_rank']}"
                     )
                     for entry
                     in due_today_promotions
@@ -3819,11 +3817,10 @@ class TasksCog(commands.Cog):
                 "**Overdue In-Game Promotions**\n"
                 + "\n".join(
                     (
-                        f"- {entry['member'].mention} "
-                        f"({entry['rsn']} {entry['account_type']}): "
-                        f"{entry['current_rank']} -> "
-                        f"{entry['target_rank']} - "
-                        f"{entry['overdue_days']}d overdue"
+                        f"- {entry['member'].mention}: "
+                        f"{entry['current_rank']} → "
+                        f"{entry['target_rank']} "
+                        f"({entry['overdue_days']}d overdue)"
                     )
                     for entry
                     in overdue_promotions

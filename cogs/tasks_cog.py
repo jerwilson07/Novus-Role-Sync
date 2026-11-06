@@ -3356,11 +3356,9 @@ class TasksCog(commands.Cog):
                     "**Due Today**\n"
                     + "\n".join(
                         (
-                            f"- {entry['member'].mention} "
-                            f"({entry['rsn']} {entry['account_type']}): "
-                            f"{entry['current_rank']} -> "
-                            f"{entry['target_rank']} - "
-                            f"{entry['eligible_at'].date()}"
+                            f"- {entry['member'].mention}: "
+                            f"{entry['current_rank']} → "
+                            f"{entry['target_rank']}"
                         )
                         for entry
                         in due_today
@@ -3372,11 +3370,10 @@ class TasksCog(commands.Cog):
                     "**Overdue Promotions**\n"
                     + "\n".join(
                         (
-                            f"- {entry['member'].mention} "
-                            f"({entry['rsn']} {entry['account_type']}): "
-                            f"{entry['current_rank']} -> "
-                            f"{entry['target_rank']} - "
-                            f"{entry['overdue_days']}d overdue"
+                            f"- {entry['member'].mention}: "
+                            f"{entry['current_rank']} → "
+                            f"{entry['target_rank']} "
+                            f"({entry['overdue_days']}d overdue)"
                         )
                         for entry
                         in overdue
@@ -3694,10 +3691,9 @@ class TasksCog(commands.Cog):
                     []
                 ):
                     wom_mismatches.append(
-                        f"- {member.mention} "
-                        f"(`{account['rsn']}` {account['account_type']}): WOM "
-                        f"`{account['wom_role']}`, expected "
-                        f"`{account['expected_rank']}` (behind)"
+                        f"- {member.mention}: "
+                        f"`{account['wom_role']}` → "
+                        f"`{account['expected_rank']}`"
                     )
 
         promotion_audit = (
@@ -4007,11 +4003,9 @@ class TasksCog(commands.Cog):
                     "**Due Today**\n"
                     + "\n".join(
                         (
-                            f"- {entry['member'].mention} "
-                            f"({entry['rsn']} {entry['account_type']}): "
-                            f"{entry['current_rank']} -> "
-                            f"{entry['target_rank']} "
-                            f"today ({entry['eligible_at'].date()})"
+                            f"- {entry['member'].mention}: "
+                            f"{entry['current_rank']} → "
+                            f"{entry['target_rank']} today"
                         )
                         for entry
                         in due_today
@@ -4023,12 +4017,10 @@ class TasksCog(commands.Cog):
                     "**Overdue**\n"
                     + "\n".join(
                         (
-                            f"- {entry['member'].mention} "
-                            f"({entry['rsn']} {entry['account_type']}): "
-                            f"{entry['current_rank']} -> "
-                            f"{entry['target_rank']} | "
-                            f"due {entry['eligible_at'].date()} | "
-                            f"{entry['overdue_days']}d overdue"
+                            f"- {entry['member'].mention}: "
+                            f"{entry['current_rank']} → "
+                            f"{entry['target_rank']} "
+                            f"({entry['overdue_days']}d overdue)"
                         )
                         for entry
                         in overdue
@@ -4040,9 +4032,8 @@ class TasksCog(commands.Cog):
                     "**Coming Up (Next 14 Days)**\n"
                     + "\n".join(
                         (
-                            f"- {entry['member'].mention} "
-                            f"({entry['rsn']} {entry['account_type']}): "
-                            f"{entry['current_rank']} -> "
+                            f"- {entry['member'].mention}: "
+                            f"{entry['current_rank']} → "
                             f"{entry['target_rank']} on "
                             f"{entry['eligible_at'].date()} "
                             f"({entry['days_until']}d)"
@@ -4892,10 +4883,9 @@ class TasksCog(commands.Cog):
                     []
                 ):
                     wom_rank_mismatches.append(
-                        f"- {member.mention} "
-                        f"(`{account['rsn']}` {account['account_type']}): WOM "
-                        f"`{account['wom_role']}`, expected "
-                        f"`{account['expected_rank']}` (behind)"
+                        f"- {member.mention}: "
+                        f"`{account['wom_role']}` → "
+                        f"`{account['expected_rank']}`"
                     )
 
             if (
@@ -5273,9 +5263,8 @@ class TasksCog(commands.Cog):
                     ),
                     value="\n".join(
                         (
-                            f"- {entry['member'].mention} "
-                            f"({entry['rsn']} {entry['account_type']}): "
-                            f"{entry['current_rank']} -> "
+                            f"- {entry['member'].mention}: "
+                            f"{entry['current_rank']} → "
                             f"{entry['target_rank']}"
                         )
                         for entry
@@ -5292,9 +5281,8 @@ class TasksCog(commands.Cog):
                     ),
                     value="\n".join(
                         (
-                            f"- {entry['member'].mention} "
-                            f"({entry['rsn']} {entry['account_type']}): "
-                            f"{entry['current_rank']} -> "
+                            f"- {entry['member'].mention}: "
+                            f"{entry['current_rank']} → "
                             f"{entry['target_rank']} "
                             f"({entry['overdue_days']}d overdue)"
                         )

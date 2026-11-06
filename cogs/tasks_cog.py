@@ -3672,10 +3672,9 @@ class TasksCog(commands.Cog):
 
             if result.get("tenure_status") == "promoted":
                 automatic_promotions.append(
-                    f"- {member.mention} "
-                    f"(basis `{result.get('tenure_basis_rsn') or result['rsn']}`): "
+                    f"- {member.mention}: "
                     f"`{result.get('current_discord_tenure_rank') or 'none'}` "
-                    f"-> `{result['expected_tenure_rank']}`"
+                    f"→ `{result['expected_tenure_rank']}`"
                 )
 
             elif result.get("tenure_status") == "missing_join_date":
@@ -4865,10 +4864,9 @@ class TasksCog(commands.Cog):
 
             if tenure_status == "promoted":
                 automatic_promotions.append(
-                    f"- {member.mention} "
-                    f"(basis `{result.get('tenure_basis_rsn') or result['rsn']}`): "
+                    f"- {member.mention}: "
                     f"`{result.get('current_discord_tenure_rank') or 'none'}` "
-                    f"-> `{result['expected_tenure_rank']}`"
+                    f"→ `{result['expected_tenure_rank']}`"
                 )
 
             elif tenure_status == "duplicate_cleanup":

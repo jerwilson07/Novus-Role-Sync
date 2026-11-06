@@ -2,7 +2,6 @@
 
 The WOM Role Sync Discord Bot is a Python-based application that automatically synchronizes roles between a [Wise Old Man (WOM)](https://wiseoldman.net/) group and a Discord server. This allows Old School RuneScape clans to manage their Discord roles based on their members' in-game ranks in the WOM clan.
 
-Bot Website: https://womrolesync.app/
 
 ## Features
 
@@ -11,7 +10,6 @@ Bot Website: https://womrolesync.app/
 *   **Nickname Enforcement:** Option to enforce member nicknames to match their RuneScape Name (RSN).
 *   **DM Notifications:** Users can opt-in to receive direct messages when their roles are changed.
 *   **Inactivity Reminders:** Admins can be prompted to re-sync their WOM group if it becomes inactive.
-*   **Web-based Landing Page:** A simple Flask-based website serves as a landing page for the bot, displaying statistics and setup instructions.
 
 ## Getting Started
 
@@ -58,7 +56,6 @@ python3 main.py
     ```bash
     sudo docker-compose up --build -d
     ```
-    The website will be available at `https://localhost`. You may need to bypass a browser warning due to the self-signed SSL certificate.
 
 3.  **Stopping the services:**
     ```bash

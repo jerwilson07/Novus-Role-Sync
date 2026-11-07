@@ -593,6 +593,84 @@ class TasksCog(commands.Cog):
                                         guild.id
                                     )
 
+                    moderator_recruitment_key = (
+                        f"moderator_recruitment_notice_v1:{guild.id}"
+                    )
+                    cursor.execute(
+                        """
+                        SELECT value
+                        FROM bot_stats
+                        WHERE key = ?
+                        """,
+                        (moderator_recruitment_key,)
+                    )
+                    moderator_recruitment_sent = cursor.fetchone()
+
+                    if not moderator_recruitment_sent:
+                        general_channel = discord.utils.get(
+                            guild.text_channels,
+                            name="general-chat"
+                        )
+
+                        if general_channel is not None:
+                            bot_member = guild.get_member(
+                                self.bot.user.id
+                            )
+                            permissions = general_channel.permissions_for(
+                                bot_member
+                            )
+
+                            if permissions.send_messages:
+                                try:
+                                    embed = discord.Embed(
+                                        title="⚔️ NOVUS STAFF APPLICATIONS OPEN",
+                                        description=(
+                                            "Want to take a bigger role in Novus?\n\n"
+                                            "We’re accepting **Moderator applications** from active, "
+                                            "dependable members who want to **foster engagement, "
+                                            "strengthen the community, and help Novus continue to grow.**\n\n"
+                                            "If you’re someone who shows up, gets involved, and wants "
+                                            "to help shape the community, we’d like to hear from you.\n\n"
+                                            "**Think you’d be a good fit? Apply now in "
+                                            "<#1533481323883401216>.**"
+                                        ),
+                                        color=0xE79A2D
+                                    )
+                                    embed.set_footer(
+                                        text="NOVUS • Old School RuneScape"
+                                    )
+                                    await general_channel.send(
+                                        embed=embed
+                                    )
+                                    cursor.execute(
+                                        """
+                                        INSERT OR REPLACE INTO bot_stats
+                                        (key, value)
+                                        VALUES (?, ?)
+                                        """,
+                                        (
+                                            moderator_recruitment_key,
+                                            datetime.datetime.now().isoformat()
+                                        )
+                                    )
+                                    logger.info(
+                                        "Sent moderator recruitment notice "
+                                        "to #general-chat for guild %s",
+                                        guild.id
+                                    )
+                                except discord.Forbidden:
+                                    logger.warning(
+                                        "Could not send moderator recruitment "
+                                        "notice to #general-chat for guild %s",
+                                        guild.id
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to send moderator recruitment "
+                                        "notice to #general-chat for guild %s",
+                                        guild.id
+                                    )
+
                     conn.commit()
                 finally:
                     conn.close()

@@ -671,6 +671,99 @@ class TasksCog(commands.Cog):
                                         guild.id
                                     )
 
+                    pb_board_notice_key = (
+                        f"pb_board_launch_notice_v1:{guild.id}"
+                    )
+                    cursor.execute(
+                        """
+                        SELECT value
+                        FROM bot_stats
+                        WHERE key = ?
+                        """,
+                        (pb_board_notice_key,)
+                    )
+                    pb_board_notice_sent = cursor.fetchone()
+
+                    if not pb_board_notice_sent:
+                        general_channel = discord.utils.get(
+                            guild.text_channels,
+                            name="general-chat"
+                        )
+                        pb_channel = discord.utils.get(
+                            guild.text_channels,
+                            name="pb-leaderboard"
+                        )
+
+                        if general_channel is not None:
+                            bot_member = guild.get_member(
+                                self.bot.user.id
+                            )
+                            permissions = general_channel.permissions_for(
+                                bot_member
+                            )
+
+                            if (
+                                permissions.send_messages
+                                and permissions.embed_links
+                            ):
+                                try:
+                                    board_ref = (
+                                        pb_channel.mention
+                                        if pb_channel is not None
+                                        else "#pb-leaderboard"
+                                    )
+                                    embed = discord.Embed(
+                                        title="✦ NOVUS PB BOARD IS LIVE",
+                                        description=(
+                                            f"Our new **Personal Best leaderboard** is now live in "
+                                            f"{board_ref}.\n\n"
+                                            "**Submitting a PB**\n"
+                                            "Use **\`/pbsubmit\`** and select the raid or boss, "
+                                            "enter your completion time, choose the party members, "
+                                            "and include proof if you have it.\n\n"
+                                            "If proof is needed afterward, staff can request it and "
+                                            "you can add it with **\`/pbproof\`**.\n\n"
+                                            "Once approved by staff, your record is automatically "
+                                            "added to the leaderboard.\n\n"
+                                            f"Check out {board_ref} and start submitting your PBs."
+                                        ),
+                                        color=0xEAC17B
+                                    )
+                                    embed.set_footer(
+                                        text="NOVUS • Personal Bests"
+                                    )
+                                    await general_channel.send(
+                                        embed=embed
+                                    )
+                                    cursor.execute(
+                                        """
+                                        INSERT OR REPLACE INTO bot_stats
+                                        (key, value)
+                                        VALUES (?, ?)
+                                        """,
+                                        (
+                                            pb_board_notice_key,
+                                            datetime.datetime.now().isoformat()
+                                        )
+                                    )
+                                    logger.info(
+                                        "Sent PB board launch notice "
+                                        "to #general-chat for guild %s",
+                                        guild.id
+                                    )
+                                except discord.Forbidden:
+                                    logger.warning(
+                                        "Could not send PB board launch "
+                                        "notice to #general-chat for guild %s",
+                                        guild.id
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to send PB board launch "
+                                        "notice to #general-chat for guild %s",
+                                        guild.id
+                                    )
+
                     conn.commit()
                 finally:
                     conn.close()

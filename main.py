@@ -415,20 +415,12 @@ class WOMBot(
             already_sent = cursor.fetchone() is not None
 
             if not already_sent:
-                target_channel = None
-                for guild in self.guilds:
-                    target_channel = discord.utils.find(
-                        lambda channel: (
-                            isinstance(channel, discord.TextChannel)
-                            and (
-                                channel.name == "general-chat"
-                                or channel.name.endswith("general-chat")
-                            )
-                        ),
-                        guild.text_channels
-                    )
-                    if target_channel:
-                        break
+                target_channel = self.get_channel(1532817292205883514)
+                if target_channel is None:
+                    try:
+                        target_channel = await self.fetch_channel(1532817292205883514)
+                    except discord.HTTPException:
+                        target_channel = None
 
                 if target_channel:
                     await target_channel.send("Test message from Novus.")

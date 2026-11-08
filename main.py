@@ -442,6 +442,39 @@ class WOMBot(
                         "Use **Submit PB** in this channel to send your record for review."
                     ),
                 ),
+                (
+                    "manual_general_mod_recruiting_20261108_1",
+                    1532817292205883514,
+                    None,
+                    (
+                        "## ✦ Novus Moderator Applications\n"
+                        "We're looking for members who want to help **foster engagement, "
+                        "welcome and recruit new members, and keep Novus active and involved**.\n\n"
+                        "If you'd like to take a more active role in the community, apply for "
+                        "**Moderator** by opening a ticket in <#1533481323883401216>.\n\n"
+                        "We're looking for people who are active, level-headed, approachable, "
+                        "and willing to consistently contribute to the clan."
+                    ),
+                ),
+                (
+                    "manual_general_pb_submissions_20261108_1",
+                    1532817292205883514,
+                    None,
+                    (
+                        "## ✦ Novus PB Submissions\n"
+                        "The Novus PB leaderboard is open for submissions in <#1568280192936443934>.\n\n"
+                        "**PB rules:**\n"
+                        "• Only PBs achieved **November 7, 2026 or later** are eligible.\n"
+                        "• The PB must have been achieved while you were a **Novus member**.\n"
+                        "• For group PBs, **every participant** must have been a Novus member "
+                        "on the date of the run.\n"
+                        "• Include the **PB date, completion time, activity, mode/team size, "
+                        "and all participants**.\n"
+                        "• Provide **dated proof** such as a screenshot, clip, or evidence URL. "
+                        "Staff will verify eligibility and proof before approval.\n\n"
+                        "Head to <#1568280192936443934> and use **Submit PB** to send your record for review."
+                    ),
+                ),
             ]
 
             for key, channel_id, channel_name, message in announcements:

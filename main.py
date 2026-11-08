@@ -402,6 +402,57 @@ class WOMBot(
             "Bot is online and ready!"
         )
 
+        # One-time requested test post to Novus #general-chat.
+        # The persistent bot_stats flag prevents reposting on later restarts.
+        announcement_key = "manual_general_chat_test_20261108_1"
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT value FROM bot_stats WHERE key = ?",
+                (announcement_key,)
+            )
+            already_sent = cursor.fetchone() is not None
+
+            if not already_sent:
+                target_channel = None
+                for guild in self.guilds:
+                    target_channel = discord.utils.find(
+                        lambda channel: (
+                            isinstance(channel, discord.TextChannel)
+                            and (
+                                channel.name == "general-chat"
+                                or channel.name.endswith("general-chat")
+                            )
+                        ),
+                        guild.text_channels
+                    )
+                    if target_channel:
+                        break
+
+                if target_channel:
+                    await target_channel.send("Test message from Novus.")
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO bot_stats (key, value) VALUES (?, ?)",
+                        (announcement_key, datetime.datetime.now(datetime.timezone.utc).isoformat())
+                    )
+                    conn.commit()
+                    logger.info(
+                        "Sent one-time test message to #%s (%s).",
+                        target_channel.name,
+                        target_channel.id
+                    )
+                else:
+                    logger.warning(
+                        "One-time general-chat test was not sent: channel not found."
+                    )
+
+            conn.close()
+        except Exception:
+            logger.exception(
+                "Failed one-time general-chat test post."
+            )
+
         # Keep slash commands global only. Guild-specific copies would appear
         # alongside the same global commands and create duplicate entries in
         # Discord's command picker.

@@ -425,8 +425,8 @@ class WOMBot(
                 ),
                 (
                     "manual_pb_submissions_20261108_1",
+                    1568280192936443934,
                     None,
-                    "pb-leaderboard",
                     (
                         "## ✦ Novus PB Submissions\n"
                         "The Novus PB leaderboard is open for submissions.\n\n"

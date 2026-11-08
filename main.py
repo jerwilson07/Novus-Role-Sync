@@ -402,47 +402,102 @@ class WOMBot(
             "Bot is online and ready!"
         )
 
-        # One-time requested test post to Novus #general-chat.
-        # The persistent bot_stats flag prevents reposting on later restarts.
-        announcement_key = "manual_general_chat_test_20261108_1"
+        # One-time Novus announcements requested on 2026-11-08.
+        # Persistent bot_stats flags prevent reposting on later restarts.
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT value FROM bot_stats WHERE key = ?",
-                (announcement_key,)
-            )
-            already_sent = cursor.fetchone() is not None
 
-            if not already_sent:
-                target_channel = self.get_channel(1532817292205883514)
-                if target_channel is None:
-                    try:
-                        target_channel = await self.fetch_channel(1532817292205883514)
-                    except discord.HTTPException:
-                        target_channel = None
+            announcements = [
+                (
+                    "manual_mod_recruiting_20261108_1",
+                    1533481323883401216,
+                    None,
+                    (
+                        "## ✦ Novus Moderator Applications\n"
+                        "We're looking for members who want to help **foster engagement, "
+                        "welcome and recruit new members, and keep Novus active and involved**.\n\n"
+                        "If you'd like to take a more active role in the community, apply for "
+                        "**Moderator** by opening a ticket in <#1533481323883401216>.\n\n"
+                        "We're looking for people who are active, level-headed, approachable, "
+                        "and willing to consistently contribute to the clan."
+                    ),
+                ),
+                (
+                    "manual_pb_submissions_20261108_1",
+                    None,
+                    "pb-leaderboard",
+                    (
+                        "## ✦ Novus PB Submissions\n"
+                        "The Novus PB leaderboard is open for submissions.\n\n"
+                        "**PB rules:**\n"
+                        "• Only PBs achieved **November 7, 2026 or later** are eligible.\n"
+                        "• The PB must have been achieved while you were a **Novus member**.\n"
+                        "• For group PBs, **every participant** must have been a Novus member "
+                        "on the date of the run.\n"
+                        "• Include the **PB date, completion time, activity, mode/team size, "
+                        "and all participants**.\n"
+                        "• Provide **dated proof** such as a screenshot, clip, or evidence URL. "
+                        "Staff will verify eligibility and proof before approval.\n\n"
+                        "Use **Submit PB** in this channel to send your record for review."
+                    ),
+                ),
+            ]
 
-                if target_channel:
-                    await target_channel.send("Test message from Novus.")
-                    cursor.execute(
-                        "INSERT OR REPLACE INTO bot_stats (key, value) VALUES (?, ?)",
-                        (announcement_key, datetime.datetime.now(datetime.timezone.utc).isoformat())
-                    )
-                    conn.commit()
-                    logger.info(
-                        "Sent one-time test message to #%s (%s).",
-                        target_channel.name,
-                        target_channel.id
-                    )
+            for key, channel_id, channel_name, message in announcements:
+                cursor.execute(
+                    "SELECT value FROM bot_stats WHERE key = ?",
+                    (key,)
+                )
+                if cursor.fetchone() is not None:
+                    continue
+
+                target_channel = None
+                if channel_id is not None:
+                    target_channel = self.get_channel(channel_id)
+                    if target_channel is None:
+                        try:
+                            target_channel = await self.fetch_channel(channel_id)
+                        except discord.HTTPException:
+                            target_channel = None
                 else:
+                    for guild in self.guilds:
+                        target_channel = discord.utils.get(
+                            guild.text_channels,
+                            name=channel_name
+                        )
+                        if target_channel:
+                            break
+
+                if target_channel is None:
                     logger.warning(
-                        "One-time general-chat test was not sent: channel not found."
+                        "One-time announcement %s was not sent: target channel not found.",
+                        key
                     )
+                    continue
+
+                await target_channel.send(message)
+                cursor.execute(
+                    "INSERT OR REPLACE INTO bot_stats (key, value) VALUES (?, ?)",
+                    (
+                        key,
+                        datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat()
+                    )
+                )
+                conn.commit()
+                logger.info(
+                    "Sent one-time announcement %s to #%s (%s).",
+                    key,
+                    target_channel.name,
+                    target_channel.id
+                )
 
             conn.close()
         except Exception:
             logger.exception(
-                "Failed one-time general-chat test post."
+                "Failed one-time Novus announcement post."
             )
 
         # Keep slash commands global only. Guild-specific copies would appear

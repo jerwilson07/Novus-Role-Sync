@@ -4365,6 +4365,7 @@ class TasksCog(commands.Cog):
         ):
             still_active_trial = False
             verified_nontrial = False
+            unverified_saved_account = False
 
             for (
                 saved_rsn,
@@ -4388,7 +4389,9 @@ class TasksCog(commands.Cog):
                         saved_rsn.casefold()
                     )
 
-                if membership is not None:
+                if membership is None:
+                    unverified_saved_account = True
+                else:
                     if membership.get("role", "").casefold() in NOVUS_TRIAL_WOM_RANKS:
                         still_active_trial = True
                         break
@@ -4400,7 +4403,7 @@ class TasksCog(commands.Cog):
             # Missing/renamed/unlinked WOM accounts cannot justify removal.
             # Only positively verified non-trial WOM memberships may have
             # a stale Trial Member role removed.
-            if not verified_nontrial:
+            if not verified_nontrial or unverified_saved_account:
                 failed.append(
                     f"- {member.mention}: Trial Member retained; "
                     "WOM trial status unverified (check linked RSN/ID)"

@@ -307,6 +307,7 @@ def build_wom_server_nickname(
 # Sync result categories used by both automatic and manual sync reports.
 SKIPPED_SYNC_STATUSES = {
     "not_linked",
+    "membership_unverified",
     "staff_role_missing",
     "tenure_not_mapped",
     "unsupported_rank",
@@ -328,6 +329,7 @@ def format_sync_issue(member: discord.Member, result: dict) -> str:
 
     reasons = {
         "not_linked": "Discord member is not linked",
+        "membership_unverified": "WOM membership not verified; Discord roles retained (check saved RSN/ID and recent renames)",
         "staff_role_missing": "Matching Discord staff role was not found",
         "tenure_not_mapped": "WOM tenure rank is not mapped",
         "unsupported_rank": "WOM rank is not managed by Novus Sync",
@@ -1910,20 +1912,17 @@ class TasksCog(commands.Cog):
         )
 
         if not account_tenures:
-            cleanup_result = await self.remove_inactive_member_roles(
-                cursor,
-                guild,
-                member
-            )
-            cleanup_result.update(
-                {
-                    "rsn": current_rsn,
-                    "wom_role": current_wom_role,
-                    "verified_alts": verified_alts,
-                    "missing_alts": missing_alts,
-                }
-            )
-            return cleanup_result
+            # A WOM roster miss is NOT proof of clan departure. A renamed
+            # account, stale WOM snapshot or outdated saved ID/RSN can all
+            # look absent. Never revoke Discord membership or earned tenure
+            # from an unverified negative lookup.
+            return {
+                "status": "membership_unverified",
+                "rsn": current_rsn,
+                "wom_role": current_wom_role,
+                "verified_alts": verified_alts,
+                "missing_alts": missing_alts,
+            }
 
         # ----------------------------------------------------
         # DISCORD ROLE CONFIG
@@ -4365,6 +4364,7 @@ class TasksCog(commands.Cog):
             trial_role.members
         ):
             still_active_trial = False
+            verified_nontrial = False
 
             for (
                 saved_rsn,
@@ -4388,18 +4388,23 @@ class TasksCog(commands.Cog):
                         saved_rsn.casefold()
                     )
 
-                if (
-                    membership is not None
-                    and membership.get(
-                        "role",
-                        ""
-                    ).casefold()
-                        in NOVUS_TRIAL_WOM_RANKS
-                ):
-                    still_active_trial = True
-                    break
+                if membership is not None:
+                    if membership.get("role", "").casefold() in NOVUS_TRIAL_WOM_RANKS:
+                        still_active_trial = True
+                        break
+                    verified_nontrial = True
 
             if still_active_trial:
+                continue
+
+            # Missing/renamed/unlinked WOM accounts cannot justify removal.
+            # Only positively verified non-trial WOM memberships may have
+            # a stale Trial Member role removed.
+            if not verified_nontrial:
+                failed.append(
+                    f"- {member.mention}: Trial Member retained; "
+                    "WOM trial status unverified (check linked RSN/ID)"
+                )
                 continue
 
             try:

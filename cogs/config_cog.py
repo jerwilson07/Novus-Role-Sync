@@ -1193,8 +1193,14 @@ class ConfigCog(commands.Cog):
             for member in guild.members:
                 if (
                     member.bot
-                    or not has_novus_member_role(
-                        member
+                    or has_non_clan_role(member)
+                    or not (
+                        has_novus_member_role(member)
+                        or any(
+                            getattr(role, "name", "").strip().casefold()
+                            == "trial member"
+                            for role in member.roles
+                        )
                     )
                 ):
                     continue

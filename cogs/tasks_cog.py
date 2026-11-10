@@ -1981,6 +1981,11 @@ class TasksCog(commands.Cog):
         # STAFF ROLE SYNC - PRIMARY ACCOUNT ONLY
         # ----------------------------------------------------
 
+        # Discord staff roles are intentionally ADD-ONLY here.
+        # WOM may be used to grant the matching staff role, but Novus Sync
+        # must never demote/remove Trial Mod, Moderator, or Council. Staff
+        # removals are a manual Discord moderation decision so a WOM rank
+        # change, lag, or mismatch cannot accidentally strip staff access.
         staff_target_role = None
 
         if (
@@ -2013,28 +2018,9 @@ class TasksCog(commands.Cog):
                     staff_target_role
                 )
 
-            for role in staff_roles:
-                if (
-                    role != staff_target_role
-                    and role in member_roles
-                ):
-                    staff_roles_to_remove.append(
-                        role
-                    )
-
-        elif (
-            membership is not None
-            and current_wom_role
-                in NOVUS_TENURE_ROLES
-        ):
-            for role in staff_roles:
-                if role in member_roles:
-                    staff_roles_to_remove.append(
-                        role
-                    )
-
-        # All other specialty/status roles are left alone. They may coexist
-        # with the underlying tenure role.
+        # Never populate staff_roles_to_remove. Trial Mod, Moderator, and
+        # Council are protected from automatic removal by Novus Sync.
+        # All specialty/status roles may coexist with the tenure role.
 
         # ----------------------------------------------------
         # TENURE SYNC - HIGHEST LINKED ACCOUNT, NEVER DOWNGRADE

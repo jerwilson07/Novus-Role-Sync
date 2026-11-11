@@ -894,6 +894,7 @@ class ConfigCog(commands.Cog):
         unmatched_members,
         unmatched_wom_accounts,
         result,
+        group_id=None,
     ):
         """Conservatively link old Discord RSNs to approved WOM name histories.
 
@@ -949,9 +950,8 @@ class ConfigCog(commands.Cog):
                 for alt in parts[1:]:
                     add_target(alt, member.id, "alt")
 
-        if not targets_by_old_name:
-            return
-
+        # Still inspect historical names when no Discord candidate matches,
+        # so the staff report explains why an account stayed unmatched.
         cursor.execute(
             """CREATE TABLE IF NOT EXISTS wom_name_history_cache (
                 guild_id INTEGER NOT NULL,
@@ -964,7 +964,35 @@ class ConfigCog(commands.Cog):
 
         now = datetime.datetime.now(datetime.timezone.utc)
         possible = {}
-        attempts = 0
+        group_old_names = {}
+        if isinstance(group_id, int):
+            try:
+                endpoint = (
+                    "https://api.wiseoldman.net/v2/groups/"
+                    f"{group_id}/name-changes?limit=100"
+                )
+                async with self.bot.http_session.get(
+                    endpoint, headers=build_wom_headers(), timeout=15,
+                ) as response:
+                    if response.status == 200:
+                        changes = await response.json()
+                    else:
+                        changes = []
+                if isinstance(changes, list):
+                    for entry in changes:
+                        if not isinstance(entry, dict):
+                            continue
+                        pid = entry.get("playerId")
+                        approved = approved_prior_rsns(pid, [entry])
+                        if approved and isinstance(pid, int):
+                            group_old_names.setdefault(pid, set()).update(
+                                approved
+                            )
+            except Exception:
+                logger.warning(
+                    "Could not retrieve Novus WOM group name history",
+                    exc_info=True,
+                )
 
         for current_name in unmatched_wom_accounts[:12]:
             matches = wom_by_key.get(
@@ -1015,15 +1043,27 @@ class ConfigCog(commands.Cog):
                                 "WOM rate-limited historical Novus auto-link"
                             )
                             result["history_lookup_errors"] += 1
-                            break
-                        if response.status != 200:
+                            # Group history can still supply approved names.
+                            old_names = group_old_names.get(player_id)
+                            if old_names is None:
+                                break
+                            history = []
+                        elif response.status != 200:
                             result["history_lookup_errors"] += 1
-                            continue
-                        history = await response.json()
+                            old_names = group_old_names.get(player_id)
+                            if old_names is None:
+                                continue
+                            history = []
+                        else:
+                            history = await response.json()
                     if not isinstance(history, list):
                         result["history_lookup_errors"] += 1
-                        continue
-                    old_names = approved_prior_rsns(player_id, history)
+                        old_names = group_old_names.get(player_id)
+                        if old_names is None:
+                            continue
+                    if old_names is None:
+                        old_names = approved_prior_rsns(player_id, history)
+                    old_names.update(group_old_names.get(player_id, set()))
                     cursor.execute(
                         """INSERT INTO wom_name_history_cache
                            (guild_id, player_id, fetched_at, names_json)
@@ -1042,9 +1082,13 @@ class ConfigCog(commands.Cog):
                     logger.exception(
                         "Could not fetch WOM names for player %s", player_id
                     )
-                    continue
+                    old_names = group_old_names.get(player_id)
+                    if old_names is None:
+                        continue
 
+            old_names.update(group_old_names.get(player_id, set()))
             result["history_checked"] += 1
+            result["history_aliases"][current_name] = sorted(old_names)[:10]
             for old_key in old_names:
                 # Never match an alias currently owned by another WOM player.
                 if old_key in wom_by_key:
@@ -1099,6 +1143,13 @@ class ConfigCog(commands.Cog):
 
             if role == "primary":
                 old_link = primary_rows.get(member_id)
+                # Stable WOM player IDs must never be overwritten by a
+                # historical name that happens to have been reused.
+                if (
+                    old_link and old_link[1] is not None
+                    and old_link[1] != player_id
+                ):
+                    continue
                 if old_link:
                     cursor.execute(
                         """UPDATE links SET rsn = ?, wom_id = ?
@@ -1186,6 +1237,7 @@ class ConfigCog(commands.Cog):
             "history_links": [],
             "history_checked": 0,
             "history_lookup_errors": 0,
+            "history_aliases": {},
         }
 
         if not isinstance(
@@ -1971,7 +2023,7 @@ class ConfigCog(commands.Cog):
             await self.match_renamed_wom_accounts(
                 guild, c, memberships, wom_by_key, claimed_by_id,
                 claimed_by_key, primary_rows, unmatched_members,
-                unmatched_wom_accounts, result,
+                unmatched_wom_accounts, result, data.get("id"),
             )
 
             conn.commit()
@@ -2008,6 +2060,9 @@ class ConfigCog(commands.Cog):
             "unmatched_wom_accounts"
         ]
         history_links = result.get("history_links", [])
+        aliases = result.get("history_aliases", {})
+        history_checked = result.get("history_checked", 0)
+        history_errors = result.get("history_lookup_errors", 0)
 
         response = (
             "**Novus Auto-Link Complete**\n\n"
@@ -2080,9 +2135,22 @@ class ConfigCog(commands.Cog):
                 "**WOM Accounts Still Unmatched**\n"
                 + "\n".join(
                     f"- `{username}`"
-                    for username
-                    in unmatched_wom_accounts[:25]
+                    + (
+                        " (prior names: "
+                        + ", ".join(f"`{name}`" for name in aliases[username][:5])
+                        + "; no unique Discord match)"
+                        if aliases.get(username)
+                        else " (no approved prior names returned)"
+                        if username in aliases
+                        else " (history unavailable)"
+                    )
+                    for username in unmatched_wom_accounts[:15]
                 )
+            )
+            sections.append(
+                f"Historical WOM lookups: {history_checked} checked, "
+                f"{history_errors} API errors. "
+                "Unapproved or ambiguous renames are not auto-linked."
             )
 
         if sections:

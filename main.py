@@ -389,6 +389,16 @@ class WOMBot(
         self.http_session = None
         self.guild_command_cleanup_done = False
 
+    async def on_command_error(self, ctx, error):
+        # Other bots (notably MEE6) own some ! commands in this server.
+        # Do not log those messages as failures of Novus Role Sync.
+        if isinstance(error, commands.CommandNotFound):
+            return
+        logger.error(
+            "Unhandled prefix command error: %s", error,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
     async def on_ready(
         self
     ):

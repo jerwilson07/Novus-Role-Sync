@@ -315,7 +315,7 @@ def nickname_alts_with_wom_safety(
     """Keep verified alts, but protect temporarily missing WOM-linked accounts.
 
     Unlinked text after a Discord nickname separator is always discarded.
-    A linked alt absent from the WOM roster is temporarily retained ONLY if
+    A linked alt absent from the WOM roster is retained for 24 hours if
     already in the nickname. Stable WOM IDs protect real renames. Missing
     linked alts with no known WOM ID are kept until identity can be verified.
     """
@@ -397,7 +397,7 @@ def nickname_alts_with_wom_safety(
         # distinguished from departure: never strip it automatically.
         in_grace_period = (
             wom_id is None
-            or now - first_missing_at < datetime.timedelta(hours=48)
+            or now - first_missing_at < datetime.timedelta(hours=24)
         )
         if (
             in_grace_period

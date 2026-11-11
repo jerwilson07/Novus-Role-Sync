@@ -204,6 +204,22 @@ class NicknameSyncTests(unittest.TestCase):
             "Vecs | OldAlt", desired, START + dt.timedelta(hours=24)
         ))
 
+    def test_recycled_rsn_does_not_transfer_known_alt_wom_id(self):
+        self.add_alt("OldAlt", 2345)
+        cog = TasksCog.__new__(TasksCog)
+        imposter = {"player": {"id": 9999, "username": "OldAlt"}}
+        verified, missing = cog.sync_alt_links_in_database(
+            self.cursor, 1, 2,
+            {9999: imposter}, {"oldalt": imposter},
+        )
+        self.assertEqual(verified, [])
+        self.assertEqual(missing, ["OldAlt"])
+        self.assertEqual(
+            self.cursor.execute(
+                "SELECT rsn, wom_id FROM alt_links"
+            ).fetchall(), [("OldAlt", 2345)],
+        )
+
     def test_unknown_wom_id_alt_is_removed_only_after_24_hour_confirmation(self):
         self.add_alt("PotentialRename", None)
         visible = self.nickname_alts("Vecs | PotentialRename")

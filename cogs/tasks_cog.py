@@ -1025,7 +1025,7 @@ class TasksCog(commands.Cog):
                     alt_wom_id
                 )
 
-            if membership is None and alt_rsn:
+            if membership is None and alt_wom_id is None and alt_rsn:
                 membership = wom_by_username.get(
                     alt_rsn.lower()
                 )
@@ -1178,7 +1178,7 @@ class TasksCog(commands.Cog):
                     stored_wom_id
                 )
 
-            if membership is None and stored_rsn:
+            if membership is None and stored_wom_id is None and stored_rsn:
                 membership = wom_by_username.get(
                     stored_rsn.lower()
                 )
@@ -1894,6 +1894,7 @@ class TasksCog(commands.Cog):
 
         if (
             membership is None
+            and wom_id is None
             and rsn
         ):
             membership = wom_by_username.get(

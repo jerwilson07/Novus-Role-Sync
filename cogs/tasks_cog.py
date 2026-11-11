@@ -501,6 +501,8 @@ def classify_sync_issue(result: dict) -> str:
 class TasksCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._nov11_catchup_task = None
+        self._last_staff_report_message_ids = {}
 
         self.sync_roles_loop.start()
         self.history_backfill_loop.start()
@@ -516,6 +518,8 @@ class TasksCog(commands.Cog):
         self.backup_database.cancel()
         self.update_stats.cancel()
         self.check_reminders.cancel()
+        if self._nov11_catchup_task and not self._nov11_catchup_task.done():
+            self._nov11_catchup_task.cancel()
 
     # ========================================================
     # GUEST / CLAN FRIEND EXCLUSION
@@ -906,6 +910,149 @@ class TasksCog(commands.Cog):
                 logger.exception(
                     "Failed to forget Guest/Clan Friend links for guild %s",
                     guild.id
+                )
+
+        # The normal noon schedule remains unchanged. This is a one-day
+        # recovery for the 11 Nov noon report interrupted by redeployments,
+        # plus the requested short Council update.
+        if self._nov11_catchup_task is None or self._nov11_catchup_task.done():
+            self._nov11_catchup_task = asyncio.create_task(
+                self._post_nov11_catchup_once()
+            )
+
+    @staticmethod
+    def _nov11_catchup_day():
+        return datetime.datetime.now(
+            ZoneInfo("America/New_York")
+        ).date() == datetime.date(2026, 11, 11)
+
+    @staticmethod
+    def _one_time_delivery_sent(cursor, key):
+        cursor.execute("SELECT value FROM bot_stats WHERE key = ?", (key,))
+        return cursor.fetchone() is not None
+
+    @staticmethod
+    def _mark_one_time_delivery(key, message_id):
+        conn = sqlite3.connect("wom_multi.db")
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO bot_stats (key, value) VALUES (?, ?)",
+                (key, str(message_id)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def _post_nov11_catchup_once(self):
+        """Exactly-once catch-up on Nov 11; never affects future noon runs."""
+        if not self._nov11_catchup_day():
+            return
+        await self.bot.wait_until_ready()
+
+        # The only authorized target for these Novus announcements.
+        guild = self.bot.get_guild(1532817291048124466)
+        if guild is None:
+            logger.warning("Nov 11 catch-up skipped: Novus guild not cached")
+            return
+
+        council_key = f"novus_council_sync_update_20261111:{guild.id}"
+        noon_key = f"novus_noon_catchup_20261111:{guild.id}"
+        conn = sqlite3.connect("wom_multi.db")
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT group_id, nickname_enforcement,
+                          dm_notifications_on FROM guild_configs
+                   WHERE guild_id = ?""",
+                (guild.id,),
+            )
+            config = cursor.fetchone()
+            council_sent = self._one_time_delivery_sent(cursor, council_key)
+            noon_sent = self._one_time_delivery_sent(cursor, noon_key)
+        finally:
+            conn.close()
+
+        if not council_sent and self._nov11_catchup_day():
+            council_channel = discord.utils.get(
+                guild.text_channels, name="council-chat"
+            )
+            if council_channel is None:
+                logger.warning("Novus Council update: #council-chat not found")
+            else:
+                bot_member = guild.me
+                can_send = (
+                    bot_member is not None
+                    and council_channel.permissions_for(bot_member).send_messages
+                )
+                if not can_send:
+                    logger.warning("Novus Council update: missing send permission")
+                else:
+                    try:
+                        message = await council_channel.send(
+                            "**Novus Role Sync Update**\n\n"
+                            "• Verified WOM username changes now update Discord "
+                            "server nicknames, including primary and linked alts.\n"
+                            "• Any nickname addition, rename or removal requires "
+                            "24 hours of consistent WOM confirmation.\n"
+                            "• Alts missing from Novus are removed from the displayed "
+                            "nickname after that grace period (e.g. "
+                            "\`Mavara | Ozilda\` → \`Mavara\`). "
+                            "Saved links and tenure history remain intact.\n"
+                            "• Auto-Link now checks approved historical RSNs without "
+                            "guessing on ambiguous accounts. Stable WOM IDs prevent "
+                            "recycled usernames from taking over existing links.\n\n"
+                            "The daily sync/report continues at **12 PM Eastern** "
+                            "in <#1532835276567613531>. "
+                            "Regression tests passed."
+                        )
+                        self._mark_one_time_delivery(council_key, message.id)
+                        logger.info(
+                            "Novus Council update posted to channel=%s message=%s",
+                            council_channel.id, message.id,
+                        )
+                    except (discord.HTTPException, sqlite3.Error):
+                        logger.exception("Novus Council update could not be delivered")
+
+        if not noon_sent and self._nov11_catchup_day():
+            if not config or not config[0]:
+                logger.warning("Novus noon catch-up: guild WOM group unconfigured")
+                return
+            report_channel = guild.get_channel(NOVUS_MOD_CHAT_CHANNEL_ID)
+            bot_member = guild.me
+            if (
+                report_channel is None
+                or bot_member is None
+                or not report_channel.permissions_for(bot_member).send_messages
+                or not report_channel.permissions_for(bot_member).embed_links
+            ):
+                logger.warning(
+                    "Novus noon catch-up: #mod-chat absent or missing permission"
+                )
+                return
+            self._last_staff_report_message_ids.pop(guild.id, None)
+            try:
+                logger.info("Novus noon catch-up started for guild %s", guild.id)
+                await self.sync_guild(
+                    guild, config[0], NOVUS_MOD_CHAT_CHANNEL_ID,
+                    config[1], config[2],
+                )
+                sent_message_id = self._last_staff_report_message_ids.get(
+                    guild.id
+                )
+                if sent_message_id:
+                    self._mark_one_time_delivery(noon_key, sent_message_id)
+                    logger.info(
+                        "Novus noon catch-up successfully posted to "
+                        "#mod-chat message=%s", sent_message_id,
+                    )
+                else:
+                    logger.warning(
+                        "Novus noon catch-up finished without a confirmed "
+                        "#mod-chat report for guild %s", guild.id,
+                    )
+            except Exception:
+                logger.exception(
+                    "Novus noon catch-up failed for guild %s", guild.id
                 )
 
     @commands.Cog.listener()
@@ -5662,12 +5809,23 @@ class TasksCog(commands.Cog):
                 )
 
             try:
-                await log_channel.send(
-                    embed=embed
+                sent_message = await log_channel.send(embed=embed)
+                self._last_staff_report_message_ids[guild.id] = (
+                    sent_message.id
+                )
+                logger.info(
+                    "Sent Novus staff sync report to channel=%s message=%s",
+                    log_channel_id, sent_message.id,
                 )
             except discord.Forbidden:
                 logger.warning(
-                    f"Could not send log message to channel {log_channel_id}"
+                    "Could not send Novus staff report to channel %s",
+                    log_channel_id,
+                )
+            except discord.HTTPException:
+                logger.exception(
+                    "Failed posting Novus staff report to channel %s",
+                    log_channel_id,
                 )
 
         logger.info(

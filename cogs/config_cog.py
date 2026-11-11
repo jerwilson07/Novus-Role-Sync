@@ -1187,6 +1187,14 @@ class ConfigCog(commands.Cog):
                     ),
                     None,
                 )
+                if (
+                    matched_alt
+                    and matched_alt[1] is not None
+                    and matched_alt[1] != player_id
+                ):
+                    # A recycled historical RSN cannot replace a stored
+                    # stable ID belonging to a different account.
+                    continue
                 if matched_alt:
                     cursor.execute(
                         """UPDATE alt_links SET rsn = ?, wom_id = ?
@@ -1426,6 +1434,7 @@ class ConfigCog(commands.Cog):
 
                 if (
                     membership is None
+                    and alt_wom_id is None
                     and alt_rsn
                 ):
                     membership = resolve_exact(

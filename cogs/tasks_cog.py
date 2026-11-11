@@ -330,31 +330,39 @@ def nickname_alts_with_wom_safety(
         (guild_id, discord_id),
     )
     saved_alts = cursor.fetchall()
+    # WOM writes underscores and hyphens as spaces in RSNs. Use precisely
+    # the same normalization as /autolink when deciding who is in-clan.
+    def key_for(name):
+        return sanitize_rsn(name).casefold()
+
     verified_keys = {
-        alt.casefold() for alt in verified_alts if alt
+        key_for(alt) for alt in verified_alts if alt
     }
     visible = []
     seen = set()
-    for alt_rsn, wom_id in saved_alts:
+    for alt_rsn, _wom_id in saved_alts:
         if not alt_rsn:
             continue
-        key = alt_rsn.casefold()
+        key = key_for(alt_rsn)
         if key in seen:
             continue
         if key in verified_keys:
             visible.append(alt_rsn)
             seen.add(key)
 
-    # A nickname may display a genuine in-clan alt that has not yet been
-    # registered. Keep it visible while allowing the separate autolink
-    # process to verify ownership. Remove names absent from WOM only after
-    # the shared 24-hour candidate confirmation period.
-    active_names = in_clan_names or {}
+    # A nickname may contain a genuine in-clan alt that has not yet been
+    # registered. Keep it visible without inferring ownership or linking it.
+    # Only remove nicknames absent from the WOM roster after 24h confirmation.
+    active_names = {
+        key_for(key): value
+        for key, value in (in_clan_names or {}).items()
+        if key and value
+    }
     for part in re.split(r"\s*[|/]\s*", current_nickname or "")[1:]:
         candidate = part.strip()
         if not candidate:
             continue
-        key = candidate.casefold()
+        key = key_for(candidate)
         if key in active_names and key not in seen:
             visible.append(active_names[key])
             seen.add(key)

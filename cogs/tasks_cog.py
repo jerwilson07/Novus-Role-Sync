@@ -996,7 +996,7 @@ class TasksCog(commands.Cog):
                             "24 hours of consistent WOM confirmation.\n"
                             "• Alts missing from Novus are removed from the displayed "
                             "nickname after that grace period (e.g. "
-                            "\`Mavara | Ozilda\` → \`Mavara\`). "
+                            "`Mavara | Ozilda` → `Mavara`). "
                             "Saved links and tenure history remain intact.\n"
                             "• Auto-Link now checks approved historical RSNs without "
                             "guessing on ambiguous accounts. Stable WOM IDs prevent "

@@ -85,6 +85,24 @@ class ActiveMembershipTests(unittest.TestCase):
             discord_user((200, " MEMBER "))
         ))
 
+    def test_recycled_rsn_cannot_replace_known_wom_player_id(self):
+        reused = [{"player": {"id": 999, "username": "Old Name"}}]
+        # The original player was known as Old Name (ID 12345), but has
+        # vanished from WOM. Another player's recycled name isn't proof.
+        self.assertIsNone(find_primary_wom_membership(
+            "Old Name", 12345, reused,
+        ))
+        self.assertFalse(is_active_novus_member_link(
+            MEMBER, "Old Name", 12345, reused,
+        ))
+
+    def test_unverified_name_link_accepts_equivalent_rsn_separators(self):
+        roster = [{"player": {"id": 71, "username": "p p"}}]
+        self.assertEqual(
+            find_primary_wom_membership("p_p", None, roster),
+            roster[0],
+        )
+
     def test_wrong_wom_identity_does_not_match(self):
         self.assertIsNone(find_primary_wom_membership(
             "Former Main", 999, ROSTER

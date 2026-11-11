@@ -1087,7 +1087,7 @@ class ConfigCog(commands.Cog):
 
             old_names.update(group_old_names.get(player_id, set()))
             result["history_checked"] += 1
-            result["history_aliases"][current_name] = sorted(old_names)[:10]
+            result.setdefault("history_aliases", {})[current_name] = sorted(old_names)[:10]
             for old_key in old_names:
                 # Never match an alias currently owned by another WOM player.
                 if old_key in wom_by_key:

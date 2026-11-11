@@ -6,6 +6,9 @@ import logging
 import re
 import datetime
 import math
+import asyncio
+import json
+from urllib.parse import quote
 
 from common import (
     sanitize_rsn, WOM_API_KEY, has_non_clan_role,
@@ -65,6 +68,24 @@ def build_wom_headers():
         headers["x-api-key"] = WOM_API_KEY
 
     return headers
+
+
+def approved_prior_rsns(player_id, history):
+    """Only accept approved WOM names belonging to this stable player ID."""
+    if player_id is None or not isinstance(history, list):
+        return set()
+    result = set()
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") != "approved":
+            continue
+        if str(item.get("playerId")) != str(player_id):
+            continue
+        name = item.get("oldName")
+        if isinstance(name, str) and sanitize_rsn(name):
+            result.add(sanitize_rsn(name).casefold())
+    return result
 
 
 def format_personal_tenure(rank, effective_joined_at, now=None):
@@ -861,6 +882,288 @@ class ConfigCog(commands.Cog):
     # AUTOMATIC USER LINKING
     # ========================================================
 
+    async def match_renamed_wom_accounts(
+        self,
+        guild,
+        cursor,
+        memberships,
+        wom_by_key,
+        claimed_by_id,
+        claimed_by_key,
+        primary_rows,
+        unmatched_members,
+        unmatched_wom_accounts,
+        result,
+    ):
+        """Conservatively link old Discord RSNs to approved WOM name histories.
+
+        Exact current-name and stable player-ID matches are handled first.
+        Only unique historical matches are accepted. Never guess identities,
+        alter Discord nicknames, or change tenure based on a name similarity.
+        """
+        if not unmatched_wom_accounts:
+            return
+
+        # Potential Discord account owners and their primary/alt name slots.
+        unmatched_ids = {member.id for member in unmatched_members}
+        targets_by_old_name = {}
+
+        def add_target(value, member_id, account_type):
+            if not isinstance(value, str) or not sanitize_rsn(value):
+                return
+            key = sanitize_rsn(value).casefold()
+            targets_by_old_name.setdefault(key, set()).add(
+                (member_id, account_type)
+            )
+
+        for member in guild.members:
+            if (
+                member.bot or has_non_clan_role(member)
+                or not (
+                    has_novus_member_role(member)
+                    or any(
+                        getattr(role, "name", "").strip().casefold()
+                        == "trial member"
+                        for role in member.roles
+                    )
+                )
+            ):
+                continue
+            parts = [
+                part.strip() for part in re.split(r"[|/]", member.display_name)
+                if part.strip()
+            ]
+            if member.id in unmatched_ids:
+                if parts:
+                    add_target(parts[0], member.id, "primary")
+                add_target(getattr(member, "global_name", None), member.id, "primary")
+                add_target(getattr(member, "name", None), member.id, "primary")
+            else:
+                stored = primary_rows.get(member.id)
+                if not stored:
+                    continue
+                if find_primary_wom_membership(
+                    stored[0], stored[1], memberships
+                ) is None:
+                    continue
+                for alt in parts[1:]:
+                    add_target(alt, member.id, "alt")
+
+        if not targets_by_old_name:
+            return
+
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS wom_name_history_cache (
+                guild_id INTEGER NOT NULL,
+                player_id INTEGER NOT NULL,
+                fetched_at TEXT NOT NULL,
+                names_json TEXT NOT NULL,
+                PRIMARY KEY (guild_id, player_id)
+            )"""
+        )
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        possible = {}
+        attempts = 0
+
+        for current_name in unmatched_wom_accounts[:12]:
+            matches = wom_by_key.get(
+                sanitize_rsn(current_name).casefold(), []
+            )
+            if len(matches) != 1:
+                continue
+            membership = matches[0]
+            player = membership.get("player", {})
+            player_id = player.get("id")
+            if not isinstance(player_id, int):
+                continue
+            if player_id in claimed_by_id:
+                continue
+
+            attempts += 1
+            old_names = None
+            cursor.execute(
+                """SELECT fetched_at, names_json
+                   FROM wom_name_history_cache
+                   WHERE guild_id = ? AND player_id = ?""",
+                (guild.id, player_id),
+            )
+            cached = cursor.fetchone()
+            if cached:
+                try:
+                    cached_at = datetime.datetime.fromisoformat(cached[0])
+                    if cached_at.tzinfo is None:
+                        cached_at = cached_at.replace(
+                            tzinfo=datetime.timezone.utc
+                        )
+                    if now - cached_at < datetime.timedelta(hours=1):
+                        old_names = set(json.loads(cached[1]))
+                except (TypeError, ValueError):
+                    old_names = None
+
+            if old_names is None:
+                endpoint = (
+                    "https://api.wiseoldman.net/v2/players/"
+                    f"{quote(current_name, safe='')}/names"
+                )
+                try:
+                    async with self.bot.http_session.get(
+                        endpoint, headers=build_wom_headers(), timeout=15
+                    ) as response:
+                        if response.status == 429:
+                            logger.warning(
+                                "WOM rate-limited historical Novus auto-link"
+                            )
+                            result["history_lookup_errors"] += 1
+                            break
+                        if response.status != 200:
+                            result["history_lookup_errors"] += 1
+                            continue
+                        history = await response.json()
+                    if not isinstance(history, list):
+                        result["history_lookup_errors"] += 1
+                        continue
+                    old_names = approved_prior_rsns(player_id, history)
+                    cursor.execute(
+                        """INSERT INTO wom_name_history_cache
+                           (guild_id, player_id, fetched_at, names_json)
+                           VALUES (?, ?, ?, ?)
+                           ON CONFLICT(guild_id, player_id)
+                           DO UPDATE SET fetched_at = excluded.fetched_at,
+                                         names_json = excluded.names_json""",
+                        (
+                            guild.id, player_id, now.isoformat(),
+                            json.dumps(sorted(old_names)),
+                        ),
+                    )
+                    await asyncio.sleep(0.3)
+                except Exception:
+                    result["history_lookup_errors"] += 1
+                    logger.exception(
+                        "Could not fetch WOM names for player %s", player_id
+                    )
+                    continue
+
+            result["history_checked"] += 1
+            for old_key in old_names:
+                # Never match an alias currently owned by another WOM player.
+                if old_key in wom_by_key:
+                    continue
+                owners = targets_by_old_name.get(old_key, set())
+                if len(owners) != 1:
+                    continue
+                owner = next(iter(owners))
+                possible.setdefault(player_id, set()).add(
+                    (owner[0], owner[1], old_key)
+                )
+
+        # Require one Discord owner + one slot per WOM player, and never
+        # assign the same Discord primary or alt slot to two WOM accounts.
+        unique = {}
+        for player_id, candidates in possible.items():
+            slots = {(member_id, role) for member_id, role, _ in candidates}
+            if len(slots) == 1:
+                member_id, role = next(iter(slots))
+                old_key = sorted(
+                    old for cid, kind, old in candidates
+                    if (cid, kind) == (member_id, role)
+                )[0]
+                unique[player_id] = (member_id, role, old_key)
+        reverse = {}
+        for pid, (member_id, role, _) in unique.items():
+            reverse.setdefault((member_id, role), set()).add(pid)
+
+        for current_name in list(unmatched_wom_accounts):
+            matches = wom_by_key.get(
+                sanitize_rsn(current_name).casefold(), []
+            )
+            if len(matches) != 1:
+                continue
+            membership = matches[0]
+            player = membership["player"]
+            player_id = player.get("id")
+            if player_id not in unique or player_id in claimed_by_id:
+                continue
+            member_id, role, old_key = unique[player_id]
+            if len(reverse[(member_id, role)]) != 1:
+                continue
+            member = guild.get_member(member_id)
+            if member is None:
+                continue
+
+            # Another account could have claimed this current WOM RSN
+            # earlier in the same run. Never override an existing owner.
+            current_key = sanitize_rsn(current_name).casefold()
+            if current_key in claimed_by_key:
+                continue
+
+            if role == "primary":
+                old_link = primary_rows.get(member_id)
+                if old_link:
+                    cursor.execute(
+                        """UPDATE links SET rsn = ?, wom_id = ?
+                           WHERE guild_id = ? AND discord_id = ?""",
+                        (current_name, player_id, guild.id, member_id),
+                    )
+                    result["repaired_members"].append(
+                        (member, old_link[0], current_name)
+                    )
+                else:
+                    cursor.execute(
+                        """INSERT INTO links (guild_id, discord_id, rsn, wom_id)
+                           VALUES (?, ?, ?, ?)""",
+                        (guild.id, member_id, current_name, player_id),
+                    )
+                    result["linked_members"].append(
+                        (member, current_name)
+                    )
+                primary_rows[member_id] = (current_name, player_id)
+                unmatched_members[:] = [
+                    candidate for candidate in unmatched_members
+                    if candidate.id != member_id
+                ]
+            else:
+                cursor.execute(
+                    """SELECT rsn, wom_id FROM alt_links
+                       WHERE guild_id = ? AND discord_id = ?""",
+                    (guild.id, member_id),
+                )
+                existing_alts = cursor.fetchall()
+                matched_alt = next(
+                    (
+                        (rsn, wom_id) for rsn, wom_id in existing_alts
+                        if wom_id == player_id
+                        or sanitize_rsn(rsn).casefold() == old_key
+                    ),
+                    None,
+                )
+                if matched_alt:
+                    cursor.execute(
+                        """UPDATE alt_links SET rsn = ?, wom_id = ?
+                           WHERE guild_id = ? AND discord_id = ? AND rsn = ?""",
+                        (
+                            current_name, player_id, guild.id,
+                            member_id, matched_alt[0],
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        """INSERT OR IGNORE INTO alt_links
+                           (guild_id, discord_id, rsn, wom_id)
+                           VALUES (?, ?, ?, ?)""",
+                        (guild.id, member_id, current_name, player_id),
+                    )
+                    if cursor.rowcount == 0:
+                        continue
+                    result["alt_links_added"].append((member, current_name))
+
+            claimed_by_id[player_id] = member_id
+            claimed_by_key[current_key] = member_id
+            result["history_links"].append(
+                (member, old_key, current_name, role)
+            )
+            unmatched_wom_accounts.remove(current_name)
+
     async def run_autolink_for_guild(
         self,
         guild: discord.Guild,
@@ -880,6 +1183,9 @@ class ConfigCog(commands.Cog):
             "alt_links_added": [],
             "unmatched_members": [],
             "unmatched_wom_accounts": [],
+            "history_links": [],
+            "history_checked": 0,
+            "history_lookup_errors": 0,
         }
 
         if not isinstance(
@@ -1662,6 +1968,12 @@ class ConfigCog(commands.Cog):
                 key=str.casefold
             )
 
+            await self.match_renamed_wom_accounts(
+                guild, c, memberships, wom_by_key, claimed_by_id,
+                claimed_by_key, primary_rows, unmatched_members,
+                unmatched_wom_accounts, result,
+            )
+
             conn.commit()
 
             return result
@@ -1695,6 +2007,7 @@ class ConfigCog(commands.Cog):
         unmatched_wom_accounts = result[
             "unmatched_wom_accounts"
         ]
+        history_links = result.get("history_links", [])
 
         response = (
             "**Novus Auto-Link Complete**\n\n"
@@ -1749,6 +2062,16 @@ class ConfigCog(commands.Cog):
                         member,
                         alt_rsn
                     ) in alt_links_added[:15]
+                )
+            )
+
+        if history_links:
+            sections.append(
+                "**Verified Historical RSN Matches**\n"
+                + "\n".join(
+                    f"- {member.mention}: `{old_rsn}` -> `{current_rsn}` "
+                    f"({role})"
+                    for member, old_rsn, current_rsn, role in history_links[:15]
                 )
             )
 

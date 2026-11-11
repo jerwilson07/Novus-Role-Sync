@@ -84,6 +84,31 @@ class NicknameSyncTests(unittest.TestCase):
             "Vecs | ActiveAlt",
         )
 
+    def test_underscore_alias_of_active_wom_alt_survives(self):
+        visible = nickname_alts_with_wom_safety(
+            self.cursor, 1, 2, "Vecs | p_p", [],
+            in_clan_names={"p p": "p p"},
+        )
+        self.assertEqual(visible, ["p p"])
+        self.assertEqual(
+            build_wom_server_nickname("Vecs", visible, "Vecs | p_p"),
+            "Vecs | p p",
+        )
+        # Formatting changes also obey the same 24-hour confirmation.
+        self.assertFalse(self.confirmed("Vecs | p_p", "Vecs | p p", START))
+        self.assertTrue(self.confirmed(
+            "Vecs | p_p", "Vecs | p p",
+            START + dt.timedelta(hours=24),
+        ))
+
+    def test_registered_alt_with_wom_underscore_alias_stays_verified(self):
+        self.add_alt("p_p", 2345)
+        visible = nickname_alts_with_wom_safety(
+            self.cursor, 1, 2, "Vecs | p_p", ["p p"],
+            in_clan_names={"p p": "p p"},
+        )
+        self.assertEqual(visible, ["p_p"])
+
     def test_no_name_changes_without_24_hour_second_check(self):
         for initial, proposed in (
             ("Vecs", "Vecs | NewAlt"),

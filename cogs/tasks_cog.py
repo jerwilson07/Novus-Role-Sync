@@ -315,8 +315,9 @@ def nickname_alts_with_wom_safety(
     """Use current verified WOM alts; avoid guessing missing identities.
 
     Name additions/removals are separately held by the shared 24-hour
-    candidate timer below. An unverified linked alt with no player ID is
-    retained if already displayed, because an RSN change cannot be tracked.
+    candidate timer below. Unverified alts, including those without a
+    saved WOM player ID, are omitted from the proposed nickname. The current
+    Discord name remains unchanged for 24 hours while WOM may catch up.
     """
     cursor.execute(
         """
@@ -330,11 +331,6 @@ def nickname_alts_with_wom_safety(
     verified_keys = {
         alt.casefold() for alt in verified_alts if alt
     }
-    displayed = {
-        part.strip().casefold()
-        for part in re.split(r"\s*[|/]\s*", current_nickname or "")[1:]
-        if part.strip()
-    }
     visible = []
     seen = set()
     for alt_rsn, wom_id in saved_alts:
@@ -343,7 +339,7 @@ def nickname_alts_with_wom_safety(
         key = alt_rsn.casefold()
         if key in seen:
             continue
-        if key in verified_keys or (wom_id is None and key in displayed):
+        if key in verified_keys:
             visible.append(alt_rsn)
             seen.add(key)
     return visible

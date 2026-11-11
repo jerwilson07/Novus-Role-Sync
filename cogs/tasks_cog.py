@@ -311,13 +311,15 @@ def nickname_alts_with_wom_safety(
     current_nickname: str | None,
     verified_alts: list[str],
     now: datetime.datetime | None = None,
+    in_clan_names: dict[str, str] | None = None,
 ) -> list[str]:
     """Use current verified WOM alts; avoid guessing missing identities.
 
     Name additions/removals are separately held by the shared 24-hour
-    candidate timer below. Unverified alts, including those without a
-    saved WOM player ID, are omitted from the proposed nickname. The current
-    Discord name remains unchanged for 24 hours while WOM may catch up.
+    candidate timer below. Alts without confirmed WOM membership are omitted
+    from the proposal, even if linked previously. A manually displayed alt
+    still present in the Novus WOM roster is preserved without assuming
+    ownership or adding a database link.
     """
     cursor.execute(
         """
@@ -341,6 +343,20 @@ def nickname_alts_with_wom_safety(
             continue
         if key in verified_keys:
             visible.append(alt_rsn)
+            seen.add(key)
+
+    # A nickname may display a genuine in-clan alt that has not yet been
+    # registered. Keep it visible while allowing the separate autolink
+    # process to verify ownership. Remove names absent from WOM only after
+    # the shared 24-hour candidate confirmation period.
+    active_names = in_clan_names or {}
+    for part in re.split(r"\s*[|/]\s*", current_nickname or "")[1:]:
+        candidate = part.strip()
+        if not candidate:
+            continue
+        key = candidate.casefold()
+        if key in active_names and key not in seen:
+            visible.append(active_names[key])
             seen.add(key)
     return visible
 
@@ -1971,6 +1987,10 @@ class TasksCog(commands.Cog):
                 member.id,
                 member.nick,
                 verified_alts,
+                in_clan_names={
+                    key.casefold(): entry["player"]["username"]
+                    for key, entry in wom_by_username.items()
+                },
             )
             desired_nickname = build_wom_server_nickname(
                 current_rsn,

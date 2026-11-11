@@ -1,4 +1,4 @@
-"""Regression tests for rename-safe Novus Discord nickname synchronization."""
+"""Regression tests for 24-hour WOM Discord nickname confirmation."""
 
 import datetime as dt
 import sqlite3
@@ -8,6 +8,7 @@ from cogs.tasks_cog import (
     TasksCog,
     build_wom_server_nickname,
     nickname_alts_with_wom_safety,
+    nickname_change_confirmed,
 )
 
 
@@ -39,12 +40,17 @@ class NicknameSyncTests(unittest.TestCase):
             (rsn, wom_id),
         )
 
-    def nickname_alts(self, current_nickname, verified_alts=(), at=START):
+    def nickname_alts(self, current_nickname, verified_alts=()):
         return nickname_alts_with_wom_safety(
-            self.cursor, 1, 2, current_nickname, list(verified_alts), now=at
+            self.cursor, 1, 2, current_nickname, list(verified_alts)
         )
 
-    def test_no_alt_cleans_up_separator_and_manual_unlinked_name(self):
+    def confirmed(self, old, proposed, at=START):
+        return nickname_change_confirmed(
+            self.cursor, 1, 2, old, proposed, now=at
+        )
+
+    def test_manually_added_unlinked_alt_not_kept_in_wom_candidate(self):
         visible = self.nickname_alts("Vecs | NotInClan")
         self.assertEqual(visible, [])
         self.assertEqual(
@@ -52,57 +58,81 @@ class NicknameSyncTests(unittest.TestCase):
             "Vecs",
         )
 
-    def test_linked_alt_in_clan_is_kept(self):
-        self.add_alt("AltName", 2345)
-        visible = self.nickname_alts("Vecs | AltName", ["AltName"])
-        self.assertEqual(visible, ["AltName"])
-        self.assertEqual(
-            build_wom_server_nickname("Vecs", visible, "Vecs | AltName"),
-            "Vecs | AltName",
-        )
+    def test_no_name_changes_without_24_hour_second_check(self):
+        for initial, proposed in (
+            ("Vecs", "Vecs | NewAlt"),
+            ("Vecs | OldAlt", "Vecs"),
+            ("OldPrimary", "RenamedPrimary"),
+            ("Vecs | OldAlt", "Vecs | RenamedAlt"),
+        ):
+            with self.subTest(initial=initial, proposed=proposed):
+                self.cursor.execute("DELETE FROM nickname_change_candidates") if (
+                    self.cursor.execute(
+                        "SELECT name FROM sqlite_master WHERE name='nickname_change_candidates'"
+                    ).fetchone()
+                ) else None
+                self.assertFalse(self.confirmed(initial, proposed, START))
+                self.assertFalse(self.confirmed(
+                    initial, proposed, START + dt.timedelta(hours=23, minutes=59)
+                ))
+                self.assertTrue(self.confirmed(
+                    initial, proposed, START + dt.timedelta(hours=24)
+                ))
 
-    def test_missing_linked_alt_gets_full_24_hour_grace(self):
+    def test_candidate_change_restarts_timer(self):
+        self.assertFalse(self.confirmed("Vecs", "Vecs | A", START))
+        self.assertFalse(self.confirmed(
+            "Vecs", "Vecs | B", START + dt.timedelta(hours=23)
+        ))
+        self.assertFalse(self.confirmed(
+            "Vecs", "Vecs | B", START + dt.timedelta(hours=24)
+        ))
+        self.assertTrue(self.confirmed(
+            "Vecs", "Vecs | B", START + dt.timedelta(hours=47)
+        ))
+
+    def test_wom_recovery_cancels_pending_removal(self):
+        self.assertFalse(self.confirmed("Vecs | Alt", "Vecs", START))
+        self.assertFalse(self.confirmed(
+            "Vecs | Alt", "Vecs | Alt", START + dt.timedelta(hours=12)
+        ))
+        self.assertFalse(self.confirmed(
+            "Vecs | Alt", "Vecs", START + dt.timedelta(hours=25)
+        ))
+        self.assertTrue(self.confirmed(
+            "Vecs | Alt", "Vecs", START + dt.timedelta(hours=49)
+        ))
+
+    def test_missing_linked_alt_only_changes_candidate_not_discord_yet(self):
         self.add_alt("MaybeRenamed", 2345)
-        self.assertEqual(
-            self.nickname_alts("Vecs | MaybeRenamed"), ["MaybeRenamed"]
-        )
-        self.assertEqual(
-            self.nickname_alts(
-                "Vecs | MaybeRenamed", at=START + dt.timedelta(hours=23, minutes=59)
-            ),
-            ["MaybeRenamed"],
-        )
-        visible = self.nickname_alts(
-            "Vecs | MaybeRenamed", at=START + dt.timedelta(hours=24)
-        )
+        visible = self.nickname_alts("Vecs | MaybeRenamed")
         self.assertEqual(visible, [])
-        self.assertEqual(
-            build_wom_server_nickname("Vecs", visible, "Vecs | MaybeRenamed"),
-            "Vecs",
-        )
-        # Removing an inactive alt from a nickname does not delete its link.
+        desired = build_wom_server_nickname("Vecs", visible, "Vecs | MaybeRenamed")
+        self.assertEqual(desired, "Vecs")
+        self.assertFalse(self.confirmed("Vecs | MaybeRenamed", desired, START))
+        self.assertFalse(self.confirmed(
+            "Vecs | MaybeRenamed", desired, START + dt.timedelta(hours=12)
+        ))
+        self.assertTrue(self.confirmed(
+            "Vecs | MaybeRenamed", desired, START + dt.timedelta(hours=24)
+        ))
         self.assertEqual(
             self.cursor.execute("SELECT rsn, wom_id FROM alt_links").fetchall(),
             [("MaybeRenamed", 2345)],
         )
 
-    def test_verified_reappearance_resets_missing_timer(self):
+    def test_verified_alt_reappears_during_grace_and_is_retained(self):
         self.add_alt("KnownAlt", 2345)
-        self.nickname_alts("Vecs | KnownAlt")
-        self.assertEqual(
-            self.nickname_alts(
-                "Vecs | KnownAlt", ["KnownAlt"], START + dt.timedelta(hours=12)
-            ),
-            ["KnownAlt"],
-        )
-        self.assertEqual(
-            self.nickname_alts(
-                "Vecs | KnownAlt", at=START + dt.timedelta(hours=30)
-            ),
-            ["KnownAlt"],
-        )
+        self.assertFalse(self.confirmed("Vecs | KnownAlt", "Vecs", START))
+        visible = self.nickname_alts("Vecs | KnownAlt", ["KnownAlt"])
+        self.assertEqual(visible, ["KnownAlt"])
+        self.assertFalse(self.confirmed(
+            "Vecs | KnownAlt",
+            build_wom_server_nickname("Vecs", visible, "Vecs | KnownAlt"),
+            START + dt.timedelta(hours=12),
+        ))
 
-    def test_alt_rename_resolves_by_stable_wom_id(self):
+    def test_alt_rename_resolves_by_stable_wom_id_before_grace(self):
         self.add_alt("OldAlt", 2345)
         cog = TasksCog.__new__(TasksCog)
         membership = {"player": {"id": 2345, "username": "NewAlt"}}
@@ -114,23 +144,26 @@ class NicknameSyncTests(unittest.TestCase):
             self.cursor.execute("SELECT rsn, wom_id FROM alt_links").fetchall(),
             [("NewAlt", 2345)],
         )
-        self.assertEqual(
-            build_wom_server_nickname(
-                "Vecs", self.nickname_alts("Vecs | OldAlt", verified), "Vecs | OldAlt"
-            ),
-            "Vecs | NewAlt",
+        desired = build_wom_server_nickname(
+            "Vecs", self.nickname_alts("Vecs | OldAlt", verified), "Vecs | OldAlt"
         )
+        self.assertEqual(desired, "Vecs | NewAlt")
+        self.assertFalse(self.confirmed("Vecs | OldAlt", desired, START))
+        self.assertTrue(self.confirmed(
+            "Vecs | OldAlt", desired, START + dt.timedelta(hours=24)
+        ))
 
     def test_unknown_wom_id_is_preserved_until_identity_verified(self):
         self.add_alt("PotentialRename", None)
-        self.nickname_alts("Vecs | PotentialRename")
-        # Without a stable WOM ID, an absent old RSN may actually be renamed.
         self.assertEqual(
-            self.nickname_alts(
-                "Vecs | PotentialRename", at=START + dt.timedelta(days=4)
-            ),
-            ["PotentialRename"],
+            self.nickname_alts("Vecs | PotentialRename"), ["PotentialRename"]
         )
+
+    def test_completed_change_clears_old_pending_state(self):
+        self.assertFalse(self.confirmed("Old", "New", START))
+        self.assertTrue(self.confirmed("Old", "New", START + dt.timedelta(hours=24)))
+        self.assertFalse(self.confirmed("New", "New", START + dt.timedelta(hours=24)))
+        self.assertFalse(self.confirmed("New", "Another", START + dt.timedelta(hours=25)))
 
 
 if __name__ == "__main__":

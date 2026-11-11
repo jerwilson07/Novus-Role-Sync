@@ -2025,6 +2025,29 @@ class ConfigCog(commands.Cog):
                 unmatched_wom_accounts, result, data.get("id"),
             )
 
+            # Discord interaction replies are ephemeral, so staff cannot
+            # troubleshoot them from Railway unless we also log a summary.
+            # Only log public WOM RSNs / Discord numeric IDs, never tokens.
+            logger.info(
+                "Novus autolink guild=%s: new=%d repaired=%d "
+                "new_alts=%d historical_matches=%d unmatched_discord=%s "
+                "unmatched_wom=%s history_checked=%d history_errors=%d "
+                "approved_history=%s",
+                guild.id,
+                len(result["linked_members"]),
+                len(result["repaired_members"]),
+                len(result["alt_links_added"]),
+                len(result["history_links"]),
+                [member.id for member in unmatched_members],
+                list(unmatched_wom_accounts),
+                result["history_checked"],
+                result["history_lookup_errors"],
+                {
+                    name: result["history_aliases"].get(name, [])
+                    for name in unmatched_wom_accounts
+                },
+            )
+
             conn.commit()
 
             return result

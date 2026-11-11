@@ -9,6 +9,7 @@ import logging
 import asyncio
 import os
 import shutil
+import re
 
 from common import (
     WOM_API_KEY, sanitize_rsn, has_non_clan_role, forget_member_links,
@@ -300,6 +301,126 @@ def build_wom_server_nickname(
     return separator.join(
         parts
     )
+
+
+
+def nickname_alts_with_wom_safety(
+    cursor,
+    guild_id: int,
+    discord_id: int,
+    current_nickname: str | None,
+    verified_alts: list[str],
+    now: datetime.datetime | None = None,
+) -> list[str]:
+    """Keep verified alts, but protect temporarily missing WOM-linked accounts.
+
+    Unlinked text after a Discord nickname separator is always discarded.
+    A linked alt absent from the WOM roster is temporarily retained ONLY if
+    already in the nickname. Stable WOM IDs protect real renames. Missing
+    linked alts with no known WOM ID are kept until identity can be verified.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS nickname_alt_absences (
+            guild_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            account_key TEXT NOT NULL,
+            first_missing_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, discord_id, account_key)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        SELECT rsn, wom_id FROM alt_links
+        WHERE guild_id = ? AND discord_id = ?
+        ORDER BY rowid
+        """,
+        (guild_id, discord_id),
+    )
+    saved_alts = cursor.fetchall()
+    verified_keys = {
+        alt.casefold() for alt in verified_alts if alt
+    }
+    nickname_parts = re.split(r"\s*[|/]\s*", current_nickname or "")
+    displayed_alt_keys = {
+        part.strip().casefold()
+        for part in nickname_parts[1:]
+        if part.strip()
+    }
+    visible_alts = []
+    live_keys = set()
+
+    for alt_rsn, wom_id in saved_alts:
+        if not alt_rsn:
+            continue
+        account_key = (
+            f"id:{wom_id}"
+            if wom_id is not None
+            else f"rsn:{alt_rsn.casefold()}"
+        )
+        live_keys.add(account_key)
+        if alt_rsn.casefold() in verified_keys:
+            cursor.execute(
+                """DELETE FROM nickname_alt_absences
+                   WHERE guild_id = ? AND discord_id = ? AND account_key = ?""",
+                (guild_id, discord_id, account_key),
+            )
+            visible_alts.append(alt_rsn)
+            continue
+
+        # Missing from a single WOM roster is NOT a confirmed clan departure.
+        cursor.execute(
+            """INSERT OR IGNORE INTO nickname_alt_absences
+               (guild_id, discord_id, account_key, first_missing_at)
+               VALUES (?, ?, ?, ?)""",
+            (guild_id, discord_id, account_key, now.isoformat()),
+        )
+        cursor.execute(
+            """SELECT first_missing_at FROM nickname_alt_absences
+               WHERE guild_id = ? AND discord_id = ? AND account_key = ?""",
+            (guild_id, discord_id, account_key),
+        )
+        first_missing_at = datetime.datetime.fromisoformat(
+            cursor.fetchone()[0]
+        )
+        if first_missing_at.tzinfo is None:
+            first_missing_at = first_missing_at.replace(
+                tzinfo=datetime.timezone.utc
+            )
+
+        # For an alt whose WOM ID is unknown, a rename cannot be
+        # distinguished from departure: never strip it automatically.
+        in_grace_period = (
+            wom_id is None
+            or now - first_missing_at < datetime.timedelta(hours=48)
+        )
+        if (
+            in_grace_period
+            and alt_rsn.casefold() in displayed_alt_keys
+        ):
+            visible_alts.append(alt_rsn)
+
+    # Forget only nickname grace-state for unlinked accounts, never
+    # the actual saved account link or individual tenure history.
+    cursor.execute(
+        """SELECT account_key FROM nickname_alt_absences
+           WHERE guild_id = ? AND discord_id = ?""",
+        (guild_id, discord_id),
+    )
+    for (account_key,) in cursor.fetchall():
+        if account_key not in live_keys:
+            cursor.execute(
+                """DELETE FROM nickname_alt_absences
+                   WHERE guild_id = ? AND discord_id = ? AND account_key = ?""",
+                (guild_id, discord_id, account_key),
+            )
+
+    return visible_alts
 
 
 
@@ -1854,51 +1975,44 @@ class TasksCog(commands.Cog):
             wom_by_username
         )
 
-        # WOM is authoritative for the primary RSN. Preserve any currently
-        # linked in-clan alts after the member's existing '|' or '/' separator.
-        if (
-            primary_rsn_changed
-            and current_rsn
-        ):
+        # Only a positively verified primary WOM membership authorizes
+        # rewriting the nickname. WOM sometimes temporarily loses accounts
+        # after a rename; a missing roster record must never strip a valid
+        # primary or newly renamed linked alt.
+        nickname_alts = []
+        primary_wom_verified = membership is not None
+        if primary_wom_verified and current_rsn:
+            nickname_alts = nickname_alts_with_wom_safety(
+                cursor,
+                guild.id,
+                member.id,
+                member.nick,
+                verified_alts,
+            )
             desired_nickname = build_wom_server_nickname(
                 current_rsn,
-                verified_alts,
-                member.nick
+                nickname_alts,
+                member.nick,
             )
-
-            if (
-                desired_nickname
-                and member.nick != desired_nickname
-            ):
+            if desired_nickname and member.nick != desired_nickname:
                 try:
                     await member.edit(
                         nick=desired_nickname,
-                        reason=(
-                            "Primary RSN renamed in Wise Old Man"
-                        )
+                        reason="Verified Novus WOM primary/alt nickname sync",
                     )
                     nickname_updated_from_wom = True
                 except discord.Forbidden:
                     nickname_update_failed = True
                     logger.warning(
-                        "Could not update Novus nickname for %s (%s) "
-                        "after WOM rename %r -> %r: missing role hierarchy "
-                        "or Manage Nicknames permission.",
-                        member,
-                        member.id,
-                        previous_primary_rsn,
-                        current_rsn,
+                        "Could not update WOM nickname for %s (%s): "
+                        "missing Manage Nicknames permission or role hierarchy.",
+                        member, member.id,
                     )
-                except Exception as e:
+                except Exception:
                     nickname_update_failed = True
-                    logger.error(
-                        "Nickname update failed for %s (%s) after WOM "
-                        "rename %r -> %r: %s",
-                        member,
-                        member.id,
-                        previous_primary_rsn,
-                        current_rsn,
-                        e,
+                    logger.exception(
+                        "Could not update WOM nickname for %s (%s)",
+                        member, member.id,
                     )
 
         account_tenures = (
@@ -2308,6 +2422,8 @@ class TasksCog(commands.Cog):
             "roles_removed": roles_to_remove,
             "verified_alts": verified_alts,
             "missing_alts": missing_alts,
+            "nickname_alts": nickname_alts,
+            "primary_wom_verified": primary_wom_verified,
             "user_dm_on": user_dm_on,
             "primary_rsn_changed": primary_rsn_changed,
             "previous_primary_rsn": previous_primary_rsn,
@@ -5099,46 +5215,9 @@ class TasksCog(commands.Cog):
                         f"Could not DM {member.id}: {e}"
                     )
 
-            # Optional continuous enforcement keeps the exact current WOM
-            # primary RSN plus any currently linked in-clan alts. Preserve the
-            # member's existing '/' versus '|' separator style.
-            if nickname_enforcement:
-                desired_nickname = build_wom_server_nickname(
-                    result.get(
-                        "rsn"
-                    ),
-                    result.get(
-                        "verified_alts",
-                        []
-                    ),
-                    member.nick
-                )
-
-                if (
-                    desired_nickname
-                    and member.nick != desired_nickname
-                ):
-                    try:
-                        await member.edit(
-                            nick=desired_nickname,
-                            reason=(
-                                "Novus WOM linked-account nickname enforcement"
-                            )
-                        )
-                    except discord.Forbidden:
-                        logger.warning(
-                            "Could not enforce WOM nickname for %s (%s): "
-                            "missing role hierarchy or Manage Nicknames permission.",
-                            member,
-                            member.id,
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "Could not enforce WOM nickname for %s (%s): %s",
-                            member,
-                            member.id,
-                            e,
-                        )
+            # Nicknames are already reconciled in sync_one_member, including
+            # /syncall, with a rename-safe grace period. Do not re-enforce
+            # against raw WOM roster results here or bypass that safeguard.
 
         promotion_audit = (
             self.get_promotion_audit_entries(

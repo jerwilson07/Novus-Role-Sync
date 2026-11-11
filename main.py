@@ -378,7 +378,7 @@ class WOMBot(
     ):
         intents = discord.Intents.default()
         intents.members = True
-        intents.message_content = False
+        intents.message_content = os.getenv("EXPORT_MESSAGE_CONTENT_ENABLED", "").lower() == "true"
 
         super().__init__(
             command_prefix="!",
@@ -711,6 +711,7 @@ class WOMBot(
             "trials",
             "tenure",
             "promotions",
+            "exportchat",
         }
         registered_commands = self.tree.get_commands()
         registered_names = {command.name for command in registered_commands}

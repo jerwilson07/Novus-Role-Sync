@@ -96,16 +96,21 @@ def find_primary_wom_membership(rsn, wom_id, memberships):
         return None
 
     if wom_id is not None:
+        # A verified ID is authoritative. If WOM temporarily loses this
+        # player, never reassign the link to a different player who happens
+        # to use the saved RSN (including a recycled name).
         for entry in memberships:
             if isinstance(entry, dict) and isinstance(entry.get("player"), dict):
                 if entry["player"].get("id") == wom_id:
                     return entry
+        return None
 
     if rsn:
+        candidate_key = sanitize_rsn(rsn).casefold()
         for entry in memberships:
             if isinstance(entry, dict) and isinstance(entry.get("player"), dict):
                 username = entry["player"].get("username")
-                if username and username.casefold() == rsn.casefold():
+                if username and sanitize_rsn(username).casefold() == candidate_key:
                     return entry
     return None
 

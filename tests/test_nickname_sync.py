@@ -153,11 +153,34 @@ class NicknameSyncTests(unittest.TestCase):
             "Vecs | OldAlt", desired, START + dt.timedelta(hours=24)
         ))
 
-    def test_unknown_wom_id_is_preserved_until_identity_verified(self):
+    def test_unknown_wom_id_alt_is_removed_only_after_24_hour_confirmation(self):
         self.add_alt("PotentialRename", None)
-        self.assertEqual(
-            self.nickname_alts("Vecs | PotentialRename"), ["PotentialRename"]
+        visible = self.nickname_alts("Vecs | PotentialRename")
+        self.assertEqual(visible, [])
+        proposed = build_wom_server_nickname(
+            "Vecs", visible, "Vecs | PotentialRename"
         )
+        self.assertEqual(proposed, "Vecs")
+        self.assertFalse(self.confirmed("Vecs | PotentialRename", proposed, START))
+        self.assertFalse(self.confirmed(
+            "Vecs | PotentialRename", proposed, START + dt.timedelta(hours=23)
+        ))
+        self.assertTrue(self.confirmed(
+            "Vecs | PotentialRename", proposed, START + dt.timedelta(hours=24)
+        ))
+        # Historical link and tenure eligibility are never deleted by cleanup.
+        self.assertEqual(
+            self.cursor.execute("SELECT rsn, wom_id FROM alt_links").fetchall(),
+            [("PotentialRename", None)]
+        )
+
+    def test_unlinked_manually_typed_alt_is_removed_after_24_hours(self):
+        visible = self.nickname_alts("Vecs | ManualAlt")
+        self.assertEqual(visible, [])
+        self.assertFalse(self.confirmed("Vecs | ManualAlt", "Vecs", START))
+        self.assertTrue(self.confirmed(
+            "Vecs | ManualAlt", "Vecs", START + dt.timedelta(hours=24)
+        ))
 
     def test_completed_change_clears_old_pending_state(self):
         self.assertFalse(self.confirmed("Old", "New", START))

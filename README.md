@@ -6,7 +6,7 @@ The WOM Role Sync Discord Bot is a Python-based application that automatically s
 ## Features
 
 *   **Automatic Role Synchronization:** Syncs current Novus members daily using the WOM API. Historical clan activity is refreshed separately every two hours.
-*   **Focused Discord Commands:** Only the four operational commands are visible: `/audit`, `/syncall`, `/autolink`, and `/trials`.
+*   **Focused Discord Commands:** Operational commands plus the owner-only `/exportchat` command (hidden by default).
 *   **Nickname Enforcement:** Option to enforce member nicknames to match their RuneScape Name (RSN).
 *   **DM Notifications:** Users can opt-in to receive direct messages when their roles are changed.
 *   **Inactivity Reminders:** Admins can be prompted to re-sync their WOM group if it becomes inactive.
@@ -88,3 +88,16 @@ the source repository but are not registered as Discord slash commands.
 ## License
 
 This project is open-source and available under the MIT License.
+
+## Private staff channel export
+
+The `/exportchat` command is restricted in code to Discord user ID `534469721802670093` and to `#council-chat` or `#mod-chat`. Responses and attached JSON files are ephemeral. It exports up to 1000 messages per invocation; use the returned `before` message ID to page through older history. These exports contain private staff conversations, so keep the downloaded files confidential.
+
+**Activation required before using:**
+
+1. In the Discord Developer Portal for this bot, enable **Bot → Privileged Gateway Intents → Message Content Intent**.
+2. In Railway, set `EXPORT_MESSAGE_CONTENT_ENABLED=true`, then redeploy. Without both settings, the command will refuse to export, to avoid silently returning empty message bodies. Do not enable the environment flag until the portal intent is enabled or Discord may reject the bot's connection.
+3. In **Server Settings → Integrations → the bot → Commands → /exportchat**, grant permission to the owner's user account and deny `@everyone` and unwanted roles. The command has zero default member permissions. Discord administrators may still be able to discover/manage it. A hard-coded user ID check is the definitive execution restriction.
+4. Make sure the bot has View Channel, Read Message History, and Attach Files permissions for both staff channels. The bot must have Message Content intent to retrieve message text.
+
+Note: Slash command registration is global and may take time to propagate. No channel message is posted when exporting. Discord audit systems and administrators are not guaranteed to be unaware that the command exists.

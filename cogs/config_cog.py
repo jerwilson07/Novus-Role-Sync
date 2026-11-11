@@ -1008,7 +1008,6 @@ class ConfigCog(commands.Cog):
             if player_id in claimed_by_id:
                 continue
 
-            attempts += 1
             old_names = None
             cursor.execute(
                 """SELECT fetched_at, names_json

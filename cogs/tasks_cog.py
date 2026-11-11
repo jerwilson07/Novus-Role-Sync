@@ -312,28 +312,12 @@ def nickname_alts_with_wom_safety(
     verified_alts: list[str],
     now: datetime.datetime | None = None,
 ) -> list[str]:
-    """Keep verified alts, but protect temporarily missing WOM-linked accounts.
+    """Use current verified WOM alts; avoid guessing missing identities.
 
-    Unlinked text after a Discord nickname separator is always discarded.
-    A linked alt absent from the WOM roster is retained for 24 hours if
-    already in the nickname. Stable WOM IDs protect real renames. Missing
-    linked alts with no known WOM ID are kept until identity can be verified.
+    Name additions/removals are separately held by the shared 24-hour
+    candidate timer below. An unverified linked alt with no player ID is
+    retained if already displayed, because an RSN change cannot be tracked.
     """
-    now = now or datetime.datetime.now(datetime.timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=datetime.timezone.utc)
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS nickname_alt_absences (
-            guild_id INTEGER NOT NULL,
-            discord_id INTEGER NOT NULL,
-            account_key TEXT NOT NULL,
-            first_missing_at TEXT NOT NULL,
-            PRIMARY KEY (guild_id, discord_id, account_key)
-        )
-        """
-    )
     cursor.execute(
         """
         SELECT rsn, wom_id FROM alt_links
@@ -346,82 +330,85 @@ def nickname_alts_with_wom_safety(
     verified_keys = {
         alt.casefold() for alt in verified_alts if alt
     }
-    nickname_parts = re.split(r"\s*[|/]\s*", current_nickname or "")
-    displayed_alt_keys = {
+    displayed = {
         part.strip().casefold()
-        for part in nickname_parts[1:]
+        for part in re.split(r"\s*[|/]\s*", current_nickname or "")[1:]
         if part.strip()
     }
-    visible_alts = []
-    live_keys = set()
-
+    visible = []
+    seen = set()
     for alt_rsn, wom_id in saved_alts:
         if not alt_rsn:
             continue
-        account_key = (
-            f"id:{wom_id}"
-            if wom_id is not None
-            else f"rsn:{alt_rsn.casefold()}"
-        )
-        live_keys.add(account_key)
-        if alt_rsn.casefold() in verified_keys:
-            cursor.execute(
-                """DELETE FROM nickname_alt_absences
-                   WHERE guild_id = ? AND discord_id = ? AND account_key = ?""",
-                (guild_id, discord_id, account_key),
-            )
-            visible_alts.append(alt_rsn)
+        key = alt_rsn.casefold()
+        if key in seen:
             continue
+        if key in verified_keys or (wom_id is None and key in displayed):
+            visible.append(alt_rsn)
+            seen.add(key)
+    return visible
 
-        # Missing from a single WOM roster is NOT a confirmed clan departure.
-        cursor.execute(
-            """INSERT OR IGNORE INTO nickname_alt_absences
-               (guild_id, discord_id, account_key, first_missing_at)
-               VALUES (?, ?, ?, ?)""",
-            (guild_id, discord_id, account_key, now.isoformat()),
-        )
-        cursor.execute(
-            """SELECT first_missing_at FROM nickname_alt_absences
-               WHERE guild_id = ? AND discord_id = ? AND account_key = ?""",
-            (guild_id, discord_id, account_key),
-        )
-        first_missing_at = datetime.datetime.fromisoformat(
-            cursor.fetchone()[0]
-        )
-        if first_missing_at.tzinfo is None:
-            first_missing_at = first_missing_at.replace(
-                tzinfo=datetime.timezone.utc
-            )
 
-        # For an alt whose WOM ID is unknown, a rename cannot be
-        # distinguished from departure: never strip it automatically.
-        in_grace_period = (
-            wom_id is None
-            or now - first_missing_at < datetime.timedelta(hours=24)
-        )
-        if (
-            in_grace_period
-            and alt_rsn.casefold() in displayed_alt_keys
-        ):
-            visible_alts.append(alt_rsn)
+def nickname_change_confirmed(
+    cursor,
+    guild_id: int,
+    discord_id: int,
+    current_nickname: str | None,
+    proposed_nickname: str | None,
+    now: datetime.datetime | None = None,
+) -> bool:
+    """Require the identical WOM-derived nickname on checks >=24h apart.
 
-    # Forget only nickname grace-state for unlinked accounts, never
-    # the actual saved account link or individual tenure history.
+    Changes to a pending candidate reset the clock. A match to the current
+    nickname clears stale pending changes. No actual Discord edit occurs here.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+
     cursor.execute(
-        """SELECT account_key FROM nickname_alt_absences
+        """
+        CREATE TABLE IF NOT EXISTS nickname_change_candidates (
+            guild_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            proposed_nickname TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, discord_id)
+        )
+        """
+    )
+
+    if not proposed_nickname or proposed_nickname == current_nickname:
+        cursor.execute(
+            """DELETE FROM nickname_change_candidates
+               WHERE guild_id = ? AND discord_id = ?""",
+            (guild_id, discord_id),
+        )
+        return False
+
+    cursor.execute(
+        """SELECT proposed_nickname, first_seen_at
+           FROM nickname_change_candidates
            WHERE guild_id = ? AND discord_id = ?""",
         (guild_id, discord_id),
     )
-    for (account_key,) in cursor.fetchall():
-        if account_key not in live_keys:
-            cursor.execute(
-                """DELETE FROM nickname_alt_absences
-                   WHERE guild_id = ? AND discord_id = ? AND account_key = ?""",
-                (guild_id, discord_id, account_key),
-            )
+    row = cursor.fetchone()
+    if not row or row[0] != proposed_nickname:
+        cursor.execute(
+            """INSERT INTO nickname_change_candidates
+               (guild_id, discord_id, proposed_nickname, first_seen_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(guild_id, discord_id)
+               DO UPDATE SET proposed_nickname = excluded.proposed_nickname,
+                             first_seen_at = excluded.first_seen_at""",
+            (guild_id, discord_id, proposed_nickname, now.isoformat()),
+        )
+        return False
 
-    return visible_alts
-
+    first_seen = datetime.datetime.fromisoformat(row[1])
+    if first_seen.tzinfo is None:
+        first_seen = first_seen.replace(tzinfo=datetime.timezone.utc)
+    return now - first_seen >= datetime.timedelta(hours=24)
 
 
 
@@ -1994,13 +1981,23 @@ class TasksCog(commands.Cog):
                 nickname_alts,
                 member.nick,
             )
-            if desired_nickname and member.nick != desired_nickname:
+            if nickname_change_confirmed(
+                cursor,
+                guild.id,
+                member.id,
+                member.nick,
+                desired_nickname,
+            ):
                 try:
                     await member.edit(
                         nick=desired_nickname,
-                        reason="Verified Novus WOM primary/alt nickname sync",
+                        reason="Novus WOM nickname confirmed stable for 24 hours",
                     )
                     nickname_updated_from_wom = True
+                    nickname_change_confirmed(
+                        cursor, guild.id, member.id, desired_nickname,
+                        desired_nickname,
+                    )
                 except discord.Forbidden:
                     nickname_update_failed = True
                     logger.warning(
@@ -2014,6 +2011,13 @@ class TasksCog(commands.Cog):
                         "Could not update WOM nickname for %s (%s)",
                         member, member.id,
                     )
+        else:
+            # A missing primary WOM record makes every proposed rename
+            # untrustworthy. Discard pending changes and start fresh when
+            # the primary can be verified again.
+            nickname_change_confirmed(
+                cursor, guild.id, member.id, member.nick, member.nick,
+            )
 
         account_tenures = (
             self.get_linked_account_tenures(

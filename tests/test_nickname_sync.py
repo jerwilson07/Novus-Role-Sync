@@ -58,6 +58,32 @@ class NicknameSyncTests(unittest.TestCase):
             "Vecs",
         )
 
+    def test_spilled_primary_rename_to_dctr_after_24_hours(self):
+        # The stable WOM player ID is used by sync_one_member to read
+        # the current name Dctr and propose this server nickname.
+        desired = build_wom_server_nickname("Dctr", [], "spilled")
+        self.assertEqual(desired, "Dctr")
+        self.assertFalse(self.confirmed("spilled", desired, START))
+        self.assertFalse(self.confirmed(
+            "spilled", desired, START + dt.timedelta(hours=23)
+        ))
+        self.assertTrue(self.confirmed(
+            "spilled", desired, START + dt.timedelta(hours=24)
+        ))
+
+    def test_unlinked_manual_alt_still_present_in_wom_is_preserved(self):
+        # Do not remove a nickname's alt merely because the bot has no
+        # alt_links row when the alt is demonstrably on the current roster.
+        visible = nickname_alts_with_wom_safety(
+            self.cursor, 1, 2, "Vecs | ActiveAlt", [],
+            in_clan_names={"activealt": "ActiveAlt"},
+        )
+        self.assertEqual(visible, ["ActiveAlt"])
+        self.assertEqual(
+            build_wom_server_nickname("Vecs", visible, "Vecs | ActiveAlt"),
+            "Vecs | ActiveAlt",
+        )
+
     def test_no_name_changes_without_24_hour_second_check(self):
         for initial, proposed in (
             ("Vecs", "Vecs | NewAlt"),

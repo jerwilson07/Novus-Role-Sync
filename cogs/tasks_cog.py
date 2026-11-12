@@ -250,10 +250,9 @@ def build_wom_server_nickname(
 ) -> str:
     """Build a Discord server nickname from the current WOM primary + alts.
 
-    True RSN changes update the primary, while capitalization-only WOM
-    differences are ignored. Current in-clan linked alts may remain after the
-    primary. Preserve the member's
-    existing '/' versus '|' separator style when possible.
+    Primary and alt names use the exact capitalization currently reported by
+    WOM. Current in-clan linked alts may remain after the primary. Preserve
+    the member's existing '/' versus '|' separator style when possible.
     """
     if not primary_rsn:
         return ""
@@ -1192,15 +1191,9 @@ class TasksCog(commands.Cog):
                 alt_rsn
             )
 
-            if (
-                alt_rsn
-                and wom_reported_alt_rsn
-                and alt_rsn.casefold()
-                    == wom_reported_alt_rsn.casefold()
-            ):
-                current_alt_rsn = alt_rsn
-            else:
-                current_alt_rsn = wom_reported_alt_rsn
+            # WOM is authoritative for display casing, even when the RSN
+            # only differs from the stored link by capitalization.
+            current_alt_rsn = wom_reported_alt_rsn or alt_rsn
 
             current_alt_id = player.get(
                 "id",
@@ -1212,8 +1205,7 @@ class TasksCog(commands.Cog):
                 or (
                     current_alt_rsn
                     and alt_rsn
-                    and current_alt_rsn.casefold()
-                        != alt_rsn.casefold()
+                    and current_alt_rsn != alt_rsn
                 )
             ):
                 cursor.execute(
@@ -1354,15 +1346,7 @@ class TasksCog(commands.Cog):
                 stored_rsn
             )
 
-            if (
-                stored_rsn
-                and wom_reported_rsn
-                and stored_rsn.casefold()
-                    == wom_reported_rsn.casefold()
-            ):
-                current_rsn = stored_rsn
-            else:
-                current_rsn = wom_reported_rsn
+            current_rsn = wom_reported_rsn or stored_rsn
 
             wom_role = (
                 membership.get(
@@ -2067,16 +2051,9 @@ class TasksCog(commands.Cog):
                 rsn
             )
 
-            if (
-                rsn
-                and wom_reported_rsn
-                and rsn.casefold()
-                    == wom_reported_rsn.casefold()
-            ):
-                # Case-only differences are not treated as name changes.
-                current_rsn = rsn
-            else:
-                current_rsn = wom_reported_rsn
+            # Display the exact current WOM capitalization while keeping
+            # player-ID matching independent of letter case.
+            current_rsn = wom_reported_rsn or rsn
 
             current_wom_id = player.get(
                 "id"
@@ -2098,7 +2075,7 @@ class TasksCog(commands.Cog):
 
             if (
                 current_wom_id != wom_id
-                or primary_rsn_changed
+                or current_rsn != rsn
             ):
                 cursor.execute(
                     """

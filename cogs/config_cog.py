@@ -1720,11 +1720,9 @@ class ConfigCog(commands.Cog):
                             == actual_primary_rsn.casefold()
                     )
 
-                    stored_primary_rsn = (
-                        old_rsn
-                        if same_rsn_ignoring_case
-                        else actual_primary_rsn
-                    )
+                    # Display spelling/case comes from the verified WOM
+                    # account, not the previously stored Discord name.
+                    stored_primary_rsn = actual_primary_rsn
 
                     true_name_change = bool(
                         old_rsn
@@ -1734,7 +1732,7 @@ class ConfigCog(commands.Cog):
 
                     if (
                         old_wom_id != primary_wom_id
-                        or true_name_change
+                        or old_rsn != stored_primary_rsn
                     ):
                         c.execute(
                             """
@@ -1844,12 +1842,7 @@ class ConfigCog(commands.Cog):
                             )
                         )
 
-                        if not (
-                            stored_alt_rsn
-                            and actual_alt_rsn
-                            and stored_alt_rsn.casefold()
-                                == actual_alt_rsn.casefold()
-                        ):
+                        if stored_alt_rsn != actual_alt_rsn:
                             c.execute(
                                 """
                                 UPDATE alt_links

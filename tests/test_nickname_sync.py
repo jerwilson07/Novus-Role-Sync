@@ -256,5 +256,48 @@ class NicknameSyncTests(unittest.TestCase):
         self.assertFalse(self.confirmed("New", "Another", START + dt.timedelta(hours=25)))
 
 
+    def test_primary_and_alt_capitalization_matches_live_wom_after_24_hours(self):
+        # Case-only changes should be proposed, but never skip the grace period.
+        desired = build_wom_server_nickname(
+            "Mavara", ["Ozilda"], "mavara | ozilda"
+        )
+        self.assertEqual(desired, "Mavara | Ozilda")
+        self.assertFalse(self.confirmed("mavara | ozilda", desired, START))
+        self.assertFalse(self.confirmed(
+            "mavara | ozilda", desired,
+            START + dt.timedelta(hours=23),
+        ))
+        self.assertTrue(self.confirmed(
+            "mavara | ozilda", desired,
+            START + dt.timedelta(hours=24),
+        ))
+
+    def test_linked_alt_case_only_change_refreshes_database_and_nickname(self):
+        self.add_alt("ozilda", 2345)
+        cog = TasksCog.__new__(TasksCog)
+        membership = {"player": {"id": 2345, "username": "Ozilda"}}
+        verified, missing = cog.sync_alt_links_in_database(
+            self.cursor, 1, 2, {2345: membership}, {"ozilda": membership}
+        )
+        self.assertEqual((verified, missing), (["Ozilda"], []))
+        self.assertEqual(
+            self.cursor.execute("SELECT rsn, wom_id FROM alt_links").fetchall(),
+            [("Ozilda", 2345)],
+        )
+        visible = self.nickname_alts("Mavara | ozilda", verified)
+        self.assertEqual(visible, ["Ozilda"])
+        self.assertEqual(
+            build_wom_server_nickname("Mavara", visible, "Mavara | ozilda"),
+            "Mavara | Ozilda",
+        )
+
+    def test_unlinked_manual_alt_adopts_wom_capitalization(self):
+        visible = nickname_alts_with_wom_safety(
+            self.cursor, 1, 2, "Mavara | ozilda", [],
+            in_clan_names={"ozilda": "Ozilda"},
+        )
+        self.assertEqual(visible, ["Ozilda"])
+
+
 if __name__ == "__main__":
     unittest.main()

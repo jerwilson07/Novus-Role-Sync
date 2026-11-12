@@ -19,7 +19,7 @@ from common import (
 from tenure_history import cumulative_effective_join
 from cogs.tasks_cog import (
     TENURE_RANK_ORDER, tenure_eligible_at, get_membership_joined_at,
-    NOVUS_TRIAL_WOM_RANKS,
+    NOVUS_TRIAL_WOM_RANKS, nickname_change_confirmed,
 )
 from typing import List
 
@@ -810,6 +810,21 @@ class ConfigCog(commands.Cog):
         primary_rsn = unique_accounts[0]
         alt_rsns = unique_accounts[1:]
 
+        # Staff-entered names are applied immediately to the Discord nickname.
+        # Preserve the requested separator and never truncate account names
+        # to fit Discord's maximum 32-character nickname.
+        separator = " / " if "/" in rsn and "|" not in rsn else " | "
+        desired_nickname = separator.join(unique_accounts)
+        if len(desired_nickname) > 32:
+            conn.close()
+            await interaction.response.send_message(
+                "That linked nickname is longer than Discord's 32-character "
+                "limit. Shorten the list of visible alts and try again; "
+                "no links were changed.",
+                ephemeral=True,
+            )
+            return
+
         c.execute(
             """
             INSERT INTO links (
@@ -862,31 +877,60 @@ class ConfigCog(commands.Cog):
             )
 
         conn.commit()
+
+        # Staff-authorized manual linking sets the nickname immediately.
+        # Subsequent WOM-driven automatic edits still require a stable
+        # 24-hour candidate; they are not part of this manual action.
+        await interaction.response.defer(ephemeral=True)
+        nickname_status = f"**Discord nickname:** `{desired_nickname}`"
+        nickname_applied = user.nick == desired_nickname
+        if not nickname_applied:
+            try:
+                await user.edit(
+                    nick=desired_nickname,
+                    reason=f"Novus manual account link by {interaction.user}",
+                )
+                nickname_applied = True
+            except discord.Forbidden:
+                logger.warning(
+                    "Manual link saved but insufficient permissions to rename "
+                    "Discord member %s (%s).", user, user.id,
+                )
+                nickname_status = (
+                    "**Discord nickname:** Couldn't update (check Manage "
+                    "Nicknames permission and bot role hierarchy)."
+                )
+            except discord.HTTPException:
+                logger.exception(
+                    "Manual link saved but Discord rejected nickname for %s (%s)",
+                    user, user.id,
+                )
+                nickname_status = (
+                    "**Discord nickname:** Couldn't update (Discord API error)."
+                )
+
+        if nickname_applied:
+            # Clear any stale automatic candidate after a successful staff edit.
+            nickname_change_confirmed(
+                c, interaction.guild_id, user.id,
+                desired_nickname, desired_nickname,
+            )
+            conn.commit()
         conn.close()
 
-        if alt_rsns:
-            alt_text = "\n".join(
-                f"- `{alt}`"
-                for alt in alt_rsns
-            )
-
-            await interaction.response.send_message(
-                f"Linked {user.mention}.\n\n"
-                f"**Primary RSN:** `{primary_rsn}`\n"
-                f"**Alt accounts:**\n"
-                f"{alt_text}\n\n"
-                f"Primary and alt tenure stay separate; the highest independently earned "
-                f"linked-account tenure can raise the member's Discord tenure role.",
-                ephemeral=True
-            )
-
-        else:
-            await interaction.response.send_message(
-                f"Linked {user.mention}.\n\n"
-                f"**Primary RSN:** `{primary_rsn}`\n"
-                f"**Alt accounts:** None",
-                ephemeral=True
-            )
+        alt_text = (
+            "\n".join(f"- `{alt}`" for alt in alt_rsns)
+            if alt_rsns else "None"
+        )
+        await interaction.followup.send(
+            f"Linked {user.mention}.\n\n"
+            f"**Primary RSN:** `{primary_rsn}`\n"
+            f"**Alt accounts:**\n{alt_text}\n\n"
+            f"{nickname_status}\n\n"
+            "Primary and alt tenure stay separate; the highest independently "
+            "earned linked-account tenure can raise the member's Discord tenure role.",
+            ephemeral=True,
+        )
 
     # ========================================================
     # AUTOMATIC USER LINKING

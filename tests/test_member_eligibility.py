@@ -123,10 +123,10 @@ class ActiveMembershipTests(unittest.TestCase):
             discord_user((202, "Verified"))
         ))
         self.assertFalse(can_manually_link_novus_member(
-            discord_user((200, "Member"), (203, "Guest"))
+            discord_user((200, "Member"), (GUEST_ROLE_ID, "Guest"))
         ))
         self.assertFalse(can_manually_link_novus_member(
-            discord_user((201, "Trial Member"), (204, "Clan Friend"))
+            discord_user((201, "Trial Member"), (CLAN_FRIEND_ROLE_ID, "Clan Friend"))
         ))
 
 

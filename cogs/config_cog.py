@@ -59,6 +59,16 @@ def has_novus_command_permission(member: discord.Member) -> bool:
     )
 
 
+def can_manually_link_novus_member(member) -> bool:
+    """Allow manual linking for Novus Members or Trial Members only."""
+    if member is None or has_non_clan_role(member):
+        return False
+    return has_novus_member_role(member) or any(
+        getattr(role, "name", "").strip().casefold() == "trial member"
+        for role in member.roles
+    )
+
+
 def build_wom_headers():
     headers = {
         "User-Agent": "NovusRoleSync/1.0"
@@ -730,9 +740,9 @@ class ConfigCog(commands.Cog):
             )
             return
 
-        if not has_novus_member_role(user):
+        if not can_manually_link_novus_member(user):
             await interaction.response.send_message(
-                f"{user.mention} doesn't have the Novus Discord Member role. "
+                f"{user.mention} needs the Novus Member or Trial Member role. "
                 "Verified alone does not qualify for clan linking.",
                 ephemeral=True
             )

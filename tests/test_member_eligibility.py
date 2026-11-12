@@ -1,6 +1,7 @@
 """Regression tests for Novus active membership: WOM AND Discord Member role."""
 
 import unittest
+from cogs.config_cog import can_manually_link_novus_member
 from types import SimpleNamespace
 
 from common import (
@@ -109,6 +110,23 @@ class ActiveMembershipTests(unittest.TestCase):
         ))
         self.assertFalse(is_active_novus_member_link(
             MEMBER, "Former Main", 999, ROSTER
+        ))
+
+    def test_manual_linking_allows_novus_members_and_trials_only(self):
+        self.assertTrue(can_manually_link_novus_member(
+            discord_user((200, "Member"))
+        ))
+        self.assertTrue(can_manually_link_novus_member(
+            discord_user((201, "Trial Member"))
+        ))
+        self.assertFalse(can_manually_link_novus_member(
+            discord_user((202, "Verified"))
+        ))
+        self.assertFalse(can_manually_link_novus_member(
+            discord_user((200, "Member"), (203, "Guest"))
+        ))
+        self.assertFalse(can_manually_link_novus_member(
+            discord_user((201, "Trial Member"), (204, "Clan Friend"))
         ))
 
 

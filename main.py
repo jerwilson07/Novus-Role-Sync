@@ -714,10 +714,12 @@ class WOMBot(
 
         # Keep the operational Novus staff commands visible while leaving
         # configuration/maintenance commands implemented but hidden.
+        # /linkuser is a staff-only manual account-linking command.
         allowed_commands = {
             "audit",
             "syncall",
             "autolink",
+            "linkuser",
             "trials",
             "tenure",
             "promotions",

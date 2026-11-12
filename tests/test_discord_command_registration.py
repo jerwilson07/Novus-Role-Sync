@@ -15,7 +15,7 @@ class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
             for name in (
                 "audit", "syncall", "autolink", "trials", "tenure",
                 "promotions", "tenurehistory", "tenurecredit", "linkuser",
-                "syncuser",
+                "syncuser", "exportchat",
             ):
                 tree.add_command(app_commands.Command(
                     name=name, description=f"{name} test", callback=handler
@@ -25,9 +25,11 @@ class SlashCommandTests(unittest.IsolatedAsyncioTestCase):
                 "audit",
                 "syncall",
                 "autolink",
+                "linkuser",
                 "trials",
                 "tenure",
                 "promotions",
+                "exportchat",
             }
             for command in tree.get_commands():
                 if command.name not in allowed:

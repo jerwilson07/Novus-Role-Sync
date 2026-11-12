@@ -103,7 +103,7 @@ class ManualLinkNicknameTests(unittest.IsolatedAsyncioTestCase):
     async def test_old_candidate_is_cleared_after_manual_edit(self):
         with self.real_connect(self.path) as c:
             nickname_change_confirmed(
-                c, 1, 2, "old nick", "Old Pending",
+                c.cursor(), 1, 2, "old nick", "Old Pending",
             )
         self.assertEqual(
             len(self.read("SELECT * FROM nickname_change_candidates")), 1

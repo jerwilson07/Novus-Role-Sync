@@ -118,7 +118,7 @@ class ManualLinkNicknameTests(unittest.IsolatedAsyncioTestCase):
             c.execute(
                 "INSERT INTO links VALUES (?,?,?,?)", (1, 2, "OldName", 99)
             )
-        await self.link("Mavara | 123456789012 | 123456789012")
+        await self.link("Mavara | 123456789012 | 123456789013")
         self.member.edit.assert_not_awaited()
         self.interaction.response.send_message.assert_awaited_once()
         self.assertIn(

@@ -4715,193 +4715,131 @@ class TasksCog(commands.Cog):
         guild: discord.Guild,
         group_data: dict
     ):
-        """Remove stale Discord Trial Member roles.
+        """Graduate a verified in-clan trial to Member, never the reverse.
 
-        Trial Member is valid only when the Discord user has a saved linked RSN
-        whose current WOM role is gnome_child. No nickname/name guessing is used.
-        Saved links/history are preserved.
+        Only a positively verified linked *primary* WOM account with a tenure
+        rank (squire/duellist/inquisitor/expert/knight/paladin) authorizes the
+        transition. Add Member first, and remove Trial Member only if that
+        succeeds. Missing WOM data, name changes, or non-tenure ranks do not
+        remove Trial Member. Neither action can remove Member.
         """
-
         trial_role = next(
             (
-                role
-                for role in guild.roles
-                if getattr(
-                    role,
-                    "name",
-                    ""
-                ).strip().casefold()
+                role for role in guild.roles
+                if getattr(role, "name", "").strip().casefold()
                     == NOVUS_TRIAL_DISCORD_ROLE_NAME
             ),
-            None
+            None,
         )
-
         if trial_role is None:
-            return {
-                "cleaned": [],
-                "failed": [],
-                "role_missing": True,
-            }
+            return {"cleaned": [], "failed": [], "role_missing": True}
 
-        memberships = group_data.get(
-            "memberships",
-            []
+        member_role = next(
+            (
+                role for role in guild.roles
+                if getattr(role, "name", "").strip().casefold() == "member"
+            ),
+            None,
         )
 
+        memberships = group_data.get("memberships", [])
         wom_by_id = {
-            membership["player"]["id"]: membership
-            for membership in memberships
-            if isinstance(
-                membership,
-                dict
-            )
-            and isinstance(
-                membership.get(
-                    "player"
-                ),
-                dict
-            )
-            and membership["player"].get(
-                "id"
-            ) is not None
+            entry["player"]["id"]: entry
+            for entry in memberships
+            if isinstance(entry, dict)
+            and isinstance(entry.get("player"), dict)
+            and entry["player"].get("id") is not None
         }
-
         wom_by_name = {
-            membership["player"]["username"].casefold(): membership
-            for membership in memberships
-            if isinstance(
-                membership,
-                dict
-            )
-            and isinstance(
-                membership.get(
-                    "player"
-                ),
-                dict
-            )
-            and membership["player"].get(
-                "username"
-            )
+            sanitize_rsn(entry["player"]["username"]).casefold(): entry
+            for entry in memberships
+            if isinstance(entry, dict)
+            and isinstance(entry.get("player"), dict)
+            and entry["player"].get("username")
         }
-
         cursor.execute(
-            """
-            SELECT discord_id, rsn, wom_id
-            FROM links
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
+            """SELECT discord_id, rsn, wom_id
+               FROM links WHERE guild_id = ?""",
+            (guild.id,),
         )
-        primary_rows = cursor.fetchall()
-
-        cursor.execute(
-            """
-            SELECT discord_id, rsn, wom_id
-            FROM alt_links
-            WHERE guild_id = ?
-            """,
-            (guild.id,)
-        )
-        alt_rows = cursor.fetchall()
-
-        saved_accounts = {}
-
-        for (
-            discord_id,
-            rsn,
-            wom_id
-        ) in (
-            primary_rows
-            + alt_rows
-        ):
-            saved_accounts.setdefault(
-                discord_id,
-                []
-            ).append(
-                (
-                    rsn,
-                    wom_id
-                )
-            )
+        linked_primaries = {
+            discord_id: (rsn, wom_id)
+            for discord_id, rsn, wom_id in cursor.fetchall()
+        }
 
         cleaned = []
         failed = []
-
-        for member in list(
-            trial_role.members
-        ):
-            still_active_trial = False
-            verified_nontrial = False
-            unverified_saved_account = False
-
-            for (
-                saved_rsn,
-                saved_wom_id
-            ) in saved_accounts.get(
-                member.id,
-                []
-            ):
-                membership = None
-
-                if saved_wom_id is not None:
-                    membership = wom_by_id.get(
-                        saved_wom_id
-                    )
-
-                if (
-                    membership is None
-                    and saved_rsn
-                ):
-                    membership = wom_by_name.get(
-                        saved_rsn.casefold()
-                    )
-
-                if membership is None:
-                    unverified_saved_account = True
-                else:
-                    if membership.get("role", "").casefold() in NOVUS_TRIAL_WOM_RANKS:
-                        still_active_trial = True
-                        break
-                    verified_nontrial = True
-
-            if still_active_trial:
+        for member in list(trial_role.members):
+            if has_non_clan_role(member):
                 continue
 
-            # Missing/renamed/unlinked WOM accounts cannot justify removal.
-            # Only positively verified non-trial WOM memberships may have
-            # a stale Trial Member role removed.
-            if not verified_nontrial or unverified_saved_account:
+            primary = linked_primaries.get(member.id)
+            if primary is None:
+                # No verified account: never infer ownership from nickname.
+                continue
+            saved_rsn, saved_wom_id = primary
+            membership = None
+            if saved_wom_id is not None:
+                membership = wom_by_id.get(saved_wom_id)
+            elif saved_rsn:
+                membership = wom_by_name.get(
+                    sanitize_rsn(saved_rsn).casefold()
+                )
+
+            if membership is None:
+                continue
+
+            verified_rank = str(membership.get("role") or "").strip().casefold()
+            if verified_rank not in NOVUS_TENURE_ROLES:
+                continue
+
+            if member_role is None:
                 failed.append(
-                    f"- {member.mention}: Trial Member retained; "
-                    "WOM trial status unverified (check linked RSN/ID)"
+                    f"- {member.mention}: WOM tenure rank verified but "
+                    "Discord Member role is missing; Trial Member retained"
                 )
                 continue
 
             try:
+                if member_role not in member.roles:
+                    await member.add_roles(
+                        member_role,
+                        reason=(
+                            "Novus WOM verified trial graduation to "
+                            f"{verified_rank}"
+                        ),
+                    )
+
+                # Member has been granted (or was already present) before
+                # removing the Trial Member role. Never revoke Member.
                 await member.remove_roles(
                     trial_role,
                     reason=(
-                        "No saved linked RSN currently has "
-                        "the Novus WOM gnome_child trial role"
-                    )
+                        "Novus WOM verified full-member tenure rank "
+                        f"{verified_rank}"
+                    ),
                 )
                 cleaned.append(
-                    f"- {member.mention}: removed `{trial_role.name}`"
+                    f"- {member.mention}: promoted to Member; "
+                    f"removed `{trial_role.name}` (WOM `{verified_rank}`)"
+                )
+                logger.info(
+                    "Novus trial graduation guild=%s discord=%s rank=%s",
+                    guild.id, member.id, verified_rank,
                 )
             except discord.Forbidden:
                 failed.append(
-                    f"- {member.mention}: could not remove "
-                    f"`{trial_role.name}` (permission/role hierarchy)"
+                    f"- {member.mention}: Trial graduation blocked by "
+                    "Discord permission/role hierarchy; Member never removed"
                 )
             except Exception:
                 logger.exception(
-                    "Failed stale Trial Member cleanup for %s (%s)",
-                    member,
-                    member.id
+                    "Novus Trial Member graduation failed for %s (%s)",
+                    member, member.id,
                 )
                 failed.append(
-                    f"- {member.mention}: unexpected error removing "
-                    f"`{trial_role.name}`"
+                    f"- {member.mention}: unexpected trial graduation error; "
+                    "Member never removed"
                 )
 
         return {

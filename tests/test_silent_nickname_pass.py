@@ -27,6 +27,19 @@ def member(discord_id, nick, role_id, rank=2):
 
 
 class SilentNicknamePassTests(unittest.IsolatedAsyncioTestCase):
+    async def test_completion_marker_retries_a_locked_database(self):
+        first, second = Mock(), Mock()
+        first.execute.side_effect = sqlite3.OperationalError("database is locked")
+        with (
+            patch("cogs.tasks_cog.sqlite3.connect", side_effect=[first, second]),
+            patch("cogs.tasks_cog.asyncio.sleep", new_callable=AsyncMock) as pause,
+        ):
+            await TasksCog._mark_nickname_pass_complete("completed")
+        pause.assert_awaited_once_with(1)
+        first.close.assert_called_once()
+        second.commit.assert_called_once()
+        second.close.assert_called_once()
+
     async def test_edits_only_the_nicknames_for_moderator_trial_mod_and_member(self):
         for role in (MODERATOR_ROLE_ID, TRIAL_MOD_ROLE_ID, 123):
             with self.subTest(role=role):

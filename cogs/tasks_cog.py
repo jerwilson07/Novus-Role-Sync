@@ -1105,21 +1105,34 @@ class TasksCog(commands.Cog):
                         entry["player"].get("displayName") if entry else None,
                     )
 
-            conn = sqlite3.connect("wom_multi.db")
-            try:
-                conn.execute(
-                    "INSERT INTO bot_stats (key, value) VALUES (?, ?)",
-                    (key, datetime.datetime.now(datetime.timezone.utc).isoformat()),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+            await self._mark_nickname_pass_complete(key)
             logger.info(
                 "One-time silent Novus nickname-only pass completed guild=%s links=%s outcomes=%s",
                 guild.id, len(links), counts,
             )
         except Exception:
             logger.exception("One-time Novus nickname-only pass failed for guild %s", guild.id)
+
+    @staticmethod
+    async def _mark_nickname_pass_complete(key):
+        completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        for attempt in range(30):
+            conn = sqlite3.connect("wom_multi.db", timeout=0.1)
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO bot_stats (key, value) VALUES (?, ?)",
+                    (key, completed_at),
+                )
+                conn.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 29:
+                    raise
+            finally:
+                conn.close()
+            # The startup history task can hold a write lock across a WOM
+            # request. Yield so that task can finish and release its lock.
+            await asyncio.sleep(1)
 
     @staticmethod
     async def _sync_nickname_only(member, council_role, rsn, wom_id, memberships, alts):

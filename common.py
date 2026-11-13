@@ -10,6 +10,35 @@ def sanitize_rsn(rsn: str) -> str:
     )
 
 
+def wom_display_rsn(player: dict, fallback: str | None = None) -> str:
+    """Return WOM's capitalization-preserving RSN, not its lowercase username.
+
+    WOM's `username` is a lowercase lookup key; `displayName` is the
+    canonical RuneScape display spelling. When an older/mock WOM payload lacks
+    displayName, preserve a previously linked spelling only if it still
+    matches the same username, otherwise use the verified username.
+    """
+    if not isinstance(player, dict):
+        return fallback or ""
+
+    display_name = player.get("displayName")
+    if isinstance(display_name, str) and display_name.strip():
+        return display_name.strip()
+
+    username = player.get("username")
+    if isinstance(username, str) and username.strip():
+        username = username.strip()
+        if (
+            fallback
+            and sanitize_rsn(fallback).casefold()
+                == sanitize_rsn(username).casefold()
+        ):
+            return fallback
+        return username
+
+    return fallback or ""
+
+
 # Discord roles indicating a person is not an active Novus clan member.
 GUEST_ROLE_ID = 1532905619412226199
 CLAN_FRIEND_ROLE_ID = 1534581044274270388

@@ -250,9 +250,9 @@ def build_wom_server_nickname(
 ) -> str:
     """Build a Discord server nickname from the current WOM primary + alts.
 
-    Primary and alt names use the exact capitalization currently reported by
-    WOM. Current in-clan linked alts may remain after the primary. Preserve
-    the member's existing '/' versus '|' separator style when possible.
+    The primary and each verified, linked in-clan alt retain their exact
+    capitalization from the WOM roster. Preserve the member's existing
+    '/' versus '|' separator style when possible.
     """
     if not primary_rsn:
         return ""
@@ -314,11 +314,11 @@ def nickname_alts_with_wom_safety(
 ) -> list[str]:
     """Use current verified WOM alts; avoid guessing missing identities.
 
-    Name additions/removals are separately held by the shared 24-hour
-    candidate timer below. Alts without confirmed WOM membership are omitted
-    from the proposal, even if linked previously. A manually displayed alt
-    still present in the Novus WOM roster is preserved without assuming
-    ownership or adding a database link.
+    Only accounts explicitly linked to this Discord member and verified in
+    the current WOM roster should appear. WOM is authoritative for casing.
+    Do not infer alt ownership from an existing Discord nickname: an in-clan
+    but unlinked name is not proof that it belongs to this member.
+    Missing linked alts are handled by a 24-hour removal guard during sync.
     """
     cursor.execute(
         """
@@ -334,8 +334,8 @@ def nickname_alts_with_wom_safety(
     def key_for(name):
         return sanitize_rsn(name).casefold()
 
-    verified_keys = {
-        key_for(alt) for alt in verified_alts if alt
+    verified_names = {
+        key_for(alt): alt for alt in verified_alts if alt
     }
     visible = []
     seen = set()
@@ -343,29 +343,44 @@ def nickname_alts_with_wom_safety(
         if not alt_rsn:
             continue
         key = key_for(alt_rsn)
-        if key in seen:
-            continue
-        if key in verified_keys:
-            visible.append(alt_rsn)
+        if key in verified_names and key not in seen:
+            visible.append(verified_names[key])
             seen.add(key)
 
-    # A nickname may contain a genuine in-clan alt that has not yet been
-    # registered. Keep it visible without inferring ownership or linking it.
-    # Only remove nicknames absent from the WOM roster after 24h confirmation.
-    active_names = {
-        key_for(key): value
-        for key, value in (in_clan_names or {}).items()
-        if key and value
-    }
-    for part in re.split(r"\s*[|/]\s*", current_nickname or "")[1:]:
-        candidate = part.strip()
-        if not candidate:
-            continue
-        key = key_for(candidate)
-        if key in active_names and key not in seen:
-            visible.append(active_names[key])
-            seen.add(key)
     return visible
+
+
+def nickname_removal_needs_confirmation(
+    current_nickname: str | None,
+    proposed_nickname: str | None,
+    missing_linked_alts: list[str],
+) -> bool:
+    """Delay stripping a formerly displayed linked alt missing from WOM.
+
+    A temporary WOM roster omission should not immediately remove a linked
+    account from a nickname. Verified primary/alt additions, renames, and
+    capitalization corrections can otherwise apply immediately.
+    """
+    if not current_nickname or not missing_linked_alts:
+        return False
+
+    def normalized(name: str) -> str:
+        return sanitize_rsn(name).casefold()
+
+    current_alts = {
+        normalized(part.strip())
+        for part in re.split(r"\s*[|/]\s*", current_nickname)[1:]
+        if part.strip()
+    }
+    proposed_alts = {
+        normalized(part.strip())
+        for part in re.split(r"\s*[|/]\s*", proposed_nickname or "")[1:]
+        if part.strip()
+    }
+    missing_keys = {
+        normalized(alt) for alt in missing_linked_alts if alt
+    }
+    return bool((current_alts - proposed_alts) & missing_keys)
 
 
 def is_case_only_nickname_change(current_name: str | None, proposed_name: str | None) -> bool:
@@ -942,7 +957,7 @@ class TasksCog(commands.Cog):
         """Run a full Novus sync once after this deploy; retain the noon schedule."""
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
-            key = f"requested_case_sync_20261112_v1:{guild.id}"
+            key = f"requested_linked_nickname_sync_20261112_v2:{guild.id}"
             conn = sqlite3.connect("wom_multi.db")
             try:
                 cursor = conn.cursor()
@@ -1228,6 +1243,7 @@ class TasksCog(commands.Cog):
             FROM alt_links
             WHERE guild_id = ?
             AND discord_id = ?
+            ORDER BY rowid
             """,
             (
                 guild_id,
@@ -2206,26 +2222,36 @@ class TasksCog(commands.Cog):
                 nickname_alts,
                 member.nick,
             )
-            # Capitalization is safe to correct immediately when WOM verifies
-            # the primary RSN; substantive changes retain the 24-hour gate.
-            casing_only = is_case_only_nickname_change(
-                member.nick or member.display_name,
-                desired_nickname,
-            )
-            if casing_only or nickname_change_confirmed(
-                cursor,
-                guild.id,
-                member.id,
+            # Apply verified linked primary + alt names immediately, including
+            # additions and exact WOM capitalization. Only a currently
+            # displayed linked alt missing from WOM needs the 24-hour guard.
+            removal_needs_confirmation = nickname_removal_needs_confirmation(
                 member.nick,
                 desired_nickname,
+                missing_alts,
+            )
+            if member.nick == desired_nickname:
+                nickname_change_confirmed(
+                    cursor, guild.id, member.id, desired_nickname,
+                    desired_nickname,
+                )
+            elif (
+                not removal_needs_confirmation
+                or nickname_change_confirmed(
+                    cursor,
+                    guild.id,
+                    member.id,
+                    member.nick,
+                    desired_nickname,
+                )
             ):
                 try:
                     await member.edit(
                         nick=desired_nickname,
                         reason=(
-                            "Novus WOM verified RSN capitalization correction"
-                            if casing_only
-                            else "Novus WOM nickname confirmed stable for 24 hours"
+                            "Novus WOM verified linked primary/alt nickname sync"
+                            if not removal_needs_confirmation
+                            else "Novus WOM missing-alt removal confirmed for 24 hours"
                         ),
                     )
                     nickname_updated_from_wom = True

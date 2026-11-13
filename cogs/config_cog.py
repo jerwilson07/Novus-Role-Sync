@@ -14,7 +14,7 @@ from common import (
     sanitize_rsn, WOM_API_KEY, has_non_clan_role,
     forget_non_clan_links,
     has_novus_member_role, is_active_novus_member_link,
-    find_primary_wom_membership,
+    find_primary_wom_membership, wom_display_rsn,
 )
 from tenure_history import cumulative_effective_join
 from cogs.tasks_cog import (
@@ -1720,9 +1720,7 @@ class ConfigCog(commands.Cog):
                 player = primary_membership[
                     "player"
                 ]
-                actual_primary_rsn = player[
-                    "username"
-                ]
+                actual_primary_rsn = wom_display_rsn(player)
                 primary_wom_id = player[
                     "id"
                 ]
@@ -1882,9 +1880,7 @@ class ConfigCog(commands.Cog):
                     alt_wom_id = alt_player[
                         "id"
                     ]
-                    actual_alt_rsn = alt_player[
-                        "username"
-                    ]
+                    actual_alt_rsn = wom_display_rsn(alt_player)
 
                     if alt_wom_id == primary_wom_id:
                         continue
@@ -2880,8 +2876,8 @@ class ConfigCog(commands.Cog):
         current_primary_wom_id = primary_wom_id
 
         if primary_membership:
-            current_primary_rsn = (
-                primary_membership["player"]["username"]
+            current_primary_rsn = wom_display_rsn(
+                primary_membership["player"], primary_rsn
             )
             current_primary_wom_id = (
                 primary_membership["player"]["id"]
@@ -2910,8 +2906,8 @@ class ConfigCog(commands.Cog):
                 )
 
             if alt_membership:
-                current_alt_rsn = (
-                    alt_membership["player"]["username"]
+                current_alt_rsn = wom_display_rsn(
+                    alt_membership["player"], alt_rsn
                 )
                 current_alt_wom_id = (
                     alt_membership["player"]["id"]

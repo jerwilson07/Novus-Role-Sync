@@ -225,6 +225,35 @@ class RoleEngineProtectionTests(unittest.IsolatedAsyncioTestCase):
             self.user.remove_roles.await_args.args, (self.squire_role,)
         )
 
+    async def test_bad_tenure_mapping_cannot_manage_member(self):
+        # Even a misconfigured squire mapping must not turn Member into
+        # a tenure role that can be removed or added by general sync.
+        self.c.execute(
+            "INSERT INTO role_mappings VALUES (1, 'squire', 20)"
+        )
+        self.cog.get_linked_account_tenures = lambda *args: [{
+            "account_type": "primary", "wom_role": "squire",
+            "expected_rank": "squire",
+        }]
+        group = {
+            "id": 25802,
+            "memberships": [{
+                "player": {
+                    "id": 99, "username": "primary", "displayName": "Primary"
+                },
+                "role": "squire",
+            }],
+        }
+        result = await self.cog.sync_one_member(
+            self.guild, self.user, group, self.c
+        )
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["tenure_status"], "not_mapped")
+        self.assertEqual(result["roles_added"], [])
+        self.assertEqual(result["roles_removed"], [])
+        self.user.add_roles.assert_not_awaited()
+        self.user.remove_roles.assert_not_awaited()
+
     async def test_staff_mod_removal_only_after_confirmed_grace(self):
         group = {
             "id": 25802,

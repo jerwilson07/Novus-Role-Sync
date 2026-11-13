@@ -406,20 +406,7 @@ def is_case_only_nickname_change(current_name: str | None, proposed_name: str | 
     )
 
 
-def staff_role_removal_confirmed(
-    cursor,
-    guild_id: int,
-    discord_id: int,
-    role_id: int,
-    observed_wom_role: str | None,
-    now: datetime.datetime | None = None,
-) -> bool:
-    """Confirm a staff-role removal only after 24 hours of stable WOM evidence.
-
-    Candidate state is per Discord staff role; a change in the verified WOM
-    role restarts the clock. Call with None to clear a stale candidate when
-    the account cannot be verified or still qualifies for that staff role.
-    """
+def ensure_staff_role_removal_candidates(cursor):
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS staff_role_removal_candidates (
@@ -432,7 +419,38 @@ def staff_role_removal_confirmed(
         )
         """
     )
+
+
+def clear_staff_role_removal_candidates(cursor, guild_id, discord_id=None):
+    """Discard staff-removal evidence after an unverifiable role-sync check."""
+    ensure_staff_role_removal_candidates(cursor)
+    query = "DELETE FROM staff_role_removal_candidates WHERE guild_id = ?"
+    args = (guild_id,)
+    if discord_id is not None:
+        query += " AND discord_id = ?"
+        args += (discord_id,)
+    cursor.execute(query, args)
+
+
+def has_verifiable_wom_roster(group_data):
+    if not isinstance(group_data, dict):
+        return False
+    memberships = group_data.get("memberships")
+    return isinstance(memberships, list) and bool(memberships)
+
+
+def staff_role_removal_confirmed(
+    cursor,
+    guild_id: int,
+    discord_id: int,
+    role_id: int,
+    observed_wom_role: str | None,
+    now: datetime.datetime | None = None,
+) -> bool:
+    """Require matching verified WOM evidence, with no interrupted check."""
+    ensure_staff_role_removal_candidates(cursor)
     key = (guild_id, discord_id, role_id)
+    observed_wom_role = (observed_wom_role or "").strip().casefold()
     if not observed_wom_role:
         cursor.execute(
             """DELETE FROM staff_role_removal_candidates
@@ -441,7 +459,8 @@ def staff_role_removal_confirmed(
         )
         return False
 
-    observed_wom_role = observed_wom_role.strip().casefold()
+    # Do not reuse timers created before unverifiable checks reset them.
+    observed_wom_role = f"verified-v2:{observed_wom_role}"
     now = now or datetime.datetime.now(datetime.timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=datetime.timezone.utc)
@@ -1604,12 +1623,8 @@ class TasksCog(commands.Cog):
 
             current_rsn = wom_reported_rsn or stored_rsn
 
-            wom_role = (
-                membership.get(
-                    "role",
-                    ""
-                ).lower()
-            )
+            raw_role = membership.get("role")
+            wom_role = raw_role.strip().casefold() if isinstance(raw_role, str) else ""
             joined_at = get_membership_joined_at(
                 membership
             )
@@ -2211,6 +2226,7 @@ class TasksCog(commands.Cog):
                 guild.id,
                 member.id
             )
+            clear_staff_role_removal_candidates(cursor, guild.id, member.id)
             return {
                 "status": "non_clan_ignored"
             }
@@ -2218,8 +2234,15 @@ class TasksCog(commands.Cog):
         if not has_novus_member_role(
             member
         ):
+            clear_staff_role_removal_candidates(cursor, guild.id, member.id)
             return {
                 "status": "not_current_member"
+            }
+
+        if not has_verifiable_wom_roster(group_data):
+            clear_staff_role_removal_candidates(cursor, guild.id, member.id)
+            return {
+                "status": "membership_unverified"
             }
 
         cursor.execute(
@@ -2238,6 +2261,7 @@ class TasksCog(commands.Cog):
         link = cursor.fetchone()
 
         if not link:
+            clear_staff_role_removal_candidates(cursor, guild.id, member.id)
             return {
                 "status": "not_linked"
             }
@@ -2315,12 +2339,8 @@ class TasksCog(commands.Cog):
                 "id"
             )
 
-            current_wom_role = (
-                membership.get(
-                    "role",
-                    ""
-                ).lower()
-            )
+            raw_role = membership.get("role")
+            current_wom_role = raw_role.strip().casefold() if isinstance(raw_role, str) else ""
 
             primary_rsn_changed = bool(
                 current_rsn
@@ -2463,6 +2483,7 @@ class TasksCog(commands.Cog):
             # account, stale WOM snapshot or outdated saved ID/RSN can all
             # look absent. Never revoke Discord membership or earned tenure
             # from an unverified negative lookup.
+            clear_staff_role_removal_candidates(cursor, guild.id, member.id)
             return {
                 "status": "membership_unverified",
                 "rsn": current_rsn,
@@ -2533,8 +2554,7 @@ class TasksCog(commands.Cog):
         # Grant a staff role only when WOM confirms the linked primary.
         # Council is never automatically removed. Moderator/Trial Moderator
         # removals require two matching, positively verified WOM observations
-        # at least 24 hours apart. Missing roster records or linked alts
-        # always postpone a removal, never trigger it.
+        # at least 24 hours apart. Unverifiable checks restart the grace period.
         staff_target_role = None
 
         if (
@@ -2545,6 +2565,7 @@ class TasksCog(commands.Cog):
             staff_target_role = guild.get_role(staff_role_id)
 
             if staff_target_role is None:
+                clear_staff_role_removal_candidates(cursor, guild.id, member.id)
                 return {
                     "status": "staff_role_missing",
                     "rsn": current_rsn,
@@ -2565,12 +2586,16 @@ class TasksCog(commands.Cog):
             protected_role_id = NOVUS_STAFF_WOM_ROLES[protected_wom_role]
             protected_discord_role = guild.get_role(protected_role_id)
             if protected_discord_role is None:
+                staff_role_removal_confirmed(
+                    cursor, guild.id, member.id, protected_role_id, None
+                )
                 continue
 
             verified_absence = (
                 membership is not None
-                and bool(current_wom_role)
+                and bool(current_wom_role.strip())
                 and not missing_alts
+                and "" not in verified_linked_wom_roles
                 and protected_wom_role not in verified_linked_wom_roles
             )
             if (
@@ -3512,7 +3537,9 @@ class TasksCog(commands.Cog):
             config[0]
         )
 
-        if group_data is None:
+        if not has_verifiable_wom_roster(group_data):
+            clear_staff_role_removal_candidates(c, guild.id, member.id)
+            conn.commit()
             conn.close()
 
             message = (
@@ -4251,7 +4278,9 @@ class TasksCog(commands.Cog):
             config[0]
         )
 
-        if group_data is None:
+        if not has_verifiable_wom_roster(group_data):
+            clear_staff_role_removal_candidates(c, guild.id)
+            conn.commit()
             conn.close()
             await interaction.followup.send(
                 "Could not retrieve the Novus WOM group.",
@@ -4312,6 +4341,7 @@ class TasksCog(commands.Cog):
 
             if member is not None and has_non_clan_role(member):
                 forget_member_links(c, guild.id, member.id)
+                clear_staff_role_removal_candidates(c, guild.id, discord_id)
                 continue
 
             if (
@@ -4320,6 +4350,7 @@ class TasksCog(commands.Cog):
                     member
                 )
             ):
+                clear_staff_role_removal_candidates(c, guild.id, discord_id)
                 continue
 
             result = await self.sync_one_member(
@@ -5289,7 +5320,13 @@ class TasksCog(commands.Cog):
             group_id
         )
 
-        if group_data is None:
+        if not has_verifiable_wom_roster(group_data):
+            conn = sqlite3.connect("wom_multi.db")
+            try:
+                clear_staff_role_removal_candidates(conn.cursor(), guild.id)
+                conn.commit()
+            finally:
+                conn.close()
             if log_channel:
                 try:
                     await log_channel.send(
@@ -5415,6 +5452,7 @@ class TasksCog(commands.Cog):
 
             if member is not None and has_non_clan_role(member):
                 forget_member_links(c, guild.id, member.id)
+                clear_staff_role_removal_candidates(c, guild.id, discord_id)
                 continue
 
             if not member:
@@ -5442,12 +5480,14 @@ class TasksCog(commands.Cog):
                     )
                 )
 
+                clear_staff_role_removal_candidates(c, guild.id, discord_id)
                 removed_users_count += 1
                 continue
 
             if not has_novus_member_role(
                 member
             ):
+                clear_staff_role_removal_candidates(c, guild.id, discord_id)
                 continue
 
             result = await self.sync_one_member(

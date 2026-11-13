@@ -2,9 +2,10 @@
 
 import datetime as dt
 import sqlite3
+import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from cogs.tasks_cog import (
     TasksCog,
@@ -70,6 +71,16 @@ class StaffRoleGraceTests(unittest.TestCase):
         ))
         self.assertFalse(self.check(
             MODERATOR_ROLE_ID, "squire", T0 + dt.timedelta(hours=24)
+        ))
+
+    def test_legacy_candidate_cannot_trigger_removal_after_deploy(self):
+        self.check(MODERATOR_ROLE_ID, "squire")
+        self.c.execute("UPDATE staff_role_removal_candidates SET observed_wom_role='squire'")
+        self.assertFalse(self.check(
+            MODERATOR_ROLE_ID, "squire", T0 + dt.timedelta(days=2)
+        ))
+        self.assertTrue(self.check(
+            MODERATOR_ROLE_ID, "squire", T0 + dt.timedelta(days=3)
         ))
 
 
@@ -305,6 +316,85 @@ class RoleEngineProtectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["staff_roles_removed"], [])
         self.user.remove_roles.assert_not_awaited()
+
+    async def test_missing_accounts_restart_grace_for_both_staff_roles(self):
+        self.user.roles.append(self.trial_mod_role)
+        del self.cog.get_linked_account_tenures
+        verified = {"id": 25802, "memberships": [
+            {"player": {"id": 99, "username": "primary"}, "role": "squire"}
+        ]}
+        missing = {"id": 25802, "memberships": [
+            {"player": {"id": 100, "username": "someone else"}, "role": "squire"}
+        ]}
+        observed_at = T0
+
+        def verify(*args):
+            return staff_role_removal_confirmed(*args, now=observed_at)
+
+        async def sync(group):
+            return await self.cog.sync_one_member(self.guild, self.user, group, self.c)
+
+        with patch("cogs.tasks_cog.staff_role_removal_confirmed", side_effect=verify):
+            self.assertEqual((await sync(verified))["staff_roles_removed"], [])
+            observed_at += dt.timedelta(hours=23)
+            self.assertEqual((await sync(missing))["status"], "membership_unverified")
+            self.assertEqual(self.c.execute(
+                "SELECT count(*) FROM staff_role_removal_candidates"
+            ).fetchone()[0], 0)
+            observed_at += dt.timedelta(hours=1)
+            self.assertEqual((await sync(verified))["staff_roles_removed"], [])
+            observed_at += dt.timedelta(hours=23, minutes=59)
+            self.assertEqual((await sync(verified))["staff_roles_removed"], [])
+            self.user.remove_roles.assert_not_awaited()
+            observed_at += dt.timedelta(minutes=1)
+            self.assertCountEqual((await sync(verified))["staff_roles_removed"],
+                                  [self.mod_role, self.trial_mod_role])
+            self.user.remove_roles.assert_awaited_once()
+            self.assertNotIn(self.member_role, self.user.remove_roles.await_args.args)
+
+    async def test_linked_alt_with_no_wom_rank_resets_grace(self):
+        del self.cog.get_linked_account_tenures
+        self.c.execute("INSERT INTO alt_links VALUES (1, 2, 'Alt', 100)")
+        staff_role_removal_confirmed(self.c, 1, 2, MODERATOR_ROLE_ID, "squire", now=T0)
+        group = {"id": 25802, "memberships": [
+            {"player": {"id": 99, "username": "primary"}, "role": "squire"},
+            {"player": {"id": 100, "username": "alt"}, "role": None},
+        ]}
+        result = await self.cog.sync_one_member(self.guild, self.user, group, self.c)
+        self.assertEqual(result["staff_roles_removed"], [])
+        self.user.remove_roles.assert_not_awaited()
+        self.assertIsNone(self.c.execute(
+            "SELECT 1 FROM staff_role_removal_candidates WHERE discord_id=2"
+        ).fetchone())
+
+    async def test_scheduled_outage_or_empty_roster_clears_only_that_guild(self):
+        self.cog.get_wom_group = AsyncMock()
+        original_connect = sqlite3.connect
+        for unverified in (None, {"id": 25802, "memberships": []}):
+            with self.subTest(unverified=unverified), tempfile.TemporaryDirectory() as tmp:
+                path = f"{tmp}/wom_multi.db"
+                db = original_connect(path)
+                db.executescript(
+                    "CREATE TABLE links (guild_id INTEGER, discord_id INTEGER);"
+                    "CREATE TABLE alt_links (guild_id INTEGER, discord_id INTEGER);"
+                )
+                for guild_id in (1, 9):
+                    staff_role_removal_confirmed(
+                        db.cursor(), guild_id, 2, MODERATOR_ROLE_ID, "squire", now=T0
+                    )
+                db.commit()
+                db.close()
+                self.cog.get_wom_group.return_value = (unverified, 503)
+                with patch("cogs.tasks_cog.sqlite3.connect", side_effect=lambda _: original_connect(path)):
+                    result = await self.cog.sync_guild(self.guild, 25802, None, False, False)
+                self.assertIsNone(result)
+                db = original_connect(path)
+                try:
+                    self.assertEqual(db.execute(
+                        "SELECT guild_id FROM staff_role_removal_candidates"
+                    ).fetchall(), [(9,)])
+                finally:
+                    db.close()
 
 
 if __name__ == "__main__":

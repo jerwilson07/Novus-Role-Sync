@@ -17,8 +17,14 @@ UTC = dt.timezone.utc
 T0 = dt.datetime(2026, 11, 12, 18, 0, tzinfo=UTC)
 
 
+class FakeRole(SimpleNamespace):
+    # discord.Role objects are hashable by identity; mirror that behavior.
+    __hash__ = object.__hash__
+    __eq__ = object.__eq__
+
+
 def role(name, role_id):
-    return SimpleNamespace(
+    return FakeRole(
         id=role_id, name=name, managed=False, is_default=lambda: False,
     )
 

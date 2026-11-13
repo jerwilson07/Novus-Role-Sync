@@ -368,6 +368,16 @@ def nickname_alts_with_wom_safety(
     return visible
 
 
+def is_case_only_nickname_change(current_name: str | None, proposed_name: str | None) -> bool:
+    """Only bypass the grace period when the entire displayed RSN is unchanged except casing."""
+    return bool(
+        current_name
+        and proposed_name
+        and current_name != proposed_name
+        and current_name.casefold() == proposed_name.casefold()
+    )
+
+
 def nickname_change_confirmed(
     cursor,
     guild_id: int,
@@ -501,6 +511,7 @@ class TasksCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._nov11_catchup_task = None
+        self._one_time_case_sync_task = None
         self._last_staff_report_message_ids = {}
 
         self.sync_roles_loop.start()
@@ -519,6 +530,8 @@ class TasksCog(commands.Cog):
         self.check_reminders.cancel()
         if self._nov11_catchup_task and not self._nov11_catchup_task.done():
             self._nov11_catchup_task.cancel()
+        if self._one_time_case_sync_task and not self._one_time_case_sync_task.done():
+            self._one_time_case_sync_task.cancel()
 
     # ========================================================
     # GUEST / CLAN FRIEND EXCLUSION
@@ -918,6 +931,69 @@ class TasksCog(commands.Cog):
             self._nov11_catchup_task = asyncio.create_task(
                 self._post_nov11_catchup_once()
             )
+
+        # Staff-requested immediate run: once per guild, persisted across restarts.
+        if self._one_time_case_sync_task is None or self._one_time_case_sync_task.done():
+            self._one_time_case_sync_task = asyncio.create_task(
+                self._run_one_time_case_sync()
+            )
+
+    async def _run_one_time_case_sync(self):
+        """Run a full Novus sync once after this deploy; retain the noon schedule."""
+        await self.bot.wait_until_ready()
+        for guild in self.bot.guilds:
+            key = f"requested_case_sync_20261112_v1:{guild.id}"
+            conn = sqlite3.connect("wom_multi.db")
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """SELECT group_id, nickname_enforcement, dm_notifications_on
+                       FROM guild_configs WHERE guild_id = ?""",
+                    (guild.id,),
+                )
+                config = cursor.fetchone()
+                cursor.execute(
+                    "SELECT 1 FROM bot_stats WHERE key = ?", (key,)
+                )
+                already_completed = cursor.fetchone() is not None
+            finally:
+                conn.close()
+
+            if not config or not config[0] or already_completed:
+                continue
+
+            try:
+                result = await self.sync_guild(
+                    guild,
+                    config[0],
+                    NOVUS_MOD_CHAT_CHANNEL_ID,
+                    config[1],
+                    config[2],
+                )
+                # A WOM API failure returns None; retry on another startup.
+                if result is None:
+                    logger.warning(
+                        "One-time Novus case sync not completed for guild %s: WOM unavailable",
+                        guild.id,
+                    )
+                    continue
+                conn = sqlite3.connect("wom_multi.db")
+                try:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO bot_stats (key, value) VALUES (?, ?)",
+                        (key, datetime.datetime.now(datetime.timezone.utc).isoformat()),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                logger.info(
+                    "One-time Novus case sync completed guild=%s synced=%s failed=%s checked=%s",
+                    guild.id, result[0], result[1], result[2],
+                )
+            except Exception:
+                logger.exception(
+                    "One-time Novus case sync failed for guild %s", guild.id
+                )
 
     @staticmethod
     def _nov11_catchup_day():
@@ -2130,7 +2206,13 @@ class TasksCog(commands.Cog):
                 nickname_alts,
                 member.nick,
             )
-            if nickname_change_confirmed(
+            # Capitalization is safe to correct immediately when WOM verifies
+            # the primary RSN; substantive changes retain the 24-hour gate.
+            casing_only = is_case_only_nickname_change(
+                member.nick or member.display_name,
+                desired_nickname,
+            )
+            if casing_only or nickname_change_confirmed(
                 cursor,
                 guild.id,
                 member.id,
@@ -2140,7 +2222,11 @@ class TasksCog(commands.Cog):
                 try:
                     await member.edit(
                         nick=desired_nickname,
-                        reason="Novus WOM nickname confirmed stable for 24 hours",
+                        reason=(
+                            "Novus WOM verified RSN capitalization correction"
+                            if casing_only
+                            else "Novus WOM nickname confirmed stable for 24 hours"
+                        ),
                     )
                     nickname_updated_from_wom = True
                     nickname_change_confirmed(

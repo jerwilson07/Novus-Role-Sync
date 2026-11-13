@@ -9,6 +9,7 @@ from cogs.tasks_cog import (
     build_wom_server_nickname,
     nickname_alts_with_wom_safety,
     nickname_change_confirmed,
+    is_case_only_nickname_change,
 )
 
 
@@ -255,6 +256,26 @@ class NicknameSyncTests(unittest.TestCase):
         self.assertFalse(self.confirmed("New", "New", START + dt.timedelta(hours=24)))
         self.assertFalse(self.confirmed("New", "Another", START + dt.timedelta(hours=25)))
 
+
+    def test_case_only_wom_corrections_are_immediate(self):
+        self.assertTrue(is_case_only_nickname_change("mavara", "Mavara"))
+        self.assertTrue(is_case_only_nickname_change(
+            "mavara | ozilda", "Mavara | Ozilda"
+        ))
+        self.assertTrue(is_case_only_nickname_change("t1vecs", "T1Vecs"))
+
+    def test_actual_renames_and_membership_changes_still_wait(self):
+        for current, proposed in (
+            ("spilled", "Dctr"),
+            ("Vecs", "Vecs | NewAlt"),
+            ("Vecs | OldAlt", "Vecs"),
+            ("Vecs / Alt", "Vecs | Alt"),
+            (None, "Mavara"),
+        ):
+            with self.subTest(current=current, proposed=proposed):
+                self.assertFalse(is_case_only_nickname_change(
+                    current, proposed
+                ))
 
     def test_primary_and_alt_capitalization_matches_live_wom_after_24_hours(self):
         # Case-only changes should be proposed, but never skip the grace period.

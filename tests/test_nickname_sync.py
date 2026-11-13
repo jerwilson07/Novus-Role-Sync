@@ -4,6 +4,7 @@ import datetime as dt
 import sqlite3
 import unittest
 
+from common import wom_display_rsn
 from cogs.tasks_cog import (
     TasksCog,
     build_wom_server_nickname,
@@ -291,7 +292,7 @@ class NicknameSyncTests(unittest.TestCase):
     def test_linked_alt_case_only_change_refreshes_database_and_nickname(self):
         self.add_alt("ozilda", 2345)
         cog = TasksCog.__new__(TasksCog)
-        membership = {"player": {"id": 2345, "username": "Ozilda"}}
+        membership = {"player": {"id": 2345, "username": "ozilda", "displayName": "Ozilda"}}
         verified, missing = cog.sync_alt_links_in_database(
             self.cursor, 1, 2, {2345: membership}, {"ozilda": membership}
         )
@@ -313,6 +314,27 @@ class NicknameSyncTests(unittest.TestCase):
             in_clan_names={"ozilda": "Ozilda"},
         )
         self.assertEqual(visible, [])
+
+    def test_wom_username_is_lowercase_but_displayname_preserves_case(self):
+        primary = {"id": 111, "username": "mavara", "displayName": "Mavara"}
+        alt = {"id": 222, "username": "ozilda", "displayName": "Ozilda"}
+        self.assertEqual(wom_display_rsn(primary, "mavara"), "Mavara")
+        self.assertEqual(wom_display_rsn(alt, "ozilda"), "Ozilda")
+        self.assertEqual(
+            build_wom_server_nickname(
+                wom_display_rsn(primary), [wom_display_rsn(alt)],
+                "mavara | ozilda"
+            ),
+            "Mavara | Ozilda"
+        )
+
+    def test_missing_displayname_preserves_previous_casing_only_for_same_rsn(self):
+        self.assertEqual(
+            wom_display_rsn({"username": "mavara"}, "Mavara"), "Mavara"
+        )
+        self.assertEqual(
+            wom_display_rsn({"username": "dctr"}, "Spilled"), "dctr"
+        )
 
     def test_verified_linked_alt_addition_and_case_sync_are_immediate(self):
         self.add_alt("ozilda", 2345)

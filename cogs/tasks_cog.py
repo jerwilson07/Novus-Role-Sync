@@ -954,10 +954,10 @@ class TasksCog(commands.Cog):
             )
 
     async def _run_one_time_case_sync(self):
-        """Run a full Novus sync once after this deploy; retain the noon schedule."""
+        """Run a one-off silent Novus sync; retain the noon schedule."""
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
-            key = f"requested_displayname_sync_20261112_v3:{guild.id}"
+            key = f"requested_silent_displayname_sync_20261112_v4:{guild.id}"
             conn = sqlite3.connect("wom_multi.db")
             try:
                 cursor = conn.cursor()
@@ -978,12 +978,14 @@ class TasksCog(commands.Cog):
                 continue
 
             try:
+                # Explicit one-time staff request: no #mod-chat report,
+                # and no member DMs. Does not change the normal noon run.
                 result = await self.sync_guild(
                     guild,
                     config[0],
-                    NOVUS_MOD_CHAT_CHANNEL_ID,
+                    None,
                     config[1],
-                    config[2],
+                    False,
                 )
                 # A WOM API failure returns None; retry on another startup.
                 if result is None:
@@ -1002,7 +1004,7 @@ class TasksCog(commands.Cog):
                 finally:
                     conn.close()
                 logger.info(
-                    "One-time Novus case sync completed guild=%s synced=%s failed=%s checked=%s",
+                    "One-time silent Novus nickname sync completed guild=%s synced=%s failed=%s checked=%s",
                     guild.id, result[0], result[1], result[2],
                 )
             except Exception:

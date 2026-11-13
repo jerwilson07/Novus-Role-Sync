@@ -15,7 +15,7 @@ from common import (
     WOM_API_KEY, sanitize_rsn, has_non_clan_role, forget_member_links,
     forget_non_clan_links,
     has_novus_member_role, is_active_novus_member_link,
-    find_primary_wom_membership,
+    find_primary_wom_membership, wom_display_rsn,
 )
 from tenure_history import (
     cumulative_effective_join, record_roster, refresh_activity_history,
@@ -957,7 +957,7 @@ class TasksCog(commands.Cog):
         """Run a full Novus sync once after this deploy; retain the noon schedule."""
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
-            key = f"requested_linked_nickname_sync_20261112_v2:{guild.id}"
+            key = f"requested_displayname_sync_20261112_v3:{guild.id}"
             conn = sqlite3.connect("wom_multi.db")
             try:
                 cursor = conn.cursor()
@@ -1278,10 +1278,7 @@ class TasksCog(commands.Cog):
                 "player",
                 {}
             )
-            wom_reported_alt_rsn = player.get(
-                "username",
-                alt_rsn
-            )
+            wom_reported_alt_rsn = wom_display_rsn(player, alt_rsn)
 
             # WOM is authoritative for display casing, even when the RSN
             # only differs from the stored link by capitalization.
@@ -1433,10 +1430,7 @@ class TasksCog(commands.Cog):
                     player_id
                 )
 
-            wom_reported_rsn = player.get(
-                "username",
-                stored_rsn
-            )
+            wom_reported_rsn = wom_display_rsn(player, stored_rsn)
 
             current_rsn = wom_reported_rsn or stored_rsn
 
@@ -2138,10 +2132,7 @@ class TasksCog(commands.Cog):
                 {}
             )
 
-            wom_reported_rsn = player.get(
-                "username",
-                rsn
-            )
+            wom_reported_rsn = wom_display_rsn(player, rsn)
 
             # Display the exact current WOM capitalization while keeping
             # player-ID matching independent of letter case.
@@ -2255,6 +2246,10 @@ class TasksCog(commands.Cog):
                         ),
                     )
                     nickname_updated_from_wom = True
+                    logger.info(
+                        "Novus linked WOM nickname updated guild=%s discord=%s nick=%r",
+                        guild.id, member.id, desired_nickname,
+                    )
                     nickname_change_confirmed(
                         cursor, guild.id, member.id, desired_nickname,
                         desired_nickname,

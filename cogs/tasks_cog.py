@@ -68,6 +68,18 @@ NOVUS_TRIAL_WOM_RANKS = {
 # Discord role held by active trial members.
 NOVUS_TRIAL_DISCORD_ROLE_NAME = "trial member"
 
+# Tenure mappings must never be allowed to manage these protected roles.
+# Only the explicit WOM-confirmed Trial Member -> Member graduation grants
+# Member, and only the separately verified 24-hour staff workflow may remove
+# Moderator or Trial Moderator.
+PROTECTED_NON_TENURE_ROLE_NAMES = frozenset({
+    "member", "trial member", "moderator", "trial moderator", "council",
+})
+PROTECTED_NON_TENURE_ROLE_IDS = frozenset({
+    COUNCIL_ROLE_ID, MODERATOR_ROLE_ID, TRIAL_MOD_ROLE_ID,
+})
+
+
 # Default staff channel for the scheduled noon Novus report.
 NOVUS_MOD_CHAT_CHANNEL_ID = 1532835276567613531
 
@@ -2027,8 +2039,12 @@ class TasksCog(commands.Cog):
             )
 
             if (
-                role.id in mapped_tenure_role_ids
-                or role_name in NOVUS_TENURE_ROLES
+                (
+                    role.id in mapped_tenure_role_ids
+                    or role_name in NOVUS_TENURE_ROLES
+                )
+                and role_name not in PROTECTED_NON_TENURE_ROLE_NAMES
+                and role.id not in PROTECTED_NON_TENURE_ROLE_IDS
             ):
                 if (
                     not getattr(
@@ -2394,6 +2410,9 @@ class TasksCog(commands.Cog):
             in configured_map.items()
             if wom_role in NOVUS_TENURE_ROLES
             and role is not None
+            and role.id not in PROTECTED_NON_TENURE_ROLE_IDS
+            and getattr(role, "name", "").strip().casefold()
+                not in PROTECTED_NON_TENURE_ROLE_NAMES
         }
 
         staff_roles = {
@@ -2500,10 +2519,10 @@ class TasksCog(commands.Cog):
         )
 
         expected_role = (
-            configured_map.get(
-                expected_rank
-            )
+            configured_map.get(expected_rank)
             if expected_rank
+            and configured_map.get(expected_rank) is not None
+            and configured_map[expected_rank].id in tenure_role_by_id
             else None
         )
 

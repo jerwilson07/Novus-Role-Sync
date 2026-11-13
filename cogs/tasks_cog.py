@@ -34,6 +34,7 @@ logger = logging.getLogger("WOMBot")
 COUNCIL_ROLE_ID = 1532830356875513906
 MODERATOR_ROLE_ID = 1532830960062693396
 TRIAL_MOD_ROLE_ID = 1533587986204069908
+NOVUS_GUILD_ID = 1532817291048124466
 
 # Users with these Discord roles may use staff sync commands.
 NOVUS_COMMAND_ROLE_IDS = {
@@ -1031,63 +1032,140 @@ class TasksCog(commands.Cog):
             )
 
     async def _run_one_time_case_sync(self):
-        """Run a one-off silent Novus sync; retain the noon schedule."""
+        """Run the requested nickname-only pass once, independently of noon sync."""
         await self.bot.wait_until_ready()
-        for guild in self.bot.guilds:
-            key = f"requested_silent_displayname_sync_20261112_v4:{guild.id}"
+        guild = self.bot.get_guild(NOVUS_GUILD_ID)
+        if guild is None:
+            return
+        key = f"requested_silent_displayname_sync_20261113_below_council:{guild.id}"
+        try:
             conn = sqlite3.connect("wom_multi.db")
             try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """SELECT group_id, nickname_enforcement, dm_notifications_on
-                       FROM guild_configs WHERE guild_id = ?""",
+                config = conn.execute(
+                    "SELECT group_id FROM guild_configs WHERE guild_id = ?",
                     (guild.id,),
-                )
-                config = cursor.fetchone()
-                cursor.execute(
+                ).fetchone()
+                if not config or not config[0] or conn.execute(
                     "SELECT 1 FROM bot_stats WHERE key = ?", (key,)
-                )
-                already_completed = cursor.fetchone() is not None
+                ).fetchone():
+                    return
+                links = conn.execute(
+                    "SELECT discord_id, rsn, wom_id FROM links WHERE guild_id = ?",
+                    (guild.id,),
+                ).fetchall()
+                alts_by_member = {}
+                for discord_id, rsn, wom_id in conn.execute(
+                    """SELECT discord_id, rsn, wom_id FROM alt_links
+                       WHERE guild_id = ? ORDER BY rowid""",
+                    (guild.id,),
+                ):
+                    alts_by_member.setdefault(discord_id, []).append((rsn, wom_id))
             finally:
                 conn.close()
 
-            if not config or not config[0] or already_completed:
-                continue
+            group, _ = await self.get_wom_group(config[0])
+            memberships = group.get("memberships") if isinstance(group, dict) else None
+            if not isinstance(memberships, list) or not memberships:
+                logger.warning("One-time Novus nickname pass deferred: WOM roster unavailable")
+                return
+            council_role = guild.get_role(COUNCIL_ROLE_ID)
+            if council_role is None:
+                logger.warning("One-time Novus nickname pass deferred: Council role unavailable")
+                return
+            if not guild.chunked:
+                await guild.chunk()
 
-            try:
-                # Explicit one-time staff request: no #mod-chat report,
-                # and no member DMs. Does not change the normal noon run.
-                result = await self.sync_guild(
-                    guild,
-                    config[0],
-                    None,
-                    config[1],
-                    False,
+            def is_requested_member(member, rsn=None):
+                return any(
+                    re.split(r"\s*[|/]\s*", name or "", maxsplit=1)[0].casefold()
+                    == "xaffluence"
+                    for name in (rsn, member.name, member.nick)
                 )
-                # A WOM API failure returns None; retry on another startup.
-                if result is None:
-                    logger.warning(
-                        "One-time Novus case sync not completed for guild %s: WOM unavailable",
-                        guild.id,
-                    )
+
+            counts = {}
+            linked_ids = {row[0] for row in links}
+            for member in guild.members:
+                if member.id not in linked_ids and is_requested_member(member):
+                    logger.info("Novus nickname-only xaffluence outcome=not_linked")
+            for discord_id, rsn, wom_id in links:
+                member = guild.get_member(discord_id)
+                if member is None:
+                    counts["not_in_cache"] = counts.get("not_in_cache", 0) + 1
                     continue
-                conn = sqlite3.connect("wom_multi.db")
-                try:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO bot_stats (key, value) VALUES (?, ?)",
-                        (key, datetime.datetime.now(datetime.timezone.utc).isoformat()),
+                status = await self._sync_nickname_only(
+                    member, council_role, rsn, wom_id, memberships,
+                    alts_by_member.get(discord_id, ()),
+                )
+                counts[status] = counts.get(status, 0) + 1
+                if is_requested_member(member, rsn):
+                    entry = find_primary_wom_membership(rsn, wom_id, memberships)
+                    logger.info(
+                        "Novus nickname-only xaffluence outcome=%s current=%r WOM=%r",
+                        status, member.nick,
+                        entry["player"].get("displayName") if entry else None,
                     )
-                    conn.commit()
-                finally:
-                    conn.close()
-                logger.info(
-                    "One-time silent Novus nickname sync completed guild=%s synced=%s failed=%s checked=%s",
-                    guild.id, result[0], result[1], result[2],
+
+            conn = sqlite3.connect("wom_multi.db")
+            try:
+                conn.execute(
+                    "INSERT INTO bot_stats (key, value) VALUES (?, ?)",
+                    (key, datetime.datetime.now(datetime.timezone.utc).isoformat()),
                 )
-            except Exception:
-                logger.exception(
-                    "One-time Novus case sync failed for guild %s", guild.id
-                )
+                conn.commit()
+            finally:
+                conn.close()
+            logger.info(
+                "One-time silent Novus nickname-only pass completed guild=%s links=%s outcomes=%s",
+                guild.id, len(links), counts,
+            )
+        except Exception:
+            logger.exception("One-time Novus nickname-only pass failed for guild %s", guild.id)
+
+    @staticmethod
+    async def _sync_nickname_only(member, council_role, rsn, wom_id, memberships, alts):
+        """Apply verified WOM spellings without roles, link edits, reports or DMs."""
+        if member.bot or has_non_clan_role(member):
+            return "excluded"
+        if member.id == member.guild.owner_id or member.top_role >= council_role:
+            return "council_or_higher"
+
+        primary = find_primary_wom_membership(rsn, wom_id, memberships)
+        if primary is None:
+            return "unverified_primary"
+        primary_name = wom_display_rsn(primary["player"], rsn)
+        if not primary_name:
+            return "unverified_primary"
+
+        verified_alts, missing_alts = [], []
+        for alt_rsn, alt_wom_id in alts:
+            entry = find_primary_wom_membership(alt_rsn, alt_wom_id, memberships)
+            if entry is None:
+                missing_alts.append(alt_rsn)
+            else:
+                verified_alts.append(wom_display_rsn(entry["player"], alt_rsn))
+
+        desired = build_wom_server_nickname(primary_name, verified_alts, member.nick)
+        if member.nick == desired:
+            logger.debug("Novus nickname-only already matched %s (%s): %r", member, member.id, desired)
+            return "already_matched"
+        if nickname_removal_needs_confirmation(member.nick, desired, missing_alts):
+            return "missing_alt_deferred"
+        try:
+            await member.edit(nick=desired, reason="One-time Novus WOM display-name sync")
+        except discord.Forbidden:
+            logger.warning(
+                "Novus nickname-only edit denied for %s (%s): %r -> %r",
+                member, member.id, member.nick, desired,
+            )
+            return "discord_denied"
+        except discord.HTTPException:
+            logger.exception("Novus nickname-only edit failed for %s (%s)", member, member.id)
+            return "discord_error"
+        logger.info(
+            "Novus nickname-only updated %s (%s): %r -> %r",
+            member, member.id, member.nick, desired,
+        )
+        return "updated"
 
     @staticmethod
     def _nov11_catchup_day():

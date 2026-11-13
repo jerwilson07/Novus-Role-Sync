@@ -393,6 +393,71 @@ def is_case_only_nickname_change(current_name: str | None, proposed_name: str | 
     )
 
 
+def staff_role_removal_confirmed(
+    cursor,
+    guild_id: int,
+    discord_id: int,
+    role_id: int,
+    observed_wom_role: str | None,
+    now: datetime.datetime | None = None,
+) -> bool:
+    """Confirm a staff-role removal only after 24 hours of stable WOM evidence.
+
+    Candidate state is per Discord staff role; a change in the verified WOM
+    role restarts the clock. Call with None to clear a stale candidate when
+    the account cannot be verified or still qualifies for that staff role.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS staff_role_removal_candidates (
+            guild_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            role_id INTEGER NOT NULL,
+            observed_wom_role TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, discord_id, role_id)
+        )
+        """
+    )
+    key = (guild_id, discord_id, role_id)
+    if not observed_wom_role:
+        cursor.execute(
+            """DELETE FROM staff_role_removal_candidates
+               WHERE guild_id = ? AND discord_id = ? AND role_id = ?""",
+            key,
+        )
+        return False
+
+    observed_wom_role = observed_wom_role.strip().casefold()
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+
+    cursor.execute(
+        """SELECT observed_wom_role, first_seen_at
+           FROM staff_role_removal_candidates
+           WHERE guild_id = ? AND discord_id = ? AND role_id = ?""",
+        key,
+    )
+    row = cursor.fetchone()
+    if not row or row[0] != observed_wom_role:
+        cursor.execute(
+            """INSERT INTO staff_role_removal_candidates
+               (guild_id, discord_id, role_id, observed_wom_role, first_seen_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(guild_id, discord_id, role_id)
+               DO UPDATE SET observed_wom_role = excluded.observed_wom_role,
+                             first_seen_at = excluded.first_seen_at""",
+            (*key, observed_wom_role, now.isoformat()),
+        )
+        return False
+
+    first_seen_at = datetime.datetime.fromisoformat(row[1])
+    if first_seen_at.tzinfo is None:
+        first_seen_at = first_seen_at.replace(tzinfo=datetime.timezone.utc)
+    return now - first_seen_at >= datetime.timedelta(hours=24)
+
+
 def nickname_change_confirmed(
     cursor,
     guild_id: int,
@@ -1924,7 +1989,7 @@ class TasksCog(commands.Cog):
         guild: discord.Guild,
         member: discord.Member
     ):
-        """Remove membership/tenure roles when no linked RSN is active in Novus.
+        """Remove only mapped tenure roles; never touch the Member role.
 
         Saved account links and tenure history are intentionally preserved so
         a future rejoin can restore the correct earned tenure.
@@ -1962,8 +2027,7 @@ class TasksCog(commands.Cog):
             )
 
             if (
-                role_name == "member"
-                or role.id in mapped_tenure_role_ids
+                role.id in mapped_tenure_role_ids
                 or role_name in NOVUS_TENURE_ROLES
             ):
                 if (
@@ -2356,27 +2420,19 @@ class TasksCog(commands.Cog):
         # STAFF ROLE SYNC - PRIMARY ACCOUNT ONLY
         # ----------------------------------------------------
 
-        # Discord staff roles are intentionally ADD-ONLY here.
-        # WOM may be used to grant the matching staff role, but Novus Sync
-        # must never demote/remove Trial Mod, Moderator, or Council. Staff
-        # removals are a manual Discord moderation decision so a WOM rank
-        # change, lag, or mismatch cannot accidentally strip staff access.
+        # Grant a staff role only when WOM confirms the linked primary.
+        # Council is never automatically removed. Moderator/Trial Moderator
+        # removals require two matching, positively verified WOM observations
+        # at least 24 hours apart. Missing roster records or linked alts
+        # always postpone a removal, never trigger it.
         staff_target_role = None
 
         if (
             membership is not None
-            and current_wom_role
-                in NOVUS_STAFF_WOM_ROLES
+            and current_wom_role in NOVUS_STAFF_WOM_ROLES
         ):
-            staff_role_id = (
-                NOVUS_STAFF_WOM_ROLES[
-                    current_wom_role
-                ]
-            )
-
-            staff_target_role = guild.get_role(
-                staff_role_id
-            )
+            staff_role_id = NOVUS_STAFF_WOM_ROLES[current_wom_role]
+            staff_target_role = guild.get_role(staff_role_id)
 
             if staff_target_role is None:
                 return {
@@ -2389,13 +2445,41 @@ class TasksCog(commands.Cog):
                 }
 
             if staff_target_role not in member_roles:
-                staff_roles_to_add.append(
-                    staff_target_role
-                )
+                staff_roles_to_add.append(staff_target_role)
 
-        # Never populate staff_roles_to_remove. Trial Mod, Moderator, and
-        # Council are protected from automatic removal by Novus Sync.
-        # All specialty/status roles may coexist with the tenure role.
+        verified_linked_wom_roles = {
+            (account.get("wom_role") or "").strip().casefold()
+            for account in account_tenures
+        }
+        for protected_wom_role in ("explorer", "gamer"):
+            protected_role_id = NOVUS_STAFF_WOM_ROLES[protected_wom_role]
+            protected_discord_role = guild.get_role(protected_role_id)
+            if protected_discord_role is None:
+                continue
+
+            verified_absence = (
+                membership is not None
+                and bool(current_wom_role)
+                and not missing_alts
+                and protected_wom_role not in verified_linked_wom_roles
+            )
+            if (
+                protected_discord_role not in member_roles
+                or not verified_absence
+            ):
+                staff_role_removal_confirmed(
+                    cursor, guild.id, member.id, protected_role_id, None
+                )
+                continue
+
+            if staff_role_removal_confirmed(
+                cursor, guild.id, member.id, protected_role_id,
+                current_wom_role,
+            ):
+                staff_roles_to_remove.append(protected_discord_role)
+
+        # All specialty/status roles coexist with the tenure role.
+        # The Member role is never included in this role-change list.
 
         # ----------------------------------------------------
         # TENURE SYNC - HIGHEST LINKED ACCOUNT, NEVER DOWNGRADE
@@ -2594,9 +2678,14 @@ class TasksCog(commands.Cog):
                 await member.remove_roles(
                     *roles_to_remove,
                     reason=(
-                        "Novus role synchronization"
+                        "Novus role synchronization (staff removals verified "
+                        "against WOM for 24 hours)"
                     )
                 )
+                for protected_role in staff_roles_to_remove:
+                    staff_role_removal_confirmed(
+                        cursor, guild.id, member.id, protected_role.id, None
+                    )
 
         except discord.Forbidden:
             return {

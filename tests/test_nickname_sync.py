@@ -1,4 +1,4 @@
-"""Regression tests for 24-hour WOM Discord nickname confirmation."""
+"""Regression tests for linked WOM nickname composition and safety."""
 
 import datetime as dt
 import sqlite3
@@ -10,6 +10,7 @@ from cogs.tasks_cog import (
     nickname_alts_with_wom_safety,
     nickname_change_confirmed,
     is_case_only_nickname_change,
+    nickname_removal_needs_confirmation,
 )
 
 
@@ -72,35 +73,29 @@ class NicknameSyncTests(unittest.TestCase):
             "spilled", desired, START + dt.timedelta(hours=24)
         ))
 
-    def test_unlinked_manual_alt_still_present_in_wom_is_preserved(self):
-        # Do not remove a nickname's alt merely because the bot has no
-        # alt_links row when the alt is demonstrably on the current roster.
+    def test_unlinked_alt_not_included_even_if_name_exists_in_clan(self):
+        # An account appearing in the clan is not proof this Discord user
+        # owns it. Only explicitly linked and verified alts are displayed.
         visible = nickname_alts_with_wom_safety(
             self.cursor, 1, 2, "Vecs | ActiveAlt", [],
             in_clan_names={"activealt": "ActiveAlt"},
         )
-        self.assertEqual(visible, ["ActiveAlt"])
+        self.assertEqual(visible, [])
         self.assertEqual(
             build_wom_server_nickname("Vecs", visible, "Vecs | ActiveAlt"),
-            "Vecs | ActiveAlt",
+            "Vecs",
         )
 
-    def test_underscore_alias_of_active_wom_alt_survives(self):
+    def test_unlinked_underscore_alias_does_not_prove_alt_ownership(self):
         visible = nickname_alts_with_wom_safety(
             self.cursor, 1, 2, "Vecs | p_p", [],
             in_clan_names={"p p": "p p"},
         )
-        self.assertEqual(visible, ["p p"])
+        self.assertEqual(visible, [])
         self.assertEqual(
             build_wom_server_nickname("Vecs", visible, "Vecs | p_p"),
-            "Vecs | p p",
+            "Vecs",
         )
-        # Formatting changes also obey the same 24-hour confirmation.
-        self.assertFalse(self.confirmed("Vecs | p_p", "Vecs | p p", START))
-        self.assertTrue(self.confirmed(
-            "Vecs | p_p", "Vecs | p p",
-            START + dt.timedelta(hours=24),
-        ))
 
     def test_registered_alt_with_wom_underscore_alias_stays_verified(self):
         self.add_alt("p_p", 2345)
@@ -108,7 +103,7 @@ class NicknameSyncTests(unittest.TestCase):
             self.cursor, 1, 2, "Vecs | p_p", ["p p"],
             in_clan_names={"p p": "p p"},
         )
-        self.assertEqual(visible, ["p_p"])
+        self.assertEqual(visible, ["p p"])
 
     def test_no_name_changes_without_24_hour_second_check(self):
         for initial, proposed in (
@@ -312,12 +307,45 @@ class NicknameSyncTests(unittest.TestCase):
             "Mavara | Ozilda",
         )
 
-    def test_unlinked_manual_alt_adopts_wom_capitalization(self):
+    def test_unlinked_manual_alt_not_promoted_to_link(self):
         visible = nickname_alts_with_wom_safety(
             self.cursor, 1, 2, "Mavara | ozilda", [],
             in_clan_names={"ozilda": "Ozilda"},
         )
+        self.assertEqual(visible, [])
+
+    def test_verified_linked_alt_addition_and_case_sync_are_immediate(self):
+        self.add_alt("ozilda", 2345)
+        verified = ["Ozilda"]
+        visible = self.nickname_alts("mavara", verified)
         self.assertEqual(visible, ["Ozilda"])
+        desired = build_wom_server_nickname("Mavara", visible, "mavara")
+        self.assertEqual(desired, "Mavara | Ozilda")
+        self.assertFalse(nickname_removal_needs_confirmation(
+            "mavara", desired, [],
+        ))
+        self.assertFalse(nickname_removal_needs_confirmation(
+            "mavara | ozilda", desired, [],
+        ))
+
+    def test_verified_primary_rename_is_not_blocked(self):
+        self.assertFalse(nickname_removal_needs_confirmation(
+            "spilled", "Dctr", [],
+        ))
+
+    def test_disappeared_linked_alt_removal_keeps_24_hour_guard(self):
+        self.assertTrue(nickname_removal_needs_confirmation(
+            "Mavara | Ozilda", "Mavara", ["Ozilda"],
+        ))
+        self.assertTrue(nickname_removal_needs_confirmation(
+            "Mavara / ozilda", "Mavara", ["Ozilda"],
+        ))
+        self.assertFalse(nickname_removal_needs_confirmation(
+            "Mavara | Ozilda", "Mavara | Ozilda", ["Ozilda"],
+        ))
+        self.assertFalse(nickname_removal_needs_confirmation(
+            "Mavara", "Mavara", ["Ozilda"],
+        ))
 
 
 if __name__ == "__main__":

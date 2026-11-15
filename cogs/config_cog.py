@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 from common import (
     sanitize_rsn, WOM_API_KEY, has_non_clan_role,
-    forget_non_clan_links,
+    clan_sync_link_rows,
     has_novus_member_role, is_active_novus_member_link,
     find_primary_wom_membership, wom_display_rsn,
 )
@@ -60,10 +60,10 @@ def has_novus_command_permission(member: discord.Member) -> bool:
 
 
 def can_manually_link_novus_member(member) -> bool:
-    """Allow manual linking for Novus Members or Trial Members only."""
-    if member is None or has_non_clan_role(member):
+    """Allow a staff-set link without equating account ownership with clan membership."""
+    if member is None or getattr(member, "bot", False):
         return False
-    return has_novus_member_role(member) or any(
+    return has_non_clan_role(member) or has_novus_member_role(member) or any(
         getattr(role, "name", "").strip().casefold() == "trial member"
         for role in member.roles
     )
@@ -732,18 +732,10 @@ class ConfigCog(commands.Cog):
             )
             return
 
-        if has_non_clan_role(user):
-            await interaction.response.send_message(
-                f"{user.mention} has Guest or Clan Friend and cannot be linked "
-                "while either role is assigned.",
-                ephemeral=True
-            )
-            return
-
         if not can_manually_link_novus_member(user):
             await interaction.response.send_message(
-                f"{user.mention} needs the Novus Member or Trial Member role. "
-                "Verified alone does not qualify for clan linking.",
+                f"{user.mention} needs Member, Trial Member, Guest, or Clan Friend. "
+                "Verified alone does not qualify for linking.",
                 ephemeral=True
             )
             return
@@ -922,13 +914,19 @@ class ConfigCog(commands.Cog):
             "\n".join(f"- `{alt}`" for alt in alt_rsns)
             if alt_rsns else "None"
         )
+        link_status = (
+            "Saved as a non-clan link. Guest and Clan Friend are excluded "
+            "from clan rank sync and tenure reports."
+            if has_non_clan_role(user) else
+            "Primary and alt tenure stay separate; the highest independently "
+            "earned linked-account tenure can raise the member's Discord tenure role."
+        )
         await interaction.followup.send(
             f"Linked {user.mention}.\n\n"
             f"**Primary RSN:** `{primary_rsn}`\n"
             f"**Alt accounts:**\n{alt_text}\n\n"
             f"{nickname_status}\n\n"
-            "Primary and alt tenure stay separate; the highest independently "
-            "earned linked-account tenure can raise the member's Discord tenure role.",
+            f"{link_status}",
             ephemeral=True,
         )
 
@@ -1317,11 +1315,6 @@ class ConfigCog(commands.Cog):
         try:
             c = conn.cursor()
 
-            forget_non_clan_links(
-                c,
-                guild
-            )
-
             wom_by_id = {}
             wom_by_key = {}
 
@@ -1403,7 +1396,7 @@ class ConfigCog(commands.Cog):
                     discord_id,
                     rsn,
                     wom_id
-                ) in c.fetchall()
+                ) in clan_sync_link_rows(guild, c.fetchall())
             }
 
             c.execute(
@@ -1415,7 +1408,7 @@ class ConfigCog(commands.Cog):
                 (guild.id,)
             )
 
-            alt_rows = c.fetchall()
+            alt_rows = clan_sync_link_rows(guild, c.fetchall())
             alts_by_discord = {}
 
             for (
@@ -2385,8 +2378,6 @@ class ConfigCog(commands.Cog):
             "wom_multi.db"
         )
         c = conn.cursor()
-        forget_non_clan_links(c, guild)
-        conn.commit()
 
         c.execute(
             """
@@ -2703,7 +2694,8 @@ class ConfigCog(commands.Cog):
             )
             return
 
-        if not has_novus_member_role(member):
+        non_clan = has_non_clan_role(member)
+        if not non_clan and not has_novus_member_role(member):
             await interaction.followup.send(
                 f"{member.mention} isn't an active Novus clan member "
                 "(Discord Member role required).",
@@ -2782,6 +2774,17 @@ class ConfigCog(commands.Cog):
         alt_rows = c.fetchall()
 
         conn.close()
+
+        if non_clan:
+            alts = "\n".join(f"- `{rsn}`" for rsn, _ in alt_rows) or "None"
+            await interaction.followup.send(
+                f"**Saved non-clan link for {member.mention}**\n"
+                f"Primary RSN: `{primary_rsn}`\n"
+                f"Alt accounts:\n{alts}\n"
+                "Not included in clan rank sync or tenure reports.",
+                ephemeral=True
+            )
+            return
 
         url = (
             f"https://api.wiseoldman.net/v2/groups/"

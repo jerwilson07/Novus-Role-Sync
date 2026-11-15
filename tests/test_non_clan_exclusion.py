@@ -2,13 +2,15 @@
 
 import sqlite3
 import unittest
+from unittest.mock import AsyncMock, patch
+import datetime
 from types import SimpleNamespace
 
 from common import (
     CLAN_FRIEND_ROLE_ID,
     GUEST_ROLE_ID,
     forget_member_links,
-    forget_non_clan_links,
+    clan_sync_link_rows,
     forget_unmatched_alt_links,
     has_non_clan_role,
 )
@@ -74,19 +76,16 @@ class NonClanExclusionTests(unittest.TestCase):
         self.assertTrue(has_non_clan_role(member(20, CLAN_FRIEND_ROLE_ID)))
         self.assertFalse(has_non_clan_role(member(30, 987654)))
 
-    def test_purge_removes_only_excluded_members_and_alts(self):
-        people, accounts = forget_non_clan_links(self.cur, self.guild)
-        self.assertEqual((people, accounts), (2, 4))
-        for user_id in (10, 20):
-            self.assertEqual(self.count("links", 1, user_id), 0)
-            self.assertEqual(self.count("alt_links", 1, user_id), 0)
-        self.assertEqual(self.count("links", 1, 30), 1)
-        self.assertEqual(self.count("alt_links", 1, 30), 1)
+    def test_clan_matching_excludes_guest_and_friend_links_without_deleting_them(self):
+        for table in ("links", "alt_links"):
+            rows = self.cur.execute(
+                f"SELECT discord_id, rsn FROM {table} WHERE guild_id = ?", (1,)
+            ).fetchall()
+            filtered = clan_sync_link_rows(self.guild, rows)
+            self.assertEqual([row[0] for row in filtered], [30])
+            for user_id in (10, 20, 30):
+                self.assertEqual(self.count(table, 1, user_id), 1)
         self.assertEqual(self.count("links", 2, 10), 1)
-
-    def test_purge_is_idempotent(self):
-        forget_non_clan_links(self.cur, self.guild)
-        self.assertEqual(forget_non_clan_links(self.cur, self.guild), (0, 0))
 
     def test_single_user_cleanup_does_not_touch_others(self):
         self.assertEqual(forget_member_links(self.cur, 1, 10), 2)
@@ -126,6 +125,37 @@ class NonClanExclusionTests(unittest.TestCase):
         )
         for discord_id in (10, 20, 30):
             self.assertEqual(self.count("alt_links", 1, discord_id), 1)
+
+
+class NonClanSyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sync_keeps_guest_and_friend_links_and_never_touches_roles(self):
+        from cogs.tasks_cog import TasksCog
+        cog = TasksCog.__new__(TasksCog)
+        db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
+        cursor = db.cursor()
+        cursor.executescript(
+            "CREATE TABLE links(guild_id,discord_id,rsn);"
+            "CREATE TABLE alt_links(guild_id,discord_id,rsn);"
+            "INSERT INTO links VALUES(1,10,'Main'),(1,20,'Friend');"
+            "INSERT INTO alt_links VALUES(1,10,'Alt'),(1,20,'FriendAlt');"
+        )
+        roster = {"memberships": [{"player": {"id": 91, "username": "Main"}, "role": "duellist"}]}
+        for target in (member(10, GUEST_ROLE_ID), member(20, CLAN_FRIEND_ROLE_ID)):
+            target.add_roles = AsyncMock()
+            target.remove_roles = AsyncMock()
+            guild = DummyGuild(1, [target])
+            result = await cog.sync_one_member(guild, target, roster, cursor)
+            self.assertEqual(result["status"], "non_clan_ignored")
+            target.add_roles.assert_not_called()
+            target.remove_roles.assert_not_called()
+        self.assertEqual(cursor.execute("SELECT COUNT(*) FROM links").fetchone()[0], 2)
+        self.assertEqual(cursor.execute("SELECT COUNT(*) FROM alt_links").fetchone()[0], 2)
+
+    def test_53_days_is_duellist_for_eligible_member(self):
+        from cogs.tasks_cog import expected_tenure_rank
+        now = datetime.datetime(2026, 11, 15, 16, tzinfo=datetime.timezone.utc)
+        self.assertEqual(expected_tenure_rank(now-datetime.timedelta(days=53), now), "duellist")
 
 
 if __name__ == "__main__":

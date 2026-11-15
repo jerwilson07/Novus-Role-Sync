@@ -112,7 +112,7 @@ class ActiveMembershipTests(unittest.TestCase):
             MEMBER, "Former Main", 999, ROSTER
         ))
 
-    def test_manual_linking_allows_novus_members_and_trials_only(self):
+    def test_manual_linking_accepts_non_clan_roles_but_not_verified_only(self):
         self.assertTrue(can_manually_link_novus_member(
             discord_user((200, "Member"))
         ))
@@ -122,10 +122,10 @@ class ActiveMembershipTests(unittest.TestCase):
         self.assertFalse(can_manually_link_novus_member(
             discord_user((202, "Verified"))
         ))
-        self.assertFalse(can_manually_link_novus_member(
+        self.assertTrue(can_manually_link_novus_member(
             discord_user((200, "Member"), (GUEST_ROLE_ID, "Guest"))
         ))
-        self.assertFalse(can_manually_link_novus_member(
+        self.assertTrue(can_manually_link_novus_member(
             discord_user((201, "Trial Member"), (CLAN_FRIEND_ROLE_ID, "Clan Friend"))
         ))
 

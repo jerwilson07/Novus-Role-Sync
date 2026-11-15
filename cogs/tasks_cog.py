@@ -12,8 +12,7 @@ import shutil
 import re
 
 from common import (
-    WOM_API_KEY, sanitize_rsn, has_non_clan_role, forget_member_links,
-    forget_non_clan_links,
+    WOM_API_KEY, sanitize_rsn, has_non_clan_role, clan_sync_link_rows,
     has_novus_member_role, is_active_novus_member_link,
     find_primary_wom_membership, wom_display_rsn,
 )
@@ -651,13 +650,12 @@ class TasksCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # Reconcile preexisting Guest/Clan Friend roles on every startup.
+        # Run the existing one-time startup migrations.
         for guild in self.bot.guilds:
             try:
                 conn = sqlite3.connect("wom_multi.db")
                 try:
                     cursor = conn.cursor()
-                    people, accounts = forget_non_clan_links(cursor, guild)
 
                     migration_key = (
                         f"mod_chat_log_channel_v1:{guild.id}"
@@ -1025,16 +1023,8 @@ class TasksCog(commands.Cog):
                     conn.commit()
                 finally:
                     conn.close()
-                if people:
-                    logger.info(
-                        "Forgot %s Guest/Clan Friend members (%s linked accounts) in guild %s",
-                        people, accounts, guild.id
-                    )
             except sqlite3.Error:
-                logger.exception(
-                    "Failed to forget Guest/Clan Friend links for guild %s",
-                    guild.id
-                )
+                logger.exception("Novus startup migrations failed for guild %s", guild.id)
 
         # The normal noon schedule remains unchanged. This is a one-day
         # recovery for the 11 Nov noon report interrupted by redeployments,
@@ -1336,27 +1326,19 @@ class TasksCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
-        # Forget people as soon as they receive either exclusion role.
+        # Once someone becomes a Guest/Clan Friend, inactive staff-removal
+        # evidence is no longer valid, but their primary and alt links stay.
         if not has_non_clan_role(after) or has_non_clan_role(before):
             return
         try:
             conn = sqlite3.connect("wom_multi.db")
             try:
-                cursor = conn.cursor()
-                deleted = forget_member_links(cursor, after.guild.id, after.id)
+                clear_staff_role_removal_candidates(conn.cursor(), after.guild.id, after.id)
                 conn.commit()
             finally:
                 conn.close()
-            if deleted:
-                logger.info(
-                    "Forgot Guest/Clan Friend %s in guild %s: %s account links deleted",
-                    after.id, after.guild.id, deleted
-                )
         except sqlite3.Error:
-            logger.exception(
-                "Failed to forget Guest/Clan Friend %s in guild %s",
-                after.id, after.guild.id
-            )
+            logger.exception("Could not clear staff-removal evidence for %s", after.id)
 
     # ========================================================
     # WOM API
@@ -1924,7 +1906,7 @@ class TasksCog(commands.Cog):
             """,
             (guild.id,)
         )
-        primary_links = cursor.fetchall()
+        primary_links = clan_sync_link_rows(guild, cursor.fetchall())
 
         cursor.execute(
             """
@@ -1934,7 +1916,7 @@ class TasksCog(commands.Cog):
             """,
             (guild.id,)
         )
-        alt_links = cursor.fetchall()
+        alt_links = clan_sync_link_rows(guild, cursor.fetchall())
 
         wom_by_id = {
             membership["player"]["id"]: membership
@@ -2221,11 +2203,6 @@ class TasksCog(commands.Cog):
         if has_non_clan_role(
             member
         ):
-            forget_member_links(
-                cursor,
-                guild.id,
-                member.id
-            )
             clear_staff_role_removal_candidates(cursor, guild.id, member.id)
             return {
                 "status": "non_clan_ignored"
@@ -3571,7 +3548,7 @@ class TasksCog(commands.Cog):
         if status == "non_clan_ignored":
             await interaction.followup.send(
                 f"{member.mention} has Guest or Clan Friend and is excluded "
-                "from Novus Sync. Any stored account links have been forgotten.",
+                "from clan rank sync. Saved account links are kept.",
                 ephemeral=True
             )
             return
@@ -4340,7 +4317,6 @@ class TasksCog(commands.Cog):
             member = guild.get_member(discord_id)
 
             if member is not None and has_non_clan_role(member):
-                forget_member_links(c, guild.id, member.id)
                 clear_staff_role_removal_candidates(c, guild.id, discord_id)
                 continue
 
@@ -5078,7 +5054,7 @@ class TasksCog(commands.Cog):
             (guild.id,)
         )
 
-        link_rows = c.fetchall()
+        link_rows = clan_sync_link_rows(guild, c.fetchall())
         conn.close()
 
         discord_by_wom_id = {
@@ -5307,15 +5283,6 @@ class TasksCog(commands.Cog):
             else None
         )
 
-        # Forget non-clan links even if the WOM API is unavailable.
-        conn = sqlite3.connect("wom_multi.db")
-        try:
-            cursor = conn.cursor()
-            forget_non_clan_links(cursor, guild)
-            conn.commit()
-        finally:
-            conn.close()
-
         group_data, api_status = await self.get_wom_group(
             group_id
         )
@@ -5451,7 +5418,6 @@ class TasksCog(commands.Cog):
             )
 
             if member is not None and has_non_clan_role(member):
-                forget_member_links(c, guild.id, member.id)
                 clear_staff_role_removal_candidates(c, guild.id, discord_id)
                 continue
 

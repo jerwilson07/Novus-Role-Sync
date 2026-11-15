@@ -46,10 +46,10 @@ NON_CLAN_ROLE_IDS = frozenset({GUEST_ROLE_ID, CLAN_FRIEND_ROLE_ID})
 
 
 def has_non_clan_role(member) -> bool:
-    """Guests and Clan Friends are never eligible for Novus account syncing."""
+    """Identify non-clan roles that block active clan sync, not saved links."""
     return any(
         role.id in NON_CLAN_ROLE_IDS
-        for role in member.roles
+        for role in getattr(member, "roles", ())
     )
 
 
@@ -65,27 +65,9 @@ def forget_member_links(cursor, guild_id: int, discord_id: int) -> int:
     return deleted
 
 
-def forget_non_clan_links(cursor, guild) -> tuple[int, int]:
-    """Remove all saved links for current Guests/Clan Friends in this guild."""
-    cursor.execute(
-        """
-        SELECT discord_id FROM links WHERE guild_id = ?
-        UNION
-        SELECT discord_id FROM alt_links WHERE guild_id = ?
-        """,
-        (guild.id, guild.id),
-    )
-    ids = [row[0] for row in cursor.fetchall()]
-    people = accounts = 0
-    for discord_id in ids:
-        member = guild.get_member(discord_id)
-        if member is None or not has_non_clan_role(member):
-            continue
-        deleted = forget_member_links(cursor, guild.id, discord_id)
-        if deleted:
-            people += 1
-            accounts += deleted
-    return people, accounts
+def clan_sync_link_rows(guild, rows):
+    """Keep Guest/Clan Friend links out of clan matching and reports."""
+    return [row for row in rows if not has_non_clan_role(guild.get_member(row[0]))]
 
 
 def forget_unmatched_alt_links(cursor, guild_id: int, memberships: list) -> int:

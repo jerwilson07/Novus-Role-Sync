@@ -663,6 +663,7 @@ class TasksCog(commands.Cog):
         self.bot = bot
         self._nov11_catchup_task = None
         self._requested_reset_sync_task = None
+        self._requested_staff_update_task = None
         self._one_time_case_sync_task = None
         self._last_staff_report_message_ids = {}
 
@@ -678,6 +679,8 @@ class TasksCog(commands.Cog):
         self.history_backfill_loop.cancel()
         if self._requested_reset_sync_task:
             self._requested_reset_sync_task.cancel()
+        if self._requested_staff_update_task:
+            self._requested_staff_update_task.cancel()
         self.cleanup_inactive_guilds.cancel()
         self.backup_database.cancel()
         self.update_stats.cancel()
@@ -1082,11 +1085,72 @@ class TasksCog(commands.Cog):
                 self._run_requested_reset_sync()
             )
 
+        if self._requested_staff_update_task is None or self._requested_staff_update_task.done():
+            self._requested_staff_update_task = asyncio.create_task(
+                self._post_requested_staff_update()
+            )
+
         # Staff-requested immediate run: once per guild, persisted across restarts.
         if self._one_time_case_sync_task is None or self._one_time_case_sync_task.done():
             self._one_time_case_sync_task = asyncio.create_task(
                 self._run_one_time_case_sync()
             )
+
+    async def _post_requested_staff_update(self):
+        """Deliver the November 15 staff update to the authorized roles once."""
+        await self.bot.wait_until_ready()
+        day = datetime.datetime.now(ZoneInfo("America/New_York")).date()
+        if day != datetime.date(2026, 11, 15):
+            return
+        guild = self.bot.get_guild(NOVUS_GUILD_ID)
+        if guild is None:
+            return
+        key = f"novus_staff_update_20261115:{guild.id}"
+        conn = sqlite3.connect("wom_multi.db")
+        try:
+            if self._one_time_delivery_sent(conn.cursor(), key):
+                return
+        finally:
+            conn.close()
+
+        channel = guild.get_channel(NOVUS_MOD_CHAT_CHANNEL_ID)
+        role_ids = (COUNCIL_ROLE_ID, MODERATOR_ROLE_ID, TRIAL_MOD_ROLE_ID)
+        roles = [guild.get_role(role_id) for role_id in role_ids]
+        if channel is None or channel.name != "mod-chat" or not all(roles) or guild.me is None:
+            logger.warning("Requested Novus staff update: channel or staff roles unavailable")
+            return
+        permissions = channel.permissions_for(guild.me)
+        if not permissions.send_messages:
+            logger.warning("Requested Novus staff update: missing Send Messages")
+            return
+        can_notify = permissions.mention_everyone or all(role.mentionable for role in roles)
+        content = (
+            " ".join(role.mention for role in roles) + "\n"
+            "**Novus Sync update**\n"
+            "• **Tenure:** A confirmed clan departure resets that account's tenure on rejoin. "
+            "Name changes and temporary WOM roster gaps don't count. The four returning accounts "
+            "were reset to Nov 15, and linked alts still track tenure separately.\n"
+            "• **Linking:** Staff can use `/linkuser` for Verified-only users. "
+            "This links the RSN without granting Member or tenure roles.\n"
+            "• **Noon report:** The 12 PM Eastern Auto-Link + SyncAll report combines duplicate notices. "
+            "**Member Role Without Tenure** flags users for review on first sight, then at most once "
+            "every 7 days per person if still unresolved. It doesn't change roles."
+        )
+        try:
+            message = await channel.send(
+                content,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, users=False, roles=roles, replied_user=False,
+                ),
+                nonce="novus-staff-261115",
+            )
+            self._mark_one_time_delivery(key, message.id)
+            logger.info(
+                "Posted requested Novus staff update channel=%s message=%s roles=%s can_notify=%s",
+                channel.id, message.id, role_ids, can_notify,
+            )
+        except (discord.HTTPException, sqlite3.Error):
+            logger.exception("Could not deliver requested Novus staff update")
 
     async def _run_requested_reset_sync(self):
         """After the four verified resets, run the normal workflow once on request."""

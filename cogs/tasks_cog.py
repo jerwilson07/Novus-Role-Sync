@@ -19,6 +19,7 @@ from common import (
 from tenure_history import (
     cumulative_effective_join, record_roster, refresh_activity_history,
     set_manual_previous_tenure, prior_tenure, get_tenure_diagnostics,
+    apply_tenure_resets, get_tenure_reset, REQUESTED_REJOIN_RESETS, RESET_POLICY_START,
 )
 
 
@@ -622,6 +623,7 @@ class TasksCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._nov11_catchup_task = None
+        self._requested_reset_sync_task = None
         self._one_time_case_sync_task = None
         self._last_staff_report_message_ids = {}
 
@@ -635,6 +637,8 @@ class TasksCog(commands.Cog):
     def cog_unload(self):
         self.sync_roles_loop.cancel()
         self.history_backfill_loop.cancel()
+        if self._requested_reset_sync_task:
+            self._requested_reset_sync_task.cancel()
         self.cleanup_inactive_guilds.cancel()
         self.backup_database.cancel()
         self.update_stats.cancel()
@@ -1034,11 +1038,79 @@ class TasksCog(commands.Cog):
                 self._post_nov11_catchup_once()
             )
 
+        if self._requested_reset_sync_task is None or self._requested_reset_sync_task.done():
+            self._requested_reset_sync_task = asyncio.create_task(
+                self._run_requested_reset_sync()
+            )
+
         # Staff-requested immediate run: once per guild, persisted across restarts.
         if self._one_time_case_sync_task is None or self._one_time_case_sync_task.done():
             self._one_time_case_sync_task = asyncio.create_task(
                 self._run_one_time_case_sync()
             )
+
+    async def _run_requested_reset_sync(self):
+        """After the four verified resets, run the normal workflow once on request."""
+        await self.bot.wait_until_ready()
+        guild = self.bot.get_guild(NOVUS_GUILD_ID)
+        if guild is None or datetime.datetime.now(datetime.timezone.utc) < RESET_POLICY_START:
+            return
+        key = f"novus_requested_reset_sync_20261115:{guild.id}"
+
+        for attempt in range(4):
+            conn = sqlite3.connect("wom_multi.db")
+            try:
+                config = conn.execute(
+                    """SELECT group_id, nickname_enforcement, dm_notifications_on
+                       FROM guild_configs WHERE guild_id = ?""", (guild.id,),
+                ).fetchone()
+                already_sent = self._one_time_delivery_sent(conn.cursor(), key)
+            finally:
+                conn.close()
+            if not config or not config[0] or already_sent:
+                return
+
+            try:
+                group_data, status = await self.get_wom_group(config[0])
+                if not has_verifiable_wom_roster(group_data) or group_data.get("id") != config[0]:
+                    logger.warning("Requested Novus reset: WOM roster unavailable (%s)", status)
+                else:
+                    conn = sqlite3.connect("wom_multi.db")
+                    try:
+                        apply_tenure_resets(
+                            conn.cursor(), guild.id, config[0], group_data["memberships"],
+                        )
+                        rows = conn.execute(
+                            """SELECT q.rsn, q.player_id, r.reset_at
+                               FROM tenure_reset_requests q
+                               JOIN tenure_resets r USING (guild_id, group_id, player_id)
+                               WHERE q.guild_id = ? AND q.group_id = ?""",
+                            (guild.id, config[0]),
+                        ).fetchall()
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    requested = {name.casefold() for name in REQUESTED_REJOIN_RESETS}
+                    resolved = {rsn for rsn, _, _ in rows}
+                    logger.info("Requested Novus tenure resets persisted: %s", rows)
+                    if not requested <= resolved:
+                        logger.warning("Requested Novus resets pending roster verification: %s", sorted(requested - resolved))
+                    else:
+                        self._last_staff_report_message_ids.pop(guild.id, None)
+                        await self.sync_guild(
+                            guild, config[0], NOVUS_MOD_CHAT_CHANNEL_ID, config[1], config[2],
+                            report_label="Requested Auto-Link + SyncAll",
+                            reset_names=REQUESTED_REJOIN_RESETS,
+                        )
+                        message_id = self._last_staff_report_message_ids.get(guild.id)
+                        if message_id:
+                            self._mark_one_time_delivery(key, message_id)
+                            logger.info("Requested Novus Auto-Link + SyncAll posted to #mod-chat message=%s", message_id)
+                            return
+            except Exception:
+                logger.exception("Requested Novus Auto-Link + SyncAll failed")
+            if attempt < 3:
+                await asyncio.sleep(30)
 
     async def _run_one_time_case_sync(self):
         """Run the requested nickname-only pass once, independently of noon sync."""
@@ -1382,11 +1454,12 @@ class TasksCog(commands.Cog):
         if not isinstance(group_id, int):
             return
         memberships = group_data.get("memberships", [])
-        record_roster(cursor, guild.id, group_id, memberships)
         await refresh_activity_history(
             self.bot.http_session, build_wom_headers(),
             cursor, guild.id, group_id
         )
+        apply_tenure_resets(cursor, guild.id, group_id, memberships)
+        record_roster(cursor, guild.id, group_id, memberships)
 
     # ========================================================
     # ALT ACCOUNT VERIFICATION
@@ -1403,9 +1476,8 @@ class TasksCog(commands.Cog):
         """
         Resolve and refresh linked alt identities.
 
-        Alts temporarily outside Novus remain linked so their independent
-        tenure history can resume if they later rejoin. Only current in-clan
-        alts participate in tenure and promotion calculations.
+        Alts outside Novus remain linked. Only current in-clan alts count,
+        and a confirmed departure starts a new tenure stint on rejoin.
         """
 
         cursor.execute(
@@ -1611,43 +1683,24 @@ class TasksCog(commands.Cog):
                 membership
             )
 
-            effective_joined_at = None
-            prior_service = datetime.timedelta(0)
+            reset_at = get_tenure_reset(cursor, guild_id, group_id, player_id)
+            effective_joined_at, prior_service = cumulative_effective_join(
+                cursor, guild_id, group_id, player_id, joined_at,
+            )
+            if reset_at:
+                joined_at = effective_joined_at
+
             expected_rank = None
             eligible_at = None
             next_rank = None
             next_eligible_at = None
 
-            if joined_at is not None:
-                (
-                    effective_joined_at,
-                    prior_service
-                ) = cumulative_effective_join(
-                    cursor,
-                    guild_id,
-                    group_id,
-                    player_id,
-                    joined_at
-                )
-
-                if wom_role not in NOVUS_TRIAL_WOM_RANKS:
-                    expected_rank = expected_tenure_rank(
-                        effective_joined_at
-                    )
-                    eligible_at = tenure_eligible_at(
-                        effective_joined_at,
-                        expected_rank
-                    )
-
-                    next_rank = next_tenure_rank(
-                        expected_rank
-                    )
-
-                    if next_rank:
-                        next_eligible_at = tenure_eligible_at(
-                            effective_joined_at,
-                            next_rank
-                        )
+            if effective_joined_at and wom_role not in NOVUS_TRIAL_WOM_RANKS:
+                expected_rank = expected_tenure_rank(effective_joined_at)
+                eligible_at = tenure_eligible_at(effective_joined_at, expected_rank)
+                next_rank = next_tenure_rank(expected_rank)
+                if next_rank:
+                    next_eligible_at = tenure_eligible_at(effective_joined_at, next_rank)
 
             snapshots.append(
                 {
@@ -1658,6 +1711,7 @@ class TasksCog(commands.Cog):
                     "joined_at": joined_at,
                     "effective_joined_at": effective_joined_at,
                     "prior_service": prior_service,
+                    "reset_at": reset_at,
                     "expected_rank": expected_rank,
                     "eligible_at": eligible_at,
                     "next_rank": next_rank,
@@ -2091,8 +2145,8 @@ class TasksCog(commands.Cog):
     ):
         """Remove only mapped tenure roles; never touch the Member role.
 
-        Saved account links and tenure history are intentionally preserved so
-        a future rejoin can restore the correct earned tenure.
+        Saved links and audit history are preserved. Confirmed departures
+        prevent old service from counting on rejoin.
         """
 
         cursor.execute(
@@ -2194,10 +2248,9 @@ class TasksCog(commands.Cog):
         """
         Sync one linked Discord member.
 
-        Primary and alt accounts keep separate cumulative tenure. The Discord
-        tenure role is based on whichever current linked in-clan account has
-        independently earned the highest tenure rank. Discord tenure never
-        moves downward automatically.
+        Primary and alt accounts accrue tenure separately. Discord uses the
+        highest eligible linked account. A verified reset can lower the
+        mapped tenure role, but a roster gap cannot.
         """
 
         if has_non_clan_role(
@@ -2594,7 +2647,7 @@ class TasksCog(commands.Cog):
         # The Member role is never included in this role-change list.
 
         # ----------------------------------------------------
-        # TENURE SYNC - HIGHEST LINKED ACCOUNT, NEVER DOWNGRADE
+        # TENURE SYNC - HIGHEST LINKED ACCOUNT, VERIFIED RESETS ONLY
         # ----------------------------------------------------
 
         basis = (
@@ -2682,10 +2735,26 @@ class TasksCog(commands.Cog):
 
                     tenure_status = "promoted"
 
+                elif (
+                    current_level > expected_level
+                    and membership is not None
+                    and not missing_alts
+                    and any(account.get("reset_at") for account in account_tenures)
+                    and all(
+                        account.get("expected_rank")
+                        or account.get("wom_role") in NOVUS_TRIAL_WOM_RANKS
+                        for account in account_tenures
+                    )
+                ):
+                    if expected_role not in member_roles:
+                        tenure_roles_to_add.append(expected_role)
+                    tenure_roles_to_remove.extend(
+                        role for role in member.roles
+                        if role.id in tenure_role_by_id and role.id != expected_role.id
+                    )
+                    tenure_status = "reset_rank"
                 else:
-                    # Keep the highest existing tenure role even if the
-                    # account that originally earned it later leaves Novus.
-                    # Only lower duplicate tenure roles are removed.
+                    # Retain the higher role when a reset was not verified.
                     retained_level = max(
                         current_level,
                         expected_level
@@ -2825,12 +2894,10 @@ class TasksCog(commands.Cog):
             "rsn": current_rsn,
             "wom_role": current_wom_role,
             "joined_at": (
-                get_membership_joined_at(
-                    membership
-                )
-                if membership is not None
-                else None
+                basis.get("joined_at") if basis
+                else get_membership_joined_at(membership) if membership else None
             ),
+            "tenure_basis_reset": basis.get("reset_at") if basis else None,
             "effective_joined_at": (
                 basis.get(
                     "effective_joined_at"
@@ -2983,7 +3050,7 @@ class TasksCog(commands.Cog):
 
         documented = diagnostic["wom_previous_days"]
         manual = diagnostic["manual_previous_days"]
-        credited = max(documented, manual)
+        credited = diagnostic["credited_previous_days"]
         event_lines = [
             f"- `{kind}` {stamp[:10]}"
             for kind, stamp in diagnostic["events"][-12:]
@@ -3022,7 +3089,12 @@ class TasksCog(commands.Cog):
             "**Saved WOM group events (last 12)**\n"
             + "\n".join(event_lines)
         )
-        if joined_at and documented == 0 and manual == 0:
+        if diagnostic["reset_at"]:
+            response += (
+                f"\n\n**Tenure reset:** `{diagnostic['reset_at'].astimezone(ZoneInfo('America/New_York')).date()}`. "
+                "Earlier service remains visible here for audit only."
+            )
+        elif joined_at and documented == 0 and manual == 0:
             response += (
                 "\n\n**Why prior tenure is missing:** No completed "
                 "previous Novus membership period has been reconstructed. "
@@ -3337,7 +3409,7 @@ class TasksCog(commands.Cog):
 
     @app_commands.command(
         name="tenurecredit",
-        description="Set verified days previously spent in Novus before a rejoin."
+        description="Correct legacy tenure credit for stints before the reset policy."
     )
     @app_commands.describe(
         member="Returning Novus member to credit.",
@@ -3422,6 +3494,13 @@ class TasksCog(commands.Cog):
 
             # Update our group events before computing the automatic credit.
             await self.prepare_tenure_history(c, guild, group_data)
+            if previous_days and get_tenure_reset(c, guild.id, group_id, player_id):
+                conn.commit()
+                await interaction.followup.send(
+                    "This account has a confirmed tenure reset. Earlier stints cannot be credited.",
+                    ephemeral=True,
+                )
+                return
             recorded = prior_tenure(
                 c, guild.id, group_id, player_id, joined_at
             )
@@ -3438,7 +3517,7 @@ class TasksCog(commands.Cog):
                 f"(`{current_membership['player']['username']}`).\n"
                 f"Manual previous service: **{previous_days} days**\n"
                 f"Recorded WOM previous service: **{recorded.days} days**\n"
-                f"Previous service credited (whichever is greater): "
+                f"Previous service credited: "
                 f"**{previous.total_seconds() / 86400:.1f} days**\n"
                 "The current stint is counted separately. "
                 "Use `/syncuser` to recalculate their rank now."
@@ -3576,7 +3655,7 @@ class TasksCog(commands.Cog):
             await interaction.followup.send(
                 f"{member.mention} has no linked RSN currently active in Novus. "
                 f"Removed: {removed_text}. Saved account links and tenure history "
-                "were preserved for a future rejoin.",
+                "were preserved for audit.",
                 ephemeral=True
             )
             return
@@ -3672,11 +3751,12 @@ class TasksCog(commands.Cog):
                     f"\nPrevious Novus Service Credited: "
                     f"**{prior_days:.1f} days**"
                 )
-            response += (
-                f"\nDocumented Clan Tenure: "
-                f"**{(datetime.datetime.now(datetime.timezone.utc) - joined_at).total_seconds() / 86400 + prior_days:.1f} days**"
-                " (may exclude older stints not recorded by WOM)"
-            )
+            effective = result.get("effective_joined_at") or joined_at
+            days = max(0, (datetime.datetime.now(datetime.timezone.utc) - effective).days)
+            response += f"\nDocumented Clan Tenure: **{days} days**"
+            if result.get("tenure_basis_reset"):
+                response += " (current stint only)"
+
 
         if expected_tenure:
             response += (
@@ -3702,6 +3782,7 @@ class TasksCog(commands.Cog):
 
         tenure_messages = {
             "promoted": "Promoted upward based on tenure.",
+            "reset_rank": "Adjusted the Discord tenure role after a confirmed rejoin.",
             "current": "Tenure rank is correct.",
             "duplicate_cleanup": "Removed duplicate lower tenure role(s).",
             "retained_rank": "Existing tenure rank retained. Historical Novus service may be missing from WOM records; no demotion was made.",
@@ -4360,7 +4441,7 @@ class TasksCog(commands.Cog):
                 )
                 inactive_member_cleanups.append(
                     f"- {member.mention}: removed {removed_text}; "
-                    "saved RSN/tenure history retained"
+                    "saved RSN links retained"
                 )
                 continue
 
@@ -5273,7 +5354,10 @@ class TasksCog(commands.Cog):
         group_id,
         log_channel_id,
         nickname_enforcement,
-        dm_notifications_on
+        dm_notifications_on,
+        *,
+        report_label="Novus Noon Staff Sync",
+        reset_names=(),
     ):
         log_channel = (
             self.bot.get_channel(
@@ -5294,7 +5378,7 @@ class TasksCog(commands.Cog):
                 conn.commit()
             finally:
                 conn.close()
-            if log_channel:
+            if log_channel and not reset_names:
                 try:
                     await log_channel.send(
                         "WOM sync failed because the Wise Old Man API could not be reached."
@@ -5329,6 +5413,10 @@ class TasksCog(commands.Cog):
                     guild.id
                 )
 
+        if reset_names and (autolink_result is None or autolink_result.get("error")):
+            logger.warning("Requested sync not reported: Auto-Link did not complete")
+            return
+
         conn = sqlite3.connect(
             "wom_multi.db"
         )
@@ -5359,8 +5447,9 @@ class TasksCog(commands.Cog):
         eligible_links = []
 
         automatic_promotions = []
-        wom_name_updates = []
-        autolink_updates = []
+        reset_rank_updates = []
+        account_updates = {}
+        missing_memberships = set()
         inactive_member_cleanups = []
         inactive_trial_cleanups = list(
             trial_cleanup_result.get(
@@ -5370,7 +5459,6 @@ class TasksCog(commands.Cog):
         )
         staff_updates = []
         duplicate_cleanups = []
-        wom_rank_mismatches = []
         missing_join_dates = []
         tenure_mapping_issues = []
         skipped_members = []
@@ -5387,8 +5475,8 @@ class TasksCog(commands.Cog):
                 "linked_members",
                 []
             ):
-                autolink_updates.append(
-                    f"- Linked {member.mention} -> `{rsn}`"
+                account_updates.setdefault(member.id, []).append(
+                    f"linked `{rsn}`"
                 )
 
             for (
@@ -5399,17 +5487,16 @@ class TasksCog(commands.Cog):
                 "repaired_members",
                 []
             ):
-                autolink_updates.append(
-                    f"- Repaired {member.mention}: "
-                    f"`{old_rsn or 'unknown'}` -> `{new_rsn}`"
+                account_updates.setdefault(member.id, []).append(
+                    f"repaired `{old_rsn or 'unknown'}` → `{new_rsn}`"
                 )
 
             for member, alt_rsn in autolink_result.get(
                 "alt_links_added",
                 []
             ):
-                autolink_updates.append(
-                    f"- Added alt for {member.mention}: `{alt_rsn}`"
+                account_updates.setdefault(member.id, []).append(
+                    f"linked alt `{alt_rsn}`"
                 )
 
         for discord_id, stored_rsn, stored_wom_id in links:
@@ -5486,7 +5573,7 @@ class TasksCog(commands.Cog):
                 )
                 inactive_member_cleanups.append(
                     f"- {member.mention}: removed {removed_text}; "
-                    "saved RSN/tenure history retained"
+                    "saved RSN links retained"
                 )
                 continue
 
@@ -5497,6 +5584,11 @@ class TasksCog(commands.Cog):
                     stored_wom_id
                 )
             )
+
+            if result["status"] == "membership_unverified":
+                # The link audit reports this once with a clearer next step.
+                missing_memberships.add(discord_id)
+                continue
 
             if result["status"] != "success":
                 issue_line = format_sync_issue(
@@ -5526,10 +5618,9 @@ class TasksCog(commands.Cog):
                         else "saved RSN updated"
                     )
                 )
-                wom_name_updates.append(
-                    f"- {member.mention}: "
+                account_updates.setdefault(member.id, []).append(
                     f"`{result.get('previous_primary_rsn') or 'unknown'}` "
-                    f"-> `{result['rsn']}` ({rename_status})"
+                    f"→ `{result['rsn']}` ({rename_status})"
                 )
 
             tenure_status = result.get(
@@ -5541,6 +5632,12 @@ class TasksCog(commands.Cog):
                     f"- {member.mention}: "
                     f"`{result.get('current_discord_tenure_rank') or 'none'}` "
                     f"→ `{result['expected_tenure_rank']}`"
+                )
+
+            elif tenure_status == "reset_rank":
+                reset_rank_updates.append(
+                    f"- {member.mention}: "
+                    f"`{result['current_discord_tenure_rank']}` → `{result['expected_tenure_rank']}`"
                 )
 
             elif tenure_status == "duplicate_cleanup":
@@ -5559,17 +5656,6 @@ class TasksCog(commands.Cog):
                     f"- {member.mention} (`{result['rsn']}`): expected "
                     f"`{result.get('expected_tenure_rank')}`"
                 )
-
-            if result.get("wom_tenure_mismatch"):
-                for account in result.get(
-                    "wom_tenure_mismatches",
-                    []
-                ):
-                    wom_rank_mismatches.append(
-                        f"- {member.mention}: "
-                        f"`{account['wom_role']}` → "
-                        f"`{account['expected_rank']}`"
-                    )
 
             if (
                 result.get("staff_roles_added")
@@ -5652,11 +5738,19 @@ class TasksCog(commands.Cog):
                 "unlinked_full_wom_accounts"
             ]
         )
-        linked_members_without_active_rsn = (
-            link_audit[
-                "linked_members_without_active_rsn"
+        linked_members_without_active_rsn = link_audit["linked_members_without_active_rsn"]
+        known_missing_lines = set(linked_members_without_active_rsn)
+        for discord_id in sorted(missing_memberships):
+            line = f"- <@{discord_id}>: no linked RSN is currently active in Novus"
+            if line not in known_missing_lines:
+                linked_members_without_active_rsn.append(line)
+                known_missing_lines.add(line)
+        missing_join_dates = list(dict.fromkeys(
+            missing_join_dates + [
+                f"- {entry['member'].mention} (`{entry['rsn']}`)"
+                for entry in promotion_audit["missing_join_dates"]
             ]
-        )
+        ))
 
         # ----------------------------------------------------
         # TRIAL MEMBERS ENDING SOON
@@ -5783,7 +5877,8 @@ class TasksCog(commands.Cog):
         )
 
         actual_role_changes = (
-            automatic_promotions
+            reset_rank_updates
+            or automatic_promotions
             or inactive_member_cleanups
             or inactive_trial_cleanups
             or staff_updates
@@ -5808,15 +5903,15 @@ class TasksCog(commands.Cog):
 
         actionable_items = any((
             automatic_promotions,
-            wom_name_updates,
-            autolink_updates,
+            reset_rank_updates,
+            reset_names,
+            account_updates,
             inactive_member_cleanups,
             inactive_trial_cleanups,
             due_today_promotions,
             overdue_promotions,
             staff_updates,
             duplicate_cleanups,
-            wom_rank_mismatches,
             missing_join_dates,
             tenure_mapping_issues,
             trial_lines,
@@ -5838,31 +5933,27 @@ class TasksCog(commands.Cog):
 
             embed.description = (
                 f"Checked **{active_links_checked}** active Novus members | "
-                f"**{len(group_data.get('memberships', []))}** WOM clan accounts\n"
-                "Actionable daily exceptions and automatic changes are shown below. "
-                "Tenure roles only move upward automatically."
+                f"**{len(group_data.get('memberships', []))}** WOM clan accounts"
             )
 
-            embed.set_footer(
-                text="Novus Noon Staff Sync"
-            )
+            embed.set_footer(text=report_label)
 
-            if wom_name_updates:
+            if reset_names:
                 embed.add_field(
-                    name=f"WOM Primary Name Updates ({len(wom_name_updates)})",
-                    value="\n".join(
-                        wom_name_updates
-                    )[:1024],
-                    inline=False
+                    name="Tenure Reset to 0 Days",
+                    value=", ".join(f"`{name}`" for name in reset_names)
+                    + "\nNew stint started November 15, 2026.",
+                    inline=False,
                 )
 
-            if autolink_updates:
+            if account_updates:
                 embed.add_field(
-                    name=f"Auto-Link Updates ({len(autolink_updates)})",
+                    name=f"Account Link and Name Updates ({len(account_updates)})",
                     value="\n".join(
-                        autolink_updates
+                        f"- <@{discord_id}>: " + " · ".join(dict.fromkeys(updates))
+                        for discord_id, updates in account_updates.items()
                     )[:1024],
-                    inline=False
+                    inline=False,
                 )
 
             if inactive_member_cleanups:
@@ -5938,11 +6029,11 @@ class TasksCog(commands.Cog):
                     inline=False
                 )
 
-            if wom_rank_mismatches:
+            if reset_rank_updates:
                 embed.add_field(
-                    name=f"WOM Tenure Mismatches ({len(wom_rank_mismatches)})",
-                    value="\n".join(wom_rank_mismatches)[:1024],
-                    inline=False
+                    name=f"Discord Tenure Roles Adjusted After Reset ({len(reset_rank_updates)})",
+                    value="\n".join(reset_rank_updates)[:1024],
+                    inline=False,
                 )
 
             if trial_lines:
@@ -6037,6 +6128,16 @@ class TasksCog(commands.Cog):
                     inline=False
                 )
 
+            # Discord caps the sum of embed text at 6,000 characters.
+            # Preserve all headings/counts and keep each visible excerpt whole.
+            if len(embed) > 6000:
+                fields = list(embed.fields)
+                heading_size = len(embed) - sum(len(field.value) for field in fields)
+                budget = max(1, (5950 - heading_size) // len(fields))
+                for index, field in enumerate(fields):
+                    if len(field.value) > budget:
+                        short = field.value[:max(0, budget - 1)].rsplit("\n", 1)[0]
+                        embed.set_field_at(index, name=field.name, value=short + "…", inline=False)
             try:
                 sent_message = await log_channel.send(embed=embed)
                 self._last_staff_report_message_ids[guild.id] = (
@@ -6063,7 +6164,7 @@ class TasksCog(commands.Cog):
         )
 
         return (
-            len(automatic_promotions) + len(inactive_member_cleanups) + len(inactive_trial_cleanups) + len(staff_updates) + len(duplicate_cleanups),
+            len(automatic_promotions) + len(reset_rank_updates) + len(inactive_member_cleanups) + len(inactive_trial_cleanups) + len(staff_updates) + len(duplicate_cleanups),
             len(skipped_members) + len(failed_members),
             active_links_checked
         )
@@ -6076,8 +6177,8 @@ class TasksCog(commands.Cog):
     async def history_backfill_loop(self):
         """Recover older WOM membership periods without staff commands.
 
-        This loop only saves WOM history. Normal daily role sync applies any
-        newly recovered service to promotions, preserving the rank ladder.
+        This loop saves WOM history and confirmed reset dates. Daily sync
+        reconciles Discord tenure roles separately.
         """
         await self.bot.wait_until_ready()
 

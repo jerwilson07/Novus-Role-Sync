@@ -1,4 +1,4 @@
-"""Cumulative Novus clan tenure across separate membership periods.
+"""Track Novus clan tenure without carrying it across confirmed new departures.
 
 Uses the current in-game clan join timestamp for the active stint, WOM group
 join/leave activity for available historic stints, and local observations for
@@ -9,9 +9,16 @@ No inferred gaps are credited. Saved history is keyed by WOM player ID.
 import datetime
 import logging
 import sqlite3
+from zoneinfo import ZoneInfo
+
+from common import sanitize_rsn
 
 log = logging.getLogger("WOMBot")
 UTC = datetime.timezone.utc
+NOVUS_GUILD_ID = 1532817291048124466
+EASTERN = ZoneInfo("America/New_York")
+RESET_POLICY_START = datetime.datetime(2026, 11, 15, tzinfo=EASTERN)
+REQUESTED_REJOIN_RESETS = ("Loves Rain", "LietGhost", "Wise Old Nut", "Coxy Snurmus")
 
 
 def parse_timestamp(value):
@@ -29,6 +36,24 @@ def iso(dt):
 
 
 def initialize_tenure_tables(cursor):
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tenure_resets (
+            guild_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            player_id INTEGER NOT NULL,
+            reset_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, group_id, player_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tenure_reset_requests (
+            guild_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            rsn TEXT NOT NULL,
+            player_id INTEGER NOT NULL,
+            PRIMARY KEY (guild_id, group_id, rsn)
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tenure_observed (
             guild_id INTEGER NOT NULL,
@@ -238,6 +263,118 @@ def get_manual_previous_tenure(cursor, guild_id, group_id, player_id):
     return datetime.timedelta(days=max(0, row[0]))
 
 
+def get_tenure_reset(cursor, guild_id, group_id, player_id):
+    if guild_id != NOVUS_GUILD_ID or group_id is None or player_id is None:
+        return None
+    cursor.execute("""
+        SELECT reset_at FROM tenure_resets
+        WHERE guild_id = ? AND group_id = ? AND player_id = ?
+    """, (guild_id, group_id, player_id))
+    row = cursor.fetchone()
+    return parse_timestamp(row[0]) if row else None
+
+
+def write_tenure_reset(cursor, guild_id, group_id, player_id, joined_at):
+    """Keep reset boundaries even if a stale roster later reports an old join."""
+    cursor.execute("""
+        INSERT INTO tenure_resets (guild_id, group_id, player_id, reset_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, group_id, player_id) DO UPDATE
+        SET reset_at = excluded.reset_at
+        WHERE excluded.reset_at > tenure_resets.reset_at
+    """, (guild_id, group_id, player_id, iso(joined_at)))
+
+
+def apply_tenure_resets(cursor, guild_id, group_id, memberships, now=None):
+    """Resolve one-time corrections and record verified departures by stable ID."""
+    if guild_id != NOVUS_GUILD_ID or not isinstance(group_id, int):
+        return [], []
+    now = now or datetime.datetime.now(UTC)
+    if now < RESET_POLICY_START:
+        return [], []
+    if not isinstance(memberships, list) or not memberships or not all(
+        isinstance(m, dict)
+        and isinstance(m.get("player"), dict)
+        and isinstance(m["player"].get("id"), int)
+        for m in memberships
+    ):
+        return [], []
+
+    cursor.execute("""
+        SELECT rsn FROM tenure_reset_requests WHERE guild_id = ? AND group_id = ?
+    """, (guild_id, group_id))
+    done = {row[0] for row in cursor.fetchall()}
+    names = {}
+    current_joins = {}
+    for membership in memberships:
+        player = membership["player"]
+        player_id = player["id"]
+        for name in (player.get("username"), player.get("displayName")):
+            if isinstance(name, str) and name:
+                names.setdefault(sanitize_rsn(name).casefold(), set()).add(player_id)
+        joined = parse_timestamp(
+            membership.get("clientSyncJoinedAt") or player.get("clientSyncJoinedAt")
+        )
+        if joined and RESET_POLICY_START <= joined <= now:
+            current_joins[player_id] = joined
+
+    applied, unresolved = [], []
+    for rsn in REQUESTED_REJOIN_RESETS:
+        key = rsn.casefold()
+        if key in done:
+            continue
+        matches = names.get(key, set())
+        if len(matches) != 1:
+            unresolved.append(rsn)
+            continue
+        player_id = next(iter(matches))
+        joined = current_joins.get(player_id)
+        reset_at = (
+            joined if joined and joined.astimezone(EASTERN).date() == RESET_POLICY_START.date()
+            else RESET_POLICY_START
+        )
+        write_tenure_reset(cursor, guild_id, group_id, player_id, reset_at)
+        cursor.execute("""
+            INSERT INTO tenure_reset_requests (guild_id, group_id, rsn, player_id)
+            VALUES (?, ?, ?, ?)
+        """, (guild_id, group_id, key, player_id))
+        applied.append((rsn, player_id, reset_at))
+
+    # A roster omission or a WOM-only add/remove does not count. Require a
+    # same-clan departure event plus a fresh in-game join for that player ID.
+    cursor.execute("""
+        SELECT player_id, MAX(event_at) FROM tenure_activity
+        WHERE guild_id = ? AND group_id = ? AND event_type = 'left'
+          AND event_at >= ? AND event_at <= ?
+        GROUP BY player_id
+    """, (guild_id, group_id, iso(RESET_POLICY_START), iso(now)))
+    for player_id, left_raw in cursor.fetchall():
+        joined = current_joins.get(player_id)
+        left = parse_timestamp(left_raw)
+        if joined is None or left is None:
+            continue
+        if left <= joined:
+            write_tenure_reset(cursor, guild_id, group_id, player_id, joined)
+        elif left.astimezone(EASTERN).date() == joined.astimezone(EASTERN).date():
+            # The tracker may log the departure after the in-game timestamp
+            # when someone leaves and rejoins on the same day. In that case,
+            # corroborate it with a WOM re-add and a previously observed join.
+            cursor.execute("""
+                SELECT 1 FROM tenure_activity
+                WHERE guild_id = ? AND group_id = ? AND player_id = ?
+                  AND event_type = 'joined' AND event_at > ? AND event_at <= ?
+            """, (guild_id, group_id, player_id, left_raw, iso(now)))
+            recorded_readd = cursor.fetchone() is not None
+            cursor.execute("""
+                SELECT 1 FROM tenure_observed
+                WHERE guild_id = ? AND group_id = ? AND player_id = ?
+                  AND joined_at < ? AND last_seen_at < ?
+            """, (guild_id, group_id, player_id, iso(joined), left_raw))
+            if recorded_readd and cursor.fetchone():
+                write_tenure_reset(cursor, guild_id, group_id, player_id, joined)
+    return applied, unresolved
+
+
 def set_manual_previous_tenure(cursor, guild_id, group_id, player_id, days):
     """Set verified previous clan service. Zero removes the manual credit.
 
@@ -248,6 +385,8 @@ def set_manual_previous_tenure(cursor, guild_id, group_id, player_id, days):
         raise ValueError("Previous service must be an integer from 0 to 3650 days")
     if not isinstance(group_id, int) or not isinstance(player_id, int):
         raise ValueError("A linked WOM group and player ID are required")
+    if days and get_tenure_reset(cursor, guild_id, group_id, player_id):
+        raise ValueError("Prior stints cannot be credited after a confirmed reset")
     if days == 0:
         cursor.execute("""
             DELETE FROM tenure_manual_credit
@@ -265,11 +404,14 @@ def set_manual_previous_tenure(cursor, guild_id, group_id, player_id, days):
 
 
 def cumulative_effective_join(cursor, guild_id, group_id, player_id, joined_at):
-    """Equivalent continuous start time from the largest verified previous-service record.
+    """Use the new stint after a reset, or the grandfathered legacy credit.
 
     A manually verified total is a floor, not extra service to double count
     on top of recorded WOM join/leave events.
     """
+    reset_at = get_tenure_reset(cursor, guild_id, group_id, player_id)
+    if reset_at is not None:
+        return reset_at.astimezone(EASTERN), datetime.timedelta(0)
     if joined_at is None:
         return None, datetime.timedelta(0)
     recorded = prior_tenure(cursor, guild_id, group_id, player_id, joined_at)
@@ -435,8 +577,12 @@ def get_tenure_diagnostics(cursor, guild_id, group_id, player_id, joined_at):
                 matched_previous_periods += 1
             opened = None
 
+    reset_at = get_tenure_reset(cursor, guild_id, group_id, player_id)
+    _, credited = cumulative_effective_join(cursor, guild_id, group_id, player_id, joined_at)
     return {
         "events": events,
+        "reset_at": reset_at,
+        "credited_previous_days": credited.total_seconds() / 86400,
         "matched_previous_periods": matched_previous_periods,
         "closed_observed_stints": observed_closed,
         "history_offset": offset,

@@ -10,6 +10,7 @@ import asyncio
 import os
 import shutil
 import re
+import json
 
 from common import (
     WOM_API_KEY, sanitize_rsn, has_non_clan_role, clan_sync_link_rows,
@@ -613,6 +614,44 @@ def classify_sync_issue(result: dict) -> str:
         return "failed"
 
     return "skipped"
+
+
+MISSING_TENURE_REPORT_DAYS = 7
+
+
+def member_ids_without_tenure(members, tenure_role_ids=(), role_changes=None):
+    """Evaluate Discord roles, including successful edits not yet in the cache."""
+    tenure_role_ids = set(tenure_role_ids)
+    role_changes = role_changes or {}
+    flagged = set()
+    for member in members:
+        if getattr(member, "bot", False):
+            continue
+        roles = {role.id: role for role in member.roles}
+        added, removed = role_changes.get(member.id, ((), ()))
+        for role in removed:
+            roles.pop(role.id, None)
+        roles.update((role.id, role) for role in added)
+        if not any(role.name.strip().casefold() == "member" for role in roles.values()):
+            continue
+        if any(
+            role.id in tenure_role_ids or role.name.strip().casefold() in NOVUS_TENURE_ROLES
+            for role in roles.values()
+        ):
+            continue
+        flagged.add(member.id)
+    return flagged
+
+
+def missing_tenure_report_due(member_ids, saved_dates, today):
+    """Return first-time and weekly reminders without mutating the saved state."""
+    cutoff = (today - datetime.timedelta(days=MISSING_TENURE_REPORT_DAYS)).isoformat()
+    last_reported = {
+        member_id: stamp for member_id, stamp in saved_dates.items()
+        if isinstance(stamp, str) and cutoff < stamp <= today.isoformat()
+    }
+    due = sorted(member_id for member_id in member_ids if str(member_id) not in last_reported)
+    return due, last_reported
 
 
 # ============================================================
@@ -5450,6 +5489,11 @@ class TasksCog(commands.Cog):
         reset_rank_updates = []
         account_updates = {}
         missing_memberships = set()
+        report_missing_tenure = (
+            guild.id == NOVUS_GUILD_ID and log_channel_id == NOVUS_MOD_CHAT_CHANNEL_ID
+            and log_channel is not None
+        )
+        report_role_changes = {}
         inactive_member_cleanups = []
         inactive_trial_cleanups = list(
             trial_cleanup_result.get(
@@ -5557,6 +5601,11 @@ class TasksCog(commands.Cog):
                 continue
 
             active_links_checked += 1
+
+            if report_missing_tenure and result["status"] == "success":
+                report_role_changes[member.id] = (
+                    result.get("roles_added", ()), result.get("roles_removed", ()),
+                )
 
             if result["status"] == "inactive_member_cleaned":
                 removed_roles = result.get(
@@ -5745,6 +5794,50 @@ class TasksCog(commands.Cog):
             if line not in known_missing_lines:
                 linked_members_without_active_rsn.append(line)
                 known_missing_lines.add(line)
+        missing_tenure_ids = []
+        missing_tenure_report_key = f"member_without_tenure_report_v1:{guild.id}"
+        missing_tenure_report_dates = {}
+        missing_tenure_details = set()
+        today = datetime.datetime.now(ZoneInfo("America/New_York")).date()
+        if report_missing_tenure:
+            c.execute(
+                "SELECT wom_role, discord_role_id FROM role_mappings WHERE guild_id = ?",
+                (guild.id,),
+            )
+            mapped_tenure_ids = set()
+            for rank, role_id in c.fetchall():
+                role = guild.get_role(role_id)
+                if (
+                    rank and rank.strip().casefold() in NOVUS_TENURE_ROLES
+                    and role is not None and role.id not in PROTECTED_NON_TENURE_ROLE_IDS
+                    and role.name.strip().casefold() not in PROTECTED_NON_TENURE_ROLE_NAMES
+                ):
+                    mapped_tenure_ids.add(role.id)
+            flagged = member_ids_without_tenure(guild.members, mapped_tenure_ids, report_role_changes)
+            row = c.execute(
+                "SELECT value FROM bot_stats WHERE key = ?", (missing_tenure_report_key,),
+            ).fetchone()
+            try:
+                saved = json.loads(row[0]) if row else {}
+            except (TypeError, ValueError):
+                saved = {}
+                logger.warning("Could not read missing tenure report history for guild %s", guild.id)
+            missing_tenure_ids, missing_tenure_report_dates = missing_tenure_report_due(
+                flagged, saved if isinstance(saved, dict) else {}, today,
+            )
+            # Show the same missing-roster issue only once for these members,
+            # and honor the weekly reminder even when they have a saved RSN.
+            roster_line_to_id = {
+                f"- <@{member_id}>: no linked RSN is currently active in Novus": member_id
+                for member_id in flagged
+            }
+            missing_tenure_details = {
+                roster_line_to_id[line] for line in linked_members_without_active_rsn
+                if line in roster_line_to_id
+            }
+            linked_members_without_active_rsn = [
+                line for line in linked_members_without_active_rsn if line not in roster_line_to_id
+            ]
         missing_join_dates = list(dict.fromkeys(
             missing_join_dates + [
                 f"- {entry['member'].mention} (`{entry['rsn']}`)"
@@ -5919,6 +6012,7 @@ class TasksCog(commands.Cog):
             failed_members,
             unlinked_full_wom_accounts,
             linked_members_without_active_rsn,
+            missing_tenure_ids,
             removed_users_count,
         ))
 
@@ -6055,6 +6149,25 @@ class TasksCog(commands.Cog):
                     inline=False
                 )
 
+            missing_tenure_field_index = None
+            if missing_tenure_ids:
+                missing_tenure_field_index = len(embed.fields)
+                lines = []
+                used = 0
+                for member_id in missing_tenure_ids:
+                    detail = " (no active linked RSN)" if member_id in missing_tenure_details else ""
+                    line = f"- <@{member_id}>{detail}"
+                    if used + len(line) + 1 > 1022:
+                        lines.append("…")
+                        break
+                    lines.append(line)
+                    used += len(line) + 1
+                embed.add_field(
+                    name=f"Member Role Without Tenure ({len(missing_tenure_ids)})",
+                    value="\n".join(lines),
+                    inline=False,
+                )
+
             if linked_members_without_active_rsn:
                 embed.add_field(
                     name=(
@@ -6147,6 +6260,26 @@ class TasksCog(commands.Cog):
                     "Sent Novus staff sync report to channel=%s message=%s",
                     log_channel_id, sent_message.id,
                 )
+                if missing_tenure_field_index is not None:
+                    # Only start the cooldown for mentions actually shown.
+                    value = embed.fields[missing_tenure_field_index].value
+                    shown = re.findall(r"(?m)^- <@(\d+)>(?: \(no active linked RSN\))?…?$", value)
+                    if shown:
+                        missing_tenure_report_dates.update(
+                            (member_id, today.isoformat()) for member_id in shown
+                        )
+                        try:
+                            report_db = sqlite3.connect("wom_multi.db")
+                            try:
+                                with report_db:
+                                    report_db.execute(
+                                        "INSERT OR REPLACE INTO bot_stats (key, value) VALUES (?, ?)",
+                                        (missing_tenure_report_key, json.dumps(missing_tenure_report_dates)),
+                                    )
+                            finally:
+                                report_db.close()
+                        except sqlite3.Error:
+                            logger.exception("Could not save missing tenure report dates")
             except discord.Forbidden:
                 logger.warning(
                     "Could not send Novus staff report to channel %s",

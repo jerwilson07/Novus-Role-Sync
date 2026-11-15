@@ -64,7 +64,7 @@ def can_manually_link_novus_member(member) -> bool:
     if member is None or getattr(member, "bot", False):
         return False
     return has_non_clan_role(member) or has_novus_member_role(member) or any(
-        getattr(role, "name", "").strip().casefold() == "trial member"
+        getattr(role, "name", "").strip().casefold() in {"trial member", "verified"}
         for role in member.roles
     )
 
@@ -734,8 +734,7 @@ class ConfigCog(commands.Cog):
 
         if not can_manually_link_novus_member(user):
             await interaction.response.send_message(
-                f"{user.mention} needs Member, Trial Member, Guest, or Clan Friend. "
-                "Verified alone does not qualify for linking.",
+                f"{user.mention} needs Verified, Member, Trial Member, Guest, or Clan Friend.",
                 ephemeral=True
             )
             return
@@ -914,13 +913,20 @@ class ConfigCog(commands.Cog):
             "\n".join(f"- `{alt}`" for alt in alt_rsns)
             if alt_rsns else "None"
         )
-        link_status = (
-            "Saved as a non-clan link. Guest and Clan Friend are excluded "
-            "from clan rank sync and tenure reports."
-            if has_non_clan_role(user) else
-            "Primary and alt tenure stay separate; the highest independently "
-            "earned linked-account tenure can raise the member's Discord tenure role."
-        )
+        if has_non_clan_role(user):
+            link_status = (
+                "Saved as a non-clan link. Guest and Clan Friend are excluded "
+                "from clan rank sync and tenure reports."
+            )
+        elif has_novus_member_role(user):
+            link_status = (
+                "Primary and alt tenure stay separate. The highest independently "
+                "earned linked-account tenure can raise the member's Discord tenure role."
+            )
+        else:
+            link_status = (
+                "Account link saved. Linking does not grant clan membership or a tenure role."
+            )
         await interaction.followup.send(
             f"Linked {user.mention}.\n\n"
             f"**Primary RSN:** `{primary_rsn}`\n"
@@ -3018,7 +3024,8 @@ class ConfigCog(commands.Cog):
             "Supports `Main | Alt` and `Main / Alt`.\n\n"
 
             "**/linkuser @member RSN**\n"
-            "Manually link a member. Put the primary RSN first, "
+            "Manually link a Discord user, including users with only Verified. "
+            "Put the primary RSN first, "
             "then optional alts separated by `|` or `/`. "
             "Primary and alt tenure are separate; the highest independently earned "
             "linked-account tenure can set the Discord tenure role.\n\n"

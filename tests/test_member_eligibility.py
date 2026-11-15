@@ -112,15 +112,15 @@ class ActiveMembershipTests(unittest.TestCase):
             MEMBER, "Former Main", 999, ROSTER
         ))
 
-    def test_manual_linking_accepts_non_clan_roles_but_not_verified_only(self):
+    def test_manual_linking_accepts_verified_and_other_eligible_roles(self):
         self.assertTrue(can_manually_link_novus_member(
             discord_user((200, "Member"))
         ))
         self.assertTrue(can_manually_link_novus_member(
             discord_user((201, "Trial Member"))
         ))
-        self.assertFalse(can_manually_link_novus_member(
-            discord_user((202, "Verified"))
+        self.assertTrue(can_manually_link_novus_member(
+            discord_user((202, " VeRiFiEd "))
         ))
         self.assertTrue(can_manually_link_novus_member(
             discord_user((200, "Member"), (GUEST_ROLE_ID, "Guest"))
@@ -128,6 +128,12 @@ class ActiveMembershipTests(unittest.TestCase):
         self.assertTrue(can_manually_link_novus_member(
             discord_user((201, "Trial Member"), (CLAN_FRIEND_ROLE_ID, "Clan Friend"))
         ))
+
+    def test_manual_linking_rejects_unverified_targets_and_bots(self):
+        self.assertFalse(can_manually_link_novus_member(discord_user((203, "Unverified"))))
+        bot = discord_user((202, "Verified"))
+        bot.bot = True
+        self.assertFalse(can_manually_link_novus_member(bot))
 
 
 if __name__ == "__main__":

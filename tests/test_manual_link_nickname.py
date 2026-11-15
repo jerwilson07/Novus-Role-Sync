@@ -109,6 +109,29 @@ class ManualLinkNicknameTests(unittest.IsolatedAsyncioTestCase):
         self.member.edit.assert_not_awaited()
         self.assertEqual(self.read("SELECT rsn FROM alt_links"), [])
 
+    async def test_staff_can_link_verified_only_without_granting_clan_roles(self):
+        verified = SimpleNamespace(id=254, name="Verified")
+        self.member.roles = [verified]
+        self.member.add_roles = AsyncMock()
+        self.member.remove_roles = AsyncMock()
+        await self.link("Wise Old Nut")
+        self.assertEqual(self.read("SELECT rsn FROM links"), [("Wise Old Nut",)])
+        self.assertEqual(self.member.edit.await_args.kwargs["nick"], "Wise Old Nut")
+        self.assertEqual(self.member.roles, [verified])
+        self.member.add_roles.assert_not_awaited()
+        self.member.remove_roles.assert_not_awaited()
+        self.assertIn(
+            "does not grant clan membership or a tenure role",
+            self.interaction.followup.send.await_args.args[0],
+        )
+
+    async def test_verified_does_not_authorize_running_staff_link_command(self):
+        self.interaction.user.roles = [SimpleNamespace(id=254, name="Verified")]
+        await self.link("Wise Old Nut")
+        self.assertEqual(self.read("SELECT rsn FROM links"), [])
+        self.interaction.response.send_message.assert_awaited_once()
+        self.member.edit.assert_not_awaited()
+
     async def test_old_candidate_is_cleared_after_manual_edit(self):
         with self.real_connect(self.path) as c:
             nickname_change_confirmed(

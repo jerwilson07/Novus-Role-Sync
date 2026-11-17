@@ -12,16 +12,12 @@ from prompt_toolkit.history import InMemoryHistory
 from dotenv import load_dotenv
 from common import WOM_API_KEY
 from tenure_history import initialize_tenure_tables
+from novus_logging import LoggedCommandTree, configure_logging, start_logged_task
 
 
 # ============================================================
 # LOGGING
 # ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
 
 logger = logging.getLogger("WOMBot")
 
@@ -48,6 +44,9 @@ load_dotenv(
 # ============================================================
 # CONFIGURATION
 # ============================================================
+
+if __name__ == "__main__":
+    configure_logging("Novus Role Sync")
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OWNER_ID = os.getenv("BOT_OWNER_ID")
@@ -383,7 +382,8 @@ class WOMBot(
         super().__init__(
             command_prefix="!",
             intents=intents,
-            owner_id=OWNER_ID
+            owner_id=OWNER_ID,
+            tree_cls=LoggedCommandTree,
         )
 
         self.http_session = None
@@ -680,11 +680,8 @@ class WOMBot(
                 "Loaded cog: api_cog"
             )
 
-        except Exception as e:
-            logger.error(
-                f"Failed to load cog "
-                f"api_cog: {e}"
-            )
+        except Exception:
+            logger.exception("Failed to load cog api_cog")
 
         for filename in os.listdir(
             COGS_DIR
@@ -706,11 +703,8 @@ class WOMBot(
                         f"{filename}"
                     )
 
-                except Exception as e:
-                    logger.error(
-                        f"Failed to load cog "
-                        f"{filename}: {e}"
-                    )
+                except Exception:
+                    logger.exception("Failed to load cog %s", filename)
 
         # Keep the operational Novus staff commands visible while leaving
         # configuration/maintenance commands implemented but hidden.
@@ -753,9 +747,7 @@ class WOMBot(
 
         # Start CLI loop only in an interactive terminal.
         if sys.stdin.isatty():
-            self.loop.create_task(
-                self.cli_loop()
-            )
+            start_logged_task(self.cli_loop(), name="sync-local-cli")
 
 
 # ============================================================

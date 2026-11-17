@@ -1,3 +1,4 @@
+from novus_logging import start_logged_task
 import discord
 from discord import app_commands
 from discord.ext import tasks, commands
@@ -1076,24 +1077,24 @@ class TasksCog(commands.Cog):
         # recovery for the 11 Nov noon report interrupted by redeployments,
         # plus the requested short Council update.
         if self._nov11_catchup_task is None or self._nov11_catchup_task.done():
-            self._nov11_catchup_task = asyncio.create_task(
-                self._post_nov11_catchup_once()
+            self._nov11_catchup_task = start_logged_task(
+                self._post_nov11_catchup_once(), name="sync-noon-catchup"
             )
 
         if self._requested_reset_sync_task is None or self._requested_reset_sync_task.done():
-            self._requested_reset_sync_task = asyncio.create_task(
-                self._run_requested_reset_sync()
+            self._requested_reset_sync_task = start_logged_task(
+                self._run_requested_reset_sync(), name="sync-requested-reset"
             )
 
         if self._requested_staff_update_task is None or self._requested_staff_update_task.done():
-            self._requested_staff_update_task = asyncio.create_task(
-                self._post_requested_staff_update()
+            self._requested_staff_update_task = start_logged_task(
+                self._post_requested_staff_update(), name="sync-staff-update"
             )
 
         # Staff-requested immediate run: once per guild, persisted across restarts.
         if self._one_time_case_sync_task is None or self._one_time_case_sync_task.done():
-            self._one_time_case_sync_task = asyncio.create_task(
-                self._run_one_time_case_sync()
+            self._one_time_case_sync_task = start_logged_task(
+                self._run_one_time_case_sync(), name="sync-one-time-case-pass"
             )
 
     async def _post_requested_staff_update(self):
@@ -6847,11 +6848,23 @@ class TasksCog(commands.Cog):
                 f"database to {backup_file}"
             )
 
-        except Exception as e:
-            logger.error(
-                f"Failed to back up "
-                f"database: {e}"
-            )
+        except Exception:
+            logger.exception("Failed to back up database")
+
+
+    @sync_roles_loop.error
+    async def report_noon_sync_failure(self, error):
+        logger.error(
+            "Scheduled noon role sync stopped after an unhandled error",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+    @history_backfill_loop.error
+    async def report_history_backfill_failure(self, error):
+        logger.error(
+            "Scheduled WOM tenure-history backfill stopped after an unhandled error",
+            exc_info=(type(error), error, error.__traceback__),
+        )
 
 
 async def setup(bot: commands.Bot):

@@ -1098,15 +1098,15 @@ class TasksCog(commands.Cog):
             )
 
     async def _post_requested_staff_update(self):
-        """Deliver the November 15 staff update to the authorized roles once."""
+        """Deliver the November 17 weekly schedule note to #mod-chat once."""
         await self.bot.wait_until_ready()
         day = datetime.datetime.now(ZoneInfo("America/New_York")).date()
-        if day != datetime.date(2026, 11, 15):
+        if day != datetime.date(2026, 11, 17):
             return
         guild = self.bot.get_guild(NOVUS_GUILD_ID)
         if guild is None:
             return
-        key = f"novus_staff_update_20261115:{guild.id}"
+        key = f"novus_weekly_schedule_note_20261117:{guild.id}"
         conn = sqlite3.connect("wom_multi.db")
         try:
             if self._one_time_delivery_sent(conn.cursor(), key):
@@ -1115,43 +1115,29 @@ class TasksCog(commands.Cog):
             conn.close()
 
         channel = guild.get_channel(NOVUS_MOD_CHAT_CHANNEL_ID)
-        role_ids = (COUNCIL_ROLE_ID, MODERATOR_ROLE_ID, TRIAL_MOD_ROLE_ID)
-        roles = [guild.get_role(role_id) for role_id in role_ids]
-        if channel is None or channel.name != "mod-chat" or not all(roles) or guild.me is None:
-            logger.warning("Requested Novus staff update: channel or staff roles unavailable")
+        role = guild.get_role(MODERATOR_ROLE_ID)
+        if channel is None or channel.name != "mod-chat" or role is None or guild.me is None:
+            logger.warning("Novus weekly schedule note: verified channel or Moderator role unavailable")
             return
         permissions = channel.permissions_for(guild.me)
         if not permissions.send_messages:
-            logger.warning("Requested Novus staff update: missing Send Messages")
+            logger.warning("Novus weekly schedule note: missing Send Messages")
             return
-        can_notify = permissions.mention_everyone or all(role.mentionable for role in roles)
-        content = (
-            " ".join(role.mention for role in roles) + "\n"
-            "**Novus Sync update**\n"
-            "• **Tenure:** A confirmed clan departure resets that account's tenure on rejoin. "
-            "Name changes and temporary WOM roster gaps don't count. The four returning accounts "
-            "were reset to Nov 15, and linked alts still track tenure separately.\n"
-            "• **Linking:** Staff can use `/linkuser` for Verified-only users. "
-            "This links the RSN without granting Member or tenure roles.\n"
-            "• **Noon report:** The 12 PM Eastern Auto-Link + SyncAll report combines duplicate notices. "
-            "**Member Role Without Tenure** flags users for review on first sight, then at most once "
-            "every 7 days per person if still unresolved. It doesn't change roles."
-        )
         try:
             message = await channel.send(
-                content,
+                f"{role.mention}\n" + "**Novus weekly Discord schedule**\nAll MEE6 reminders below are at **5:00 PM Eastern**.\n\n• **Tuesday** · LFG\n• **Wednesday** · Raid Academy and PB Leaderboard\n• **Thursday** · Clan Ranks\n• **Friday** · LFG\n• **Saturday** · Raid Academy\n• **Sunday** · PB Leaderboard\n\nNovus Role Sync will still post its Auto-Link + SyncAll report here daily at **noon Eastern**.\n\nIf you have ideas to make the Discord easier to use or improve the clan as a whole, please share them here. Feedback on the reminder timing or frequency is welcome too.",
                 allowed_mentions=discord.AllowedMentions(
-                    everyone=False, users=False, roles=roles, replied_user=False,
+                    everyone=False, users=False, roles=[role], replied_user=False,
                 ),
-                nonce="novus-staff-261115",
+                nonce="novus-schedule-261117",
             )
             self._mark_one_time_delivery(key, message.id)
             logger.info(
-                "Posted requested Novus staff update channel=%s message=%s roles=%s can_notify=%s",
-                channel.id, message.id, role_ids, can_notify,
+                "Posted Novus weekly schedule note channel=%s message=%s role=%s can_notify=%s",
+                channel.id, message.id, role.id, permissions.mention_everyone or role.mentionable,
             )
         except (discord.HTTPException, sqlite3.Error):
-            logger.exception("Could not deliver requested Novus staff update")
+            logger.exception("Could not deliver Novus weekly schedule note")
 
     async def _run_requested_reset_sync(self):
         """After the four verified resets, run the normal workflow once on request."""

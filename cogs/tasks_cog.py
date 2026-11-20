@@ -21,7 +21,8 @@ from common import (
 from tenure_history import (
     cumulative_effective_join, record_roster, refresh_activity_history,
     set_manual_previous_tenure, prior_tenure, get_tenure_diagnostics,
-    apply_tenure_resets, get_tenure_reset, REQUESTED_REJOIN_RESETS, RESET_POLICY_START,
+    apply_tenure_resets, get_tenure_reset, write_tenure_reset,
+    REQUESTED_REJOIN_RESETS, RESET_POLICY_START,
 )
 
 
@@ -1145,6 +1146,7 @@ class TasksCog(commands.Cog):
         guild = self.bot.get_guild(NOVUS_GUILD_ID)
         if guild is None or datetime.datetime.now(datetime.timezone.utc) < RESET_POLICY_START:
             return
+        await self._run_nov19_rejoin_correction(guild)
         key = f"novus_requested_reset_sync_20261115:{guild.id}"
 
         for attempt in range(4):
@@ -1201,6 +1203,67 @@ class TasksCog(commands.Cog):
                 logger.exception("Requested Novus Auto-Link + SyncAll failed")
             if attempt < 3:
                 await asyncio.sleep(30)
+
+    async def _run_nov19_rejoin_correction(self, guild):
+        """Apply the staff-confirmed rejoin to one WOM account and sync its tenure only."""
+        group_id, player_id = 25802, 2549259
+        rejoined = datetime.datetime(2026, 11, 20, tzinfo=datetime.timezone.utc)
+        key = f"novus_rejoin_correction_20261119:{guild.id}:{player_id}"
+        for attempt in range(3):
+            conn = sqlite3.connect("wom_multi.db")
+            try:
+                cursor = conn.cursor()
+                if self._one_time_delivery_sent(cursor, key):
+                    return
+                config = conn.execute(
+                    "SELECT group_id FROM guild_configs WHERE guild_id = ?", (guild.id,),
+                ).fetchone()
+                if config != (group_id,):
+                    return
+                group_data, status = await self.get_wom_group(group_id)
+                if not has_verifiable_wom_roster(group_data) or group_data.get("id") != group_id:
+                    logger.warning("Novus Nov 19 rejoin correction: WOM roster unavailable (%s)", status)
+                else:
+                    matches = [m for m in group_data["memberships"]
+                               if (m.get("player") or {}).get("id") == player_id]
+                    if len(matches) != 1 or get_membership_joined_at(matches[0]) != rejoined:
+                        logger.warning("Novus Nov 19 rejoin correction: expected in-game join not verified")
+                        return
+                    write_tenure_reset(cursor, guild.id, group_id, player_id, rejoined)
+                    conn.commit()
+                    reset = get_tenure_reset(cursor, guild.id, group_id, player_id)
+                    logger.info("Novus Nov 19 rejoin correction persisted: player=%s reset_at=%s", player_id, reset)
+
+                    links = conn.execute(
+                        """SELECT discord_id FROM links WHERE guild_id = ? AND wom_id = ?
+                           UNION SELECT discord_id FROM alt_links WHERE guild_id = ? AND wom_id = ?""",
+                        (guild.id, player_id, guild.id, player_id),
+                    ).fetchall()
+                    if len(links) != 1:
+                        logger.warning("Novus Nov 19 rejoin correction: Discord link not unique")
+                        return
+                    member = await guild.fetch_member(links[0][0])
+                    result = await self.sync_one_member(guild, member, group_data, cursor, tenure_only=True)
+                    conn.commit()
+                    role = result.get("expected_tenure_role")
+                    if result["status"] == "success" and role is not None:
+                        verified = await guild.fetch_member(member.id)
+                        removed = result["tenure_roles_removed"]
+                        if role in verified.roles and not any(r in verified.roles for r in removed):
+                            self._mark_one_time_delivery(key, role.id)
+                            logger.info(
+                                "Novus Nov 19 rejoin correction verified: player=%s Discord tenure=%s basis=%s status=%s",
+                                player_id, role.name, result.get("tenure_basis_rsn"), result.get("tenure_status"),
+                            )
+                            return
+                    logger.warning("Novus Nov 19 rejoin correction: Discord sync not verified (%s, %s)",
+                                   result["status"], result.get("tenure_status"))
+            except (sqlite3.Error, discord.HTTPException):
+                logger.exception("Novus Nov 19 rejoin correction failed")
+            finally:
+                conn.close()
+            if attempt < 2:
+                await asyncio.sleep(15)
 
     async def _run_one_time_case_sync(self):
         """Run the requested nickname-only pass once, independently of noon sync."""
@@ -2333,7 +2396,9 @@ class TasksCog(commands.Cog):
         guild: discord.Guild,
         member: discord.Member,
         group_data: dict,
-        cursor
+        cursor,
+        *,
+        tenure_only: bool = False,
     ):
         """
         Sync one linked Discord member.
@@ -2509,7 +2574,7 @@ class TasksCog(commands.Cog):
         # primary or newly renamed linked alt.
         nickname_alts = []
         primary_wom_verified = membership is not None
-        if primary_wom_verified and current_rsn:
+        if not tenure_only and primary_wom_verified and current_rsn:
             nickname_alts = nickname_alts_with_wom_safety(
                 cursor,
                 guild.id,
@@ -2580,7 +2645,7 @@ class TasksCog(commands.Cog):
                         "Could not update WOM nickname for %s (%s)",
                         member, member.id,
                     )
-        else:
+        elif not tenure_only:
             # A missing primary WOM record makes every proposed rename
             # untrustworthy. Discard pending changes and start fresh when
             # the primary can be verified again.
@@ -2678,7 +2743,8 @@ class TasksCog(commands.Cog):
         staff_target_role = None
 
         if (
-            membership is not None
+            not tenure_only
+            and membership is not None
             and current_wom_role in NOVUS_STAFF_WOM_ROLES
         ):
             staff_role_id = NOVUS_STAFF_WOM_ROLES[current_wom_role]
@@ -2702,7 +2768,7 @@ class TasksCog(commands.Cog):
             (account.get("wom_role") or "").strip().casefold()
             for account in account_tenures
         }
-        for protected_wom_role in ("explorer", "gamer"):
+        for protected_wom_role in (() if tenure_only else ("explorer", "gamer")):
             protected_role_id = NOVUS_STAFF_WOM_ROLES[protected_wom_role]
             protected_discord_role = guild.get_role(protected_role_id)
             if protected_discord_role is None:

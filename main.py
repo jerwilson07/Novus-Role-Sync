@@ -452,6 +452,31 @@ class WOMBot(
                         "Head to <#1568280192936443934> and use **Submit PB** to send your record for review."
                     ),
                 ),
+                (
+                    "novus_trial_vouch_staff_20261123_v1",
+                    1532835276567613531,
+                    None,
+                    (
+                        "<@&1532830356875513906> <@&1532830960062693396> <@&1533587986204069908>\n"
+                        "## ✦ New Trial Member Vouch System\n"
+                        "Novus Sync now supports **/vouch** for prospective trial members who need "
+                        "references before their membership review.\n\n"
+                        "**How it works**\n"
+                        "• **Member+** can submit `/vouch`, selecting the **Trial Member** "
+                        "and adding optional comments about their PvM ability, teamwork, or mechanics.\n"
+                        "• The bot **automatically records the Discord member who submits the command**. "
+                        "Nobody selects a separate voucher.\n"
+                        "• Each member may vouch **once per trial member**; duplicate vouches are rejected. "
+                        "Trial members and non-clan members cannot submit vouches.\n"
+                        "• When a trial member earns **3 unique vouches**, Novus Sync automatically "
+                        "posts a staff alert in this channel showing all three references and comments.\n"
+                        "• Staff can review saved feedback anytime with "
+                        "**/vouches trial_member:@TrialMember**.\n\n"
+                        "**Three vouches trigger a staff review, not automatic approval.** "
+                        "Please verify the references and remaining membership requirements "
+                        "before making a decision."
+                    ),
+                ),
             ]
 
             for key, channel_id, channel_name, message in announcements:

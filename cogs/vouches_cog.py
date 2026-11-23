@@ -209,6 +209,33 @@ class VouchesCog(commands.Cog):
             guild.text_channels, name="mod-chat"
         )
 
+    async def notify_new_vouch(
+        self, guild: discord.Guild, trial: discord.Member,
+        voucher: discord.Member, total: int
+    ) -> bool:
+        """Quiet staff-side activity note; no role or member pings."""
+        channel = self.staff_channel(guild)
+        if channel is None:
+            logger.warning(
+                "Could not post new trial vouch for %s: #mod-chat unavailable.",
+                trial.id,
+            )
+            return False
+        try:
+            await channel.send(
+                f"**New Trial Vouch**\\n"
+                f"{voucher.mention} vouched for {trial.mention} "
+                f"(**{total}/{REQUIRED_VOUCHES} vouches**).",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            logger.exception(
+                "Could not post new trial vouch for %s from %s.",
+                trial.id, voucher.id,
+            )
+            return False
+        return True
+
     async def notify_if_ready(self, guild: discord.Guild, trial: discord.Member) -> str:
         """Send exactly one staff review alert once 3 distinct vouches exist."""
         async with self._notify_lock:
@@ -312,11 +339,16 @@ class VouchesCog(commands.Cog):
             )
             return
 
+        activity_posted = await self.notify_new_vouch(
+            interaction.guild, trial_member, interaction.user, len(rows)
+        )
         status = await self.notify_if_ready(interaction.guild, trial_member)
         message = (
             f"Recorded your vouch for {trial_member.mention}.\n"
             f"**Progress: {len(rows)}/{REQUIRED_VOUCHES} unique vouches**"
         )
+        if not activity_posted:
+            message += "\nThe staff activity notification could not be sent; your vouch is still saved."
         if status == "notified":
             message += "\nStaff have been notified in the review channel."
         elif status in {"missing_channel", "send_failed"}:

@@ -557,7 +557,7 @@ class WOMBot(
         # Keep the original raidtrial guide concise and pin-safe.
         # Update the existing Discord message, never add a duplicate.
         try:
-            update_key = "novus_raidtrial_hub_post_edit_20261123_v3"
+            update_key = "novus_raidtrial_hub_title_20261123_v4"
             conn = sqlite3.connect(DB_PATH)
             try:
                 already_updated = conn.execute(
@@ -575,14 +575,14 @@ class WOMBot(
                 original_post = await trial_hub.fetch_message(original_message_id)
                 if (
                     original_post.author.id != self.user.id
-                    or not original_post.content.startswith("## ✦ Raids Trial Vouches")
+                    or not original_post.content.startswith("## ✦ !raidtrial Vouches")
                 ):
                     logger.warning(
                         "Original raidtrial guide did not match expected bot post; "
                         "no replacement message was sent."
                     )
                 else:
-                    await original_post.edit(content="## ✦ !raidtrial Vouches\n\nIf you're completing **!raidtrial**:\n• Get **3 vouches** from different Novus members you've raided with.\n• Ask them to use **/vouch** and select your Discord account.\n• Once you have **3 vouches**, staff will be notified to review your trial.\n\n**Vouches do not guarantee membership approval.**")
+                    await original_post.edit(content="## ✦ Raid Trial Vouches\n\nIf you're completing **!raidtrial**:\n• Get **3 vouches** from different Novus members you've raided with.\n• Ask them to use **/vouch** and select your Discord account.\n• Once you have **3 vouches**, staff will be notified to review your trial.\n\n**Vouches do not guarantee membership approval.**")
                     conn = sqlite3.connect(DB_PATH)
                     try:
                         conn.execute(
@@ -598,7 +598,7 @@ class WOMBot(
                     finally:
                         conn.close()
                     logger.info(
-                        "Shortened original !raidtrial guide in "
+                         "Renamed original Raid Trial Vouches title in "
                         "#trial-member-hub (%s); message %s.",
                         trial_hub_channel_id, original_message_id
                     )

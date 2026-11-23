@@ -1,4 +1,4 @@
-"""Staff-maintained trial-member PvM references for Novus."""
+"""Trial-member PvM references from full Novus members and staff."""
 import asyncio
 import datetime
 import logging
@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from common import has_novus_member_role
+from common import has_non_clan_role, has_novus_member_role
 
 
 logger = logging.getLogger("WOMBot")
@@ -35,11 +35,13 @@ def is_trial(member: discord.Member) -> bool:
 
 
 def is_eligible_voucher(member: discord.Member) -> bool:
-    # Clan Friends, guests, and prospective/trial members cannot provide references.
+    # Clan Friends, guests, and trial members cannot vouch. Full members
+    # and staff submit under their own Discord account.
     return (
         not member.bot
-        and has_novus_member_role(member)
+        and not has_non_clan_role(member)
         and not is_trial(member)
+        and (has_novus_member_role(member) or is_staff(member))
     )
 
 
@@ -232,24 +234,22 @@ class VouchesCog(commands.Cog):
 
     @app_commands.command(
         name="vouch",
-        description="Record a Novus member's PvM vouch for a trial member",
+        description="Vouch for a Novus trial member after raiding together",
     )
     @app_commands.guild_only()
     @app_commands.describe(
-        trial_member="Trial member receiving the vouch",
-        vouched_by="Novus member providing the vouch",
+        trial_member="Trial member receiving your vouch",
         comments="Optional notes on PvM skill, mechanics, or teamwork",
     )
     async def vouch(
         self,
         interaction: discord.Interaction,
         trial_member: discord.Member,
-        vouched_by: discord.Member,
         comments: str = "",
     ):
-        if not is_staff(interaction.user):
+        if not is_eligible_voucher(interaction.user):
             await interaction.response.send_message(
-                "Only Trial Moderators, Moderators, and Council may record vouches.",
+                "Only full Novus Members and staff can submit vouches.",
                 ephemeral=True,
             )
             return
@@ -259,16 +259,9 @@ class VouchesCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        if not is_eligible_voucher(vouched_by):
+        if trial_member.id == interaction.user.id:
             await interaction.response.send_message(
-                "The person vouching must be a full Novus Member "
-                "(not a Trial Member, Guest, or Clan Friend).",
-                ephemeral=True,
-            )
-            return
-        if trial_member.id == vouched_by.id:
-            await interaction.response.send_message(
-                "Trial members cannot vouch for themselves.", ephemeral=True
+                "You cannot vouch for yourself.", ephemeral=True
             )
             return
         comments = comments.strip()
@@ -280,13 +273,13 @@ class VouchesCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
         inserted = record_vouch(
-            interaction.guild_id, trial_member.id, vouched_by.id,
+            interaction.guild_id, trial_member.id, interaction.user.id,
             interaction.user.id, comments,
         )
         rows = get_vouches(interaction.guild_id, trial_member.id)
         if not inserted:
             await interaction.followup.send(
-                f"{vouched_by.mention} has already vouched for {trial_member.mention}. "
+                f"You have already vouched for {trial_member.mention}. "
                 "Each member can only vouch once per trial member.",
                 ephemeral=True,
             )
@@ -294,7 +287,7 @@ class VouchesCog(commands.Cog):
 
         status = await self.notify_if_ready(interaction.guild, trial_member)
         message = (
-            f"Recorded {vouched_by.mention}'s vouch for {trial_member.mention}.\n"
+            f"Recorded your vouch for {trial_member.mention}.\n"
             f"**Progress: {len(rows)}/{REQUIRED_VOUCHES} unique vouches**"
         )
         if status == "notified":

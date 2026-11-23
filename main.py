@@ -477,6 +477,24 @@ class WOMBot(
                         "before making a decision."
                     ),
                 ),
+                (
+                    "novus_trial_member_hub_vouch_20261123_v1",
+                    1544747251983843349,
+                    None,
+                    (
+                        "## ✦ Trial Member Vouches\n"
+                        "Trial members need **3 vouches from different Novus members** "
+                        "who have raided with them before staff can review them for full membership.\n\n"
+                        "**How to get vouched:** Raid with clan members and ask anyone "
+                        "who can genuinely speak to your PvM ability, mechanics, and teamwork "
+                        "to use `/vouch` and select your Discord account. "
+                        "They can include optional feedback. Each member can vouch once.\n\n"
+                        "Once you receive **3 unique vouches**, staff is automatically notified "
+                        "to review your trial and remaining requirements. "
+                        "**Three vouches do not guarantee approval.**\n\n"
+                        "Looking for a team? Head to <#1532828125048733777>!"
+                    ),
+                ),
             ]
 
             for key, channel_id, channel_name, message in announcements:

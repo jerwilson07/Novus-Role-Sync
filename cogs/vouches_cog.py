@@ -223,7 +223,7 @@ class VouchesCog(commands.Cog):
             return False
         try:
             await channel.send(
-                f"**New Trial Vouch**\\n"
+                f"**New Trial Vouch**\n"
                 f"{voucher.mention} vouched for {trial.mention} "
                 f"(**{total}/{REQUIRED_VOUCHES} vouches**).",
                 allowed_mentions=discord.AllowedMentions.none(),

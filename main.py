@@ -717,6 +717,8 @@ class WOMBot(
             "trials",
             "tenure",
             "promotions",
+            "vouch",
+            "vouches",
             "exportchat",
         }
         registered_commands = self.tree.get_commands()

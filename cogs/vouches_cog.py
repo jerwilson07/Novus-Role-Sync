@@ -18,6 +18,7 @@ COUNCIL_ROLE_ID = 1532830356875513906
 MODERATOR_ROLE_ID = 1532830960062693396
 TRIAL_MOD_ROLE_ID = 1533587986204069908
 STAFF_ROLE_IDS = (COUNCIL_ROLE_ID, MODERATOR_ROLE_ID, TRIAL_MOD_ROLE_ID)
+NOVUS_MOD_CHAT_CHANNEL_ID = 1532835276567613531
 DB_FILE = "wom_multi.db"
 REQUIRED_VOUCHES = 3
 
@@ -175,7 +176,9 @@ class VouchesCog(commands.Cog):
             channel = guild.get_channel(int(channel_id))
             if isinstance(channel, discord.TextChannel):
                 return channel
-        return discord.utils.get(guild.text_channels, name="mod-chat")
+        return guild.get_channel(NOVUS_MOD_CHAT_CHANNEL_ID) or discord.utils.get(
+            guild.text_channels, name="mod-chat"
+        )
 
     async def notify_if_ready(self, guild: discord.Guild, trial: discord.Member) -> str:
         """Send exactly one staff review alert once 3 distinct vouches exist."""

@@ -553,6 +553,68 @@ class WOMBot(
                 "Failed one-time Novus announcement post."
             )
 
+
+        # One-time correction to the existing trial-member-hub post.
+        # Edit the original bot message in place so pinned links stay valid.
+        # Never send a duplicate if the message cannot be found.
+        try:
+            update_key = "novus_raidtrial_hub_post_edit_20261123_v2"
+            conn = sqlite3.connect(DB_PATH)
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM bot_stats WHERE key = ?", (update_key,))
+                already_updated = cursor.fetchone() is not None
+            finally:
+                conn.close()
+
+            if not already_updated:
+                trial_hub_channel_id = 1544747251983843349
+                trial_hub = self.get_channel(trial_hub_channel_id)
+                if trial_hub is None:
+                    trial_hub = await self.fetch_channel(trial_hub_channel_id)
+
+                old_post = None
+                async for msg in trial_hub.history(limit=200):
+                    if (
+                        msg.author.id == self.user.id
+                        and msg.content.startswith("## ✦ Trial Member Vouches")
+                        and "Trial members need **3 vouches" in msg.content
+                    ):
+                        old_post = msg
+                        break
+
+                if old_post is None:
+                    logger.warning(
+                        "Could not find original raidtrial hub announcement to edit; "
+                        "no duplicate was sent."
+                    )
+                else:
+                    await old_post.edit(content="## ✦ Raids Trial Vouches\nFor applicants currently undergoing **!raidtrial**, Novus uses member vouches to help staff evaluate readiness for full membership.\n\n• **Earn 3 unique vouches** from current Novus members who have raided with you.\n• Members submit a reference using **/vouch**, selecting your Discord account and optionally commenting on your PvM ability, mechanics, and teamwork.\n• Each member can vouch for you **once**. Their identity is recorded automatically.\n• Once you reach **3 vouches**, staff is notified automatically to review your trial and feedback.\n\n**Note:** This process is for **!raidtrial applicants**, not all Trial Members. Three vouches trigger a staff review, **not automatic membership approval**.")
+                    conn = sqlite3.connect(DB_PATH)
+                    try:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO bot_stats (key, value) VALUES (?, ?)",
+                            (
+                                update_key,
+                                datetime.datetime.now(
+                                    datetime.timezone.utc
+                                ).isoformat()
+                            )
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    logger.info(
+                        "Edited original !raidtrial vouches post in "
+                        "#trial-member-hub (%s); message %s.",
+                        trial_hub_channel_id, old_post.id
+                    )
+        except Exception:
+            logger.exception(
+                "Could not edit original !raidtrial hub post; will retry "
+                "on next startup."
+            )
+
         # Keep slash commands global only. Guild-specific copies would appear
         # alongside the same global commands and create duplicate entries in
         # Discord's command picker.

@@ -608,6 +608,68 @@ class WOMBot(
                 "will retry on next startup."
             )
 
+        # Update the existing staff-side vouch announcement in place.
+        # Never repost it or repeat role pings when changing its wording.
+        try:
+            update_key = "novus_raidtrial_mod_post_edit_20261123_v2"
+            conn = sqlite3.connect(DB_PATH)
+            try:
+                done = conn.execute(
+                    "SELECT 1 FROM bot_stats WHERE key = ?", (update_key,)
+                ).fetchone() is not None
+            finally:
+                conn.close()
+            if not done:
+                mod_channel_id = 1532835276567613531
+                mod_channel = self.get_channel(mod_channel_id)
+                if mod_channel is None:
+                    mod_channel = await self.fetch_channel(mod_channel_id)
+
+                original_post = None
+                async for msg in mod_channel.history(limit=1000):
+                    if (
+                        msg.author.id == self.user.id
+                        and "## ✦ New Trial Member Vouch System" in msg.content
+                        and "Three vouches trigger a staff review" in msg.content
+                    ):
+                        original_post = msg
+                        break
+
+                if original_post is None:
+                    logger.warning(
+                        "Original staff vouch announcement not found; "
+                        "skipping edit rather than posting a duplicate."
+                    )
+                else:
+                    await original_post.edit(
+                        content="## ✦ Raid Trial Vouch System\n**For applicants undergoing `!raidtrial`:**\n\n• **`/vouch`** — Any full Novus Member+ can vouch for a Trial Member they've raided with. Comments are optional; the bot records who submitted it.\n• **One vouch per member** — Duplicate vouches won't count.\n• **Each vouch** — A brief progress update (1/3, 2/3, etc.) appears here without pinging staff.\n• **3 unique vouches** — Staff are tagged with the references and comments for review.\n• **`/vouches`** — Staff can select a current Trial Member to review saved feedback.\n\n-# Vouches trigger staff review, not automatic approval. The bot checks the Trial Member role; staff should confirm `!raidtrial` eligibility.",
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
+                    conn = sqlite3.connect(DB_PATH)
+                    try:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO bot_stats (key, value) VALUES (?, ?)",
+                            (
+                                update_key,
+                                datetime.datetime.now(
+                                    datetime.timezone.utc
+                                ).isoformat()
+                            )
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    logger.info(
+                        "Updated original raid-trial vouch staff post in "
+                        "#mod-chat (%s); message %s.",
+                        mod_channel_id, original_post.id
+                    )
+        except Exception:
+            logger.exception(
+                "Could not edit original #mod-chat vouch announcement; "
+                "will retry on next startup."
+            )
+
         # Keep slash commands global only. Guild-specific copies would appear
         # alongside the same global commands and create duplicate entries in
         # Discord's command picker.

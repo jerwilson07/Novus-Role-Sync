@@ -165,6 +165,33 @@ def formatted_vouches(rows: list[tuple], limit: int = 10) -> str:
     return "\n".join(lines) or "No vouches recorded yet."
 
 
+async def trial_member_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    """Suggest only current Trial Member role holders in the guild."""
+    guild = interaction.guild
+    if guild is None or not is_staff(interaction.user):
+        return []
+
+    search = current.strip().casefold()
+    members = sorted(
+        (member for member in guild.members if is_trial(member)),
+        key=lambda member: (member.display_name.casefold(), member.id),
+    )
+    choices = []
+    for member in members:
+        searchable = (member.display_name, member.name, member.global_name or "", str(member.id))
+        if search and not any(search in value.casefold() for value in searchable):
+            continue
+        label = f"{member.display_name} (@{member.name})"
+        choices.append(
+            app_commands.Choice(name=label[:100], value=str(member.id))
+        )
+        if len(choices) == 25:
+            break
+    return choices
+
+
 class VouchesCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -306,9 +333,10 @@ class VouchesCog(commands.Cog):
         description="Review a trial member's recorded vouches and comments",
     )
     @app_commands.guild_only()
-    @app_commands.describe(trial_member="Trial member whose references you want to see")
+    @app_commands.describe(trial_member="Select a member with the Trial Member role")
+    @app_commands.autocomplete(trial_member=trial_member_autocomplete)
     async def vouches(
-        self, interaction: discord.Interaction, trial_member: discord.Member
+        self, interaction: discord.Interaction, trial_member: str
     ):
         if not is_staff(interaction.user):
             await interaction.response.send_message(
@@ -317,9 +345,30 @@ class VouchesCog(commands.Cog):
             )
             return
 
-        rows = get_vouches(interaction.guild_id, trial_member.id)
+        # Autocomplete values are Discord IDs, not mutable display names.
+        # Validate again on execution since an API user can submit arbitrary text.
+        if not trial_member.isdecimal():
+            await interaction.response.send_message(
+                "Please select a trial member from the suggestions.",
+                ephemeral=True,
+            )
+            return
+        member = interaction.guild.get_member(int(trial_member))
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(int(trial_member))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
+        if member is None or not is_trial(member):
+            await interaction.response.send_message(
+                "This person is not a current Trial Member. Select a trial member from the suggestions.",
+                ephemeral=True,
+            )
+            return
+
+        rows = get_vouches(interaction.guild_id, member.id)
         embed = discord.Embed(
-            title=f"Trial Vouches • {trial_member.display_name}",
+            title=f"Trial Vouches • {member.display_name}",
             description=formatted_vouches(rows, limit=10)[:3900],
             color=discord.Color.green() if len(rows) >= REQUIRED_VOUCHES
             else discord.Color.blurple(),
@@ -332,7 +381,7 @@ class VouchesCog(commands.Cog):
         if len(rows) >= REQUIRED_VOUCHES:
             embed.add_field(
                 name="Staff notification",
-                value="Sent" if has_been_notified(interaction.guild_id, trial_member.id)
+                value="Sent" if has_been_notified(interaction.guild_id, member.id)
                 else "Pending — check the staff notification channel",
                 inline=False,
             )

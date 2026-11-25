@@ -78,6 +78,7 @@ NOVUS_TRIAL_DISCORD_ROLE_NAME = "trial member"
 # Moderator or Trial Moderator.
 PROTECTED_NON_TENURE_ROLE_NAMES = frozenset({
     "member", "trial member", "moderator", "trial moderator", "council",
+    "founder", "verified", "guest", "clan friend",
 })
 PROTECTED_NON_TENURE_ROLE_IDS = frozenset({
     COUNCIL_ROLE_ID, MODERATOR_ROLE_ID, TRIAL_MOD_ROLE_ID,
@@ -120,7 +121,7 @@ TRIAL_ENDING_SOON_DAYS = 7
 
 def has_novus_command_permission(member: discord.Member) -> bool:
     return any(
-        role.id in NOVUS_COMMAND_ROLE_IDS
+        (role.id in NOVUS_COMMAND_ROLE_IDS or role.name.strip().casefold() == "founder")
         for role in member.roles
     )
 
@@ -2424,8 +2425,7 @@ class TasksCog(commands.Cog):
 
             if (
                 (
-                    role.id in mapped_tenure_role_ids
-                    or role_name in NOVUS_TENURE_ROLES
+                    role_name in NOVUS_TENURE_ROLES
                 )
                 and role_name not in PROTECTED_NON_TENURE_ROLE_NAMES
                 and role.id not in PROTECTED_NON_TENURE_ROLE_IDS
@@ -2811,8 +2811,7 @@ class TasksCog(commands.Cog):
             if wom_role in NOVUS_TENURE_ROLES
             and role is not None
             and role.id not in PROTECTED_NON_TENURE_ROLE_IDS
-            and getattr(role, "name", "").strip().casefold()
-                not in PROTECTED_NON_TENURE_ROLE_NAMES
+            and getattr(role, "name", "").strip().casefold() == wom_role
         }
 
         staff_roles = {
@@ -3385,7 +3384,7 @@ class TasksCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
             return
@@ -3681,11 +3680,11 @@ class TasksCog(commands.Cog):
         previous_days: app_commands.Range[int, 0, 3650]
     ):
         if not any(
-            role.id in TENURE_CREDIT_ROLE_IDS
+            (role.id in TENURE_CREDIT_ROLE_IDS or role.name.strip().casefold() == "founder")
             for role in interaction.user.roles
         ):
             await interaction.response.send_message(
-                "Only Novus Council or Moderators can set historical tenure.",
+                "Only Novus Founder, Council or Moderators can set historical tenure.",
                 ephemeral=True
             )
             return
@@ -3805,7 +3804,7 @@ class TasksCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
             return
@@ -4116,7 +4115,7 @@ class TasksCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
             return
@@ -4548,7 +4547,7 @@ class TasksCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
             return
@@ -4983,7 +4982,7 @@ class TasksCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
             return
@@ -5321,7 +5320,7 @@ class TasksCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
             return
@@ -6030,7 +6029,7 @@ class TasksCog(commands.Cog):
                 if (
                     rank and rank.strip().casefold() in NOVUS_TENURE_ROLES
                     and role is not None and role.id not in PROTECTED_NON_TENURE_ROLE_IDS
-                    and role.name.strip().casefold() not in PROTECTED_NON_TENURE_ROLE_NAMES
+                    and role.name.strip().casefold() == rank.strip().casefold()
                 ):
                     mapped_tenure_ids.add(role.id)
             flagged = member_ids_without_tenure(guild.members, mapped_tenure_ids, report_role_changes)

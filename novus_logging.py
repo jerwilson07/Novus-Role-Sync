@@ -108,7 +108,7 @@ def start_logged_task(coro, *, name):
     return task
 
 
-# Shared Novus UI policy. Resolve the actual server emoji by name at runtime.
+# Shared Novus UI policy. Use the pinned Novus animated status emoji.
 _UI_CLIENT = None
 _NOVUS_GUILD = 1532817291048124466
 
@@ -116,7 +116,13 @@ def bind_novus_ui(client):
     global _UI_CLIENT
     _UI_CLIENT = client
 
-NOVUS_CHECK = "<:Check:1154902522008445078>"
+NOVUS_CHECK = "<a:neoncheck:1575270636455076010>"
+_LEGACY_CHECKS = ("✅", "<:Check:1154902522008445078>", ":Check:")
+
+def replace_status_marks(value):
+    for mark in _LEGACY_CHECKS:
+        value = value.replace(mark, NOVUS_CHECK)
+    return value.replace("❌", "✖️")
 
 def check():
     return NOVUS_CHECK
@@ -161,7 +167,7 @@ async def migrate_existing_checks(client):
     # Use the exact usable server emoji; never create a replacement emoji.
     import sqlite3
     state_path = os.path.join(os.getenv("NOVUS_DATA_DIR") or ("/data" if os.path.isdir("/data") and os.access("/data", os.W_OK) else "."), "novus-ui-migrations.sqlite3")
-    key = f"status-history-v3:{client.user.id}:{guild.id}"
+    key = f"status-history-v4-neoncheck:{client.user.id}:{guild.id}"
     with sqlite3.connect(state_path) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS migrations (key TEXT PRIMARY KEY)")
         if conn.execute("SELECT 1 FROM migrations WHERE key=?", (key,)).fetchone():
@@ -170,14 +176,14 @@ async def migrate_existing_checks(client):
     counts = {"channels":0,"messages":0,"edited":0,"unreadable":0,"errors":0,"component_only":0}
     def replace_fields(value):
         if isinstance(value, str):
-            return value.replace("✅", replacement).replace("❌", "✖️")
+            return replace_status_marks(value)
         if isinstance(value, list):
             return [replace_fields(v) for v in value]
         if isinstance(value, dict):
             return {k:replace_fields(v) if k not in ("url","icon_url","proxy_url") else v for k,v in value.items()}
         return value
     def contains_component_check(message):
-        return any(any(mark in json.dumps(c.to_dict(), ensure_ascii=False) for mark in ("✅", "❌")) for c in message.components)
+        return any(any(mark in json.dumps(c.to_dict(), ensure_ascii=False) for mark in (*_LEGACY_CHECKS, "❌")) for c in message.components)
     channels = {c.id:c for c in list(guild.text_channels) + list(guild.threads)}
     try:
         for thread in await guild.active_threads():
@@ -200,8 +206,9 @@ async def migrate_existing_checks(client):
                 counts["messages"] += 1
                 content = message.content
                 edits = {}
-                if "✅" in content or "❌" in content:
-                    edits["content"] = content.replace("✅",replacement).replace("❌","✖️")
+                revised_content = replace_status_marks(content)
+                if revised_content != content:
+                    edits["content"] = revised_content
                 old = [e.to_dict() for e in message.embeds]
                 new = replace_fields(old)
                 if new != old:

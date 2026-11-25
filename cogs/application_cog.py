@@ -86,7 +86,55 @@ def save_final_approval(channel_id, message_id, reviewer_id, pathway):
     with closing(db()) as conn, conn:
         conn.execute("INSERT INTO application_final_approvals VALUES (?, ?, ?, ?, ?)", (channel_id, message_id, reviewer_id, pathway, datetime.datetime.now(datetime.timezone.utc).isoformat()))
 
-WELCOME_TEXT = "## Welcome to Novus! <:novus:1555228911321882635>\n\n**Home World** • 346\n\n**Looking for a Group**\nGrab PvM roles and pings in <#1532961221698129990>, or start your own group in <#1532828125048733777>.\n\n**<:Raid_Elder:1558658764205326376> Novus Raid Academy**\nLearn a raid, sharpen your mechanics, or apply to become a Raid Elder in <#1558346492144656465>.\n\n**<:paragon:1537938580008206357> PvM Diary**\nCheck the requirements in <#1537889319220551753> and submit your diary in <#1533481323883401216>.\n\n**<:pb1:1572259759548272752> PB Leaderboard**\nSee clan records in <#1568280192936443934> and submit your own with `/pbsubmit`.\n\n**Raid Resources**\n<#1545859377586511964> • <#1548732915196764261> • <#1562300923823263764>"
+WELCOME_TEXT = """## Welcome to Novus!
+
+**🌍 Home World** • 346
+⠀
+**Looking for a Group**
+Grab PvM roles and pings in {assign_roles}, or start your own group in {create_lfg}.
+⠀
+**{raid_elder}Novus Raid Academy**
+Learn a raid, sharpen your mechanics, or apply to become a Raid Elder in {raid_academy_info}.
+⠀
+**{paragon}PvM Diary**
+Check the requirements in {info_and_apply} and submit your diary in {make_a_ticket}.
+⠀
+**{pb1}PB Leaderboard**
+See clan records in {pb_leaderboard} and submit your own with \x60/pbsubmit\x60.
+⠀
+**Raid Resources**
+{tob_guide} • {toa_guide} • {tfa_guide}
+⠀
+### PvM is split by default
+Any FFA arrangement, including for Ironmen, must be agreed to by **every team member before the activity starts**.
+-# The player requesting FFA is responsible for keeping proof of the agreement.
+⠀
+Don’t be shy about asking questions or jumping into a group. See you on 346!"""
+
+
+def welcome_text(guild):
+    channel_names = (
+        "assign-roles", "create-lfg", "raid-academy-info", "info-and-apply",
+        "make-a-ticket", "pb-leaderboard", "tob-guide", "toa-guide", "tfa-guide",
+    )
+    tokens = {}
+    for name in channel_names:
+        matches = [c for c in guild.text_channels if c.name == name]
+        tokens[name.replace("-", "_")] = matches[0].mention if len(matches) == 1 else "#" + name
+        if len(matches) != 1:
+            logger.warning("Welcome template: expected one channel named %s; found %s", name, len(matches))
+    emoji_aliases = {
+        "raid_elder": {"raidelder", "raid_elder"},
+        "paragon": {"paragon"},
+        "pb1": {"pb1", "novuspb1"},
+    }
+    for key, aliases in emoji_aliases.items():
+        matches = [emoji for emoji in guild.emojis if emoji.name.casefold() in aliases and emoji.available]
+        exact = [emoji for emoji in matches if emoji.name.casefold() == key]
+        chosen = exact[0] if len(exact) == 1 else (matches[0] if len(matches) == 1 else None)
+        tokens[key] = f"{chosen} " if chosen else ""
+    return WELCOME_TEXT.format(**tokens)
+
 
 def is_staff(member):
     return any(role.id in STAFF for role in getattr(member, "roles", ()))
@@ -475,7 +523,7 @@ class ApplicationCog(commands.Cog):
                     logger.exception("Approval saved but report edit failed")
                 try:
                     prefix = "**Staff test - welcome preview (no roles changed)**\n" if test else f"{member.mention}\n"
-                    await channel.send(prefix + WELCOME_TEXT, allowed_mentions=discord.AllowedMentions(users=[member] if member else False, roles=False, everyone=False))
+                    await channel.send(prefix + welcome_text(channel.guild), allowed_mentions=discord.AllowedMentions(users=[member] if member else False, roles=False, everyone=False))
                     welcome_status = "Welcome message posted."
                 except discord.HTTPException:
                     logger.exception("Approval saved but welcome message failed")

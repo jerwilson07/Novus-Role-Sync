@@ -116,10 +116,10 @@ def bind_novus_ui(client):
     global _UI_CLIENT
     _UI_CLIENT = client
 
+NOVUS_CHECK = "<:Check:1154902522008445078>"
+
 def check():
-    guild = _UI_CLIENT.get_guild(_NOVUS_GUILD) if _UI_CLIENT else None
-    emoji = next((e for e in guild.emojis if e.name == "Check" and e.is_usable()), None) if guild else None
-    return str(emoji) if emoji else "✅"
+    return NOVUS_CHECK
 
 async def _dismiss_private(message):
     await asyncio.sleep(10)
@@ -158,13 +158,10 @@ async def migrate_existing_checks(client):
     if guild is None:
         return
     replacement = check()
-    if replacement == "✅":
-        logging.getLogger("novus.ui").warning("Check migration skipped: custom Check emoji unavailable")
-        return
     # Use the exact usable server emoji; never create a replacement emoji.
     import sqlite3
     state_path = os.path.join(os.getenv("NOVUS_DATA_DIR") or ("/data" if os.path.isdir("/data") and os.access("/data", os.W_OK) else "."), "novus-ui-migrations.sqlite3")
-    key = f"check-history-v1:{client.user.id}:{guild.id}"
+    key = f"check-history-v2:{client.user.id}:{guild.id}"
     with sqlite3.connect(state_path) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS migrations (key TEXT PRIMARY KEY)")
         if conn.execute("SELECT 1 FROM migrations WHERE key=?", (key,)).fetchone():

@@ -590,6 +590,12 @@ def dashboard_message(embed,images,d):
     if horizons:
         notes.add_field(name="Retention",value="\n".join(horizons),inline=False)
     paths=" • ".join(f"{PATHWAYS[p]}: {n}" for p,n in d["paths"].items() if p in PATHWAYS and n)
+    movement=f'Observed joins: {d["joins"]} • Departures: {d["departures"]}'
+    if not d["complete"]:
+        movement+=" (partial tracking)"
+    else:
+        movement+=f'\nNet full-member change: {d["joins"]-d["departures"]:+d} (role events)'
+    notes.add_field(name="Member movements",value=movement,inline=False)
     notes.add_field(name="Recruitment & trials",value=(
         f'Application cohort approved: {pct(d["converted"],d["opened"])}\n'
         +(paths+"\n" if paths else "")
@@ -598,9 +604,15 @@ def dashboard_message(embed,images,d):
         +f'\nHistorical unclassified applications: {d["unknown_apps"]}'
     ),inline=False)
     notes.add_field(name="Achievements",value=(f'Observed PvM Diary awards: {d["diary"]}' if d["diary"] or d["complete"] else "PvM Diary awards: not yet tracked")+" • Approved PBs: not integrated",inline=False)
-    notes.description="Historical gaps are not zero activity. Roster and event tracking began in late November; full monthly tracking starts in December."
+    notes.description="Historical gaps are not zero activity. Roster and event tracking began in late November 2026. Full-period metrics depend on actual data coverage."
+    comparison=next((f.value for f in embed.fields if f.name=="Month-over-Month Comparison"),"")
+    if d["prior"] and comparison:
+        notes.add_field(name="Monthly comparison",value=comparison[:1024],inline=False)
     embed.clear_fields()
-    embed.description=f'**{d["period"]}**\n**{d["full"]}** full members • **{d["trial"]}** trial members • **{d["wom"]}** WOM accounts\n'+("Lifetime baseline" if d["lifetime"] else "Previous calendar month")+" • Council only"
+    embed.description=f'**{d["period"]}**\nCurrent snapshot: **{d["full"]}** full members • **{d["trial"]}** trial members • **{d["wom"]}** WOM accounts\n'+("Lifetime baseline" if d["lifetime"] else "Previous calendar month")+" • Council only"
+    if not d["lifetime"]:
+        period_end=d["metrics"].get("full")
+        embed.description+=f'\nPeriod-end full members: **{period_end}**' if period_end is not None else "\nPeriod-end full members: unavailable"
     names=["novus-roster-v2.png","novus-recruitment-v2.png","novus-pvm-v2.png","novus-progression-v2.png"]
     charts=[]
     files=[]

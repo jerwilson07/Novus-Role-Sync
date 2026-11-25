@@ -3,3 +3,4 @@ aiohttp
 requests
 prompt-toolkit
 python-dotenv
+matplotlib>=3.8,<4

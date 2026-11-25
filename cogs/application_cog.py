@@ -324,21 +324,21 @@ class ApplicationView(discord.ui.View):
             self.remove_item(self.refresh)
             self.remove_item(self.undo_gear if verified else self.verify_gear)
         if rsn:
-            self.add_item(discord.ui.Button(label="View WOM Profile", url="https://wiseoldman.net/players/" + quote(rsn, safe="")))
+            self.add_item(discord.ui.Button(label="View WOM Profile", url="https://wiseoldman.net/players/" + quote(rsn, safe=""), row=0))
 
-    @discord.ui.button(label="Complete Application", style=discord.ButtonStyle.primary, custom_id="novus:application:form:v1", row=1)
+    @discord.ui.button(label="Complete Application", style=discord.ButtonStyle.primary, custom_id="novus:application:form:v1", row=2)
     async def complete_application(self, interaction, button):
         await self.cog.open_application_form(interaction)
 
-    @discord.ui.button(label="Refresh Stats", style=discord.ButtonStyle.primary, custom_id="novus:application:refresh:v1")
+    @discord.ui.button(label="Refresh Stats", style=discord.ButtonStyle.primary, custom_id="novus:application:refresh:v1", row=0)
     async def refresh(self, interaction, button):
         await self.cog.refresh(interaction)
 
-    @discord.ui.button(label="Verify Gear", style=discord.ButtonStyle.success, custom_id="novus:application:gear:verify:v1", row=0)
+    @discord.ui.button(label="Verify Gear", style=discord.ButtonStyle.success, custom_id="novus:application:gear:verify:v1", row=1)
     async def verify_gear(self, interaction, button):
         await self.cog.review_gear(interaction, True)
 
-    @discord.ui.button(label="Undo Gear Verification", style=discord.ButtonStyle.secondary, custom_id="novus:application:gear:undo:v1", row=0)
+    @discord.ui.button(label="Undo Gear Verification", style=discord.ButtonStyle.secondary, custom_id="novus:application:gear:undo:v1", row=1)
     async def undo_gear(self, interaction, button):
         await self.cog.review_gear(interaction, False)
 

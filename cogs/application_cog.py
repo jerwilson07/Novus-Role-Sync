@@ -57,6 +57,7 @@ def initialize():
         conn.execute("CREATE TABLE IF NOT EXISTS application_kc_reports (channel_id INTEGER PRIMARY KEY, applicant_id INTEGER, rsn TEXT NOT NULL, message_id INTEGER NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS application_gear_reviews (channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reviewer_id INTEGER NOT NULL, verified_at TEXT NOT NULL, PRIMARY KEY(channel_id, message_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS application_final_approvals (channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reviewer_id INTEGER NOT NULL, pathway TEXT NOT NULL, approved_at TEXT NOT NULL, PRIMARY KEY(channel_id, message_id))")
+        conn.execute("CREATE TABLE IF NOT EXISTS application_message_tests (test_key TEXT PRIMARY KEY, message_id INTEGER NOT NULL)")
 
 def get_report(channel_id):
     with closing(db()) as conn:
@@ -416,8 +417,53 @@ class ApplicationCog(commands.Cog):
                             logger.info("Restyled existing application test report channel=%s message=%s", channel.id, message.id)
                 else:
                     await self.publish(channel)
+                await self.test_application_messages(channel)
         except Exception:
             logger.exception("Application test report failed")
+
+    async def test_application_messages(self, channel):
+        # One-time, explicitly requested rendering test; never invokes approval or changes roles.
+        if channel.guild.id != GUILD or channel.category_id != CATEGORY or channel.id != TEST_CHANNEL:
+            return
+        key = "vecs-intro-welcome-20261125-v1"
+        marker = "**Staff test - welcome message preview (no roles changed)**\n"
+        with closing(db()) as conn:
+            if conn.execute("SELECT 1 FROM application_message_tests WHERE test_key=?", (key,)).fetchone():
+                return
+        row = get_report(channel.id)
+        if not row:
+            raise RuntimeError("Test report not found")
+        report = await channel.fetch_message(row[2])
+        if report.author.id != self.bot.user.id or not any(e.title == REPORT_TITLE for e in report.embeds):
+            raise RuntimeError("Test report ownership or title mismatch")
+        if report.content != APPLICATION_INTRO:
+            if final_approval(channel.id, report.id):
+                intro_marker = "**Staff test - application introduction preview**\n"
+                async for candidate in channel.history(limit=50):
+                    if candidate.author.id == self.bot.user.id and candidate.content == intro_marker + APPLICATION_INTRO:
+                        break
+                else:
+                    await channel.send(intro_marker + APPLICATION_INTRO, allowed_mentions=discord.AllowedMentions.none())
+            else:
+                await report.edit(content=APPLICATION_INTRO, allowed_mentions=discord.AllowedMentions.none())
+                report = await channel.fetch_message(report.id)
+                if report.content != APPLICATION_INTRO:
+                    raise RuntimeError("Introduction content mismatch")
+        logger.info("Application message test: intro verified channel=%s report=%s", channel.id, report.id)
+        expected = marker + welcome_text(channel.guild)
+        preview = None
+        async for candidate in channel.history(limit=50):
+            if candidate.author.id == self.bot.user.id and candidate.content == expected:
+                preview = candidate
+                break
+        if preview is None:
+            preview = await channel.send(expected, allowed_mentions=discord.AllowedMentions.none())
+        verified = await channel.fetch_message(preview.id)
+        if verified.content != expected:
+            raise RuntimeError("Welcome preview content mismatch")
+        with closing(db()) as conn, conn:
+            conn.execute("INSERT OR IGNORE INTO application_message_tests VALUES (?, ?)", (key, preview.id))
+        logger.info("Application message test: welcome verified channel=%s message=%s; no roles changed", channel.id, preview.id)
 
     @commands.Cog.listener()
     async def on_guild_channel_create(self, channel):

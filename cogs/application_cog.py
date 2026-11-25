@@ -74,28 +74,64 @@ def report_embed(rsn, payload, test=False, note=None):
     special_unknown = any(values.get(key) is None for _, key in EXTRAS)
     standard = total >= 200
     alternative = total >= 100 and special
+    target = 100 if alternative and not standard else 200
     if standard or alternative:
-        result = "✅ KC requirement met: " + ("200+ raid KC" if standard else "100+ raid KC + Inferno/Colosseum")
+        pathway = "200+ raid KC" if standard else "100+ raid KC + Inferno/Colosseum"
+        result = f"✅ **KC requirement met** ({pathway})"
         color = discord.Color.green()
     elif incomplete or (total >= 100 and special_unknown):
-        result = "⚠️ Incomplete WOM data; staff review needed."
+        result = "⚠️ **KC assessment incomplete**"
         color = discord.Color.gold()
     else:
-        result = "KC thresholds not met on this snapshot. Staff can review Raids Prep eligibility."
+        result = "❌ **KC thresholds not met**\nRaids Prep Program may be an option."
         color = discord.Color.gold()
+
     def fmt(key):
         value = values.get(key)
-        return f"{value:,}" if value is not None else "Unranked / unavailable"
-    embed = discord.Embed(title=REPORT_TITLE, description=f"**RSN:** {discord.utils.escape_markdown(payload.get('name') or rsn)}" + ("\n**Staff test report**" if test else ""), color=color)
-    embed.add_field(name="Raid KC", value="\n".join(f"**{label}:** {fmt(key)}" for label,key in RAIDS), inline=False)
-    embed.add_field(name="Total Raid KC", value=f"**{'At least ' if incomplete else ''}{total:,} / 200**", inline=False)
-    embed.add_field(name="Inferno / Colosseum", value="\n".join(f"**{label}:** {fmt(key)}" for label,key in EXTRAS), inline=False)
-    embed.add_field(name="KC assessment", value=result, inline=False)
-    embed.add_field(name="Next steps", value="Please upload a screenshot demonstrating that you meet the minimum gear requirements. Staff will review gear, account ownership and final eligibility. Raids Prep completion requires staff confirmation.", inline=False)
-    timestamp = payload.get("snapshot") or "Unavailable"
-    embed.set_footer(text=f"WOM snapshot: {timestamp} | Primary account only | Pending staff review")
+        return f"{value:,}" if value is not None else "N/A"
+
+    name = discord.utils.escape_markdown(payload.get("name") or rsn)
+    total_label = f"{'≥ ' if incomplete else ''}{total:,} / {target:,} KC"
+    embed = discord.Embed(
+        title=REPORT_TITLE,
+        description=f"**Applicant:** {name}\n\n**Total Raid KC**\n## {total_label}",
+        color=color,
+    )
+    # Monospace rows retain their alignment on both mobile and desktop.
+    rows = "\n".join(f"{label:<11} {fmt(key):>7}" for label, key in RAIDS)
+    embed.add_field(name="Raid KC", value=f"\x60\x60\x60\n{rows}\n\x60\x60\x60", inline=False)
+    embed.add_field(
+        name="Solo KC",
+        value=f"**Inferno:** {fmt(EXTRAS[0][1])}  •  **Colosseum:** {fmt(EXTRAS[1][1])}",
+        inline=False,
+    )
+    embed.add_field(
+        name="Application Status",
+        value=f"{result}\n🕒 Gear verification pending\n🕒 Staff approval pending",
+        inline=False,
+    )
+    embed.add_field(
+        name="Next Step",
+        value="Upload a screenshot showing that you meet the minimum gear requirements.",
+        inline=False,
+    )
+    timestamp = payload.get("snapshot")
+    if timestamp:
+        try:
+            timestamp = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            timestamp = timestamp.astimezone(datetime.timezone.utc).strftime("%b %d, %Y • %H:%M UTC")
+        except (ValueError, AttributeError):
+            timestamp = "Unknown"
+    else:
+        timestamp = "Unavailable"
+    footer = f"Wise Old Man • {timestamp} • Primary account"
+    if test:
+        footer += " • Staff test"
+    if incomplete or special_unknown:
+        embed.add_field(name="Data note", value="N/A = unranked or unavailable; totals may be incomplete.", inline=False)
     if note:
-        embed.add_field(name="Data status", value=note, inline=False)
+        embed.add_field(name="Snapshot status", value=note, inline=False)
+    embed.set_footer(text=footer)
     return embed
 
 class ApplicationView(discord.ui.View):
@@ -225,8 +261,18 @@ class ApplicationCog(commands.Cog):
                 logger.warning("Application test ticket unavailable")
                 return
         try:
-            if isinstance(channel, discord.TextChannel):
-                await self.publish(channel)
+            if isinstance(channel, discord.TextChannel) and channel.guild.id == GUILD and channel.category_id == CATEGORY:
+                row = get_report(channel.id)
+                if row:
+                    applicant_id, rsn, message_id = row
+                    message = await channel.fetch_message(message_id)
+                    if message.author.id == self.bot.user.id and any(e.title == REPORT_TITLE for e in message.embeds):
+                        payload, note = await self.get_payload(rsn, applicant_id, update=False)
+                        if payload:
+                            await message.edit(embed=report_embed(rsn, payload, True, note), view=ApplicationView(self, rsn))
+                            logger.info("Restyled existing application test report channel=%s message=%s", channel.id, message.id)
+                else:
+                    await self.publish(channel)
         except Exception:
             logger.exception("Application test report failed")
 

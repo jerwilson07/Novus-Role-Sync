@@ -129,7 +129,11 @@ def welcome_text(guild):
         "make-a-ticket", "pb-leaderboard", "tob-guide", "toa-guide", "tfa-guide",
     )
     tokens = {}
+    guide_ids = {"tob-guide": 1545859377586511964, "toa-guide": 1548732915196764261, "tfa-guide": 1562300923823263764}
     for name in channel_names:
+        if name in guide_ids:
+            tokens[name.replace("-", "_")] = f"<#{guide_ids[name]}>"
+            continue
         matches = [c for c in guild.text_channels if c.name == name]
         tokens[name.replace("-", "_")] = matches[0].mention if len(matches) == 1 else "#" + name
         if len(matches) != 1:
@@ -425,7 +429,7 @@ class ApplicationCog(commands.Cog):
         # One-time, explicitly requested rendering test; never invokes approval or changes roles.
         if channel.guild.id != GUILD or channel.category_id != CATEGORY or channel.id != TEST_CHANNEL:
             return
-        key = "vecs-intro-welcome-20261125-v1"
+        key = "vecs-intro-welcome-20261125-v2"
         marker = "**Staff test - welcome message preview (no roles changed)**\n"
         with closing(db()) as conn:
             if conn.execute("SELECT 1 FROM application_message_tests WHERE test_key=?", (key,)).fetchone():
@@ -453,8 +457,10 @@ class ApplicationCog(commands.Cog):
         expected = marker + welcome_text(channel.guild)
         preview = None
         async for candidate in channel.history(limit=50):
-            if candidate.author.id == self.bot.user.id and candidate.content == expected:
+            if candidate.author.id == self.bot.user.id and candidate.content.startswith(marker):
                 preview = candidate
+                if candidate.content != expected:
+                    await candidate.edit(content=expected, allowed_mentions=discord.AllowedMentions.none())
                 break
         if preview is None:
             preview = await channel.send(expected, allowed_mentions=discord.AllowedMentions.none())

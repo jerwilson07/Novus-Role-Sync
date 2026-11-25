@@ -239,6 +239,44 @@ class TrialAnalyticsCog(commands.Cog):
             self.last_summary=counts
             logger.info("Trial analytics totals episodes=%s baselines=%s active=%s passed=%s late=%s",*counts)
 
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # One-time council update requested by staff. Never send outside the
+        # configured Novus guild or to a publicly visible channel.
+        key = "raid_trial_analytics_council_20261125"
+        if getattr(self, "_council_notice_running", False):
+            return
+        self._council_notice_running = True
+        try:
+            with closing(db()) as conn, conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS trial_analytics_notices (notice_key TEXT PRIMARY KEY, message_id INTEGER NOT NULL)")
+                if conn.execute("SELECT 1 FROM trial_analytics_notices WHERE notice_key=?", (key,)).fetchone():
+                    return
+            guild = self.bot.get_guild(GUILD)
+            if guild is None:
+                return
+            channels = [c for c in guild.text_channels if c.name.casefold() == "council-chat"]
+            if len(channels) != 1 or channels[0].permissions_for(guild.default_role).view_channel:
+                logger.warning("Trial analytics council notice skipped: private channel not uniquely identified")
+                return
+            channel = channels[0]
+            body = "## Raid Trial Analytics\n\nNovus Sync is now collecting baseline PvM statistics for Raid Trial members and tracking their vouches, trial duration and eventual outcomes. It captures all available WOM boss KCs at entry, rather than after the trial is completed.\n\n**My hypothesis:** Higher Doom and ToB/HMT KC will predict more successful trial outcomes. Doom tests individual mechanics and consistency, while ToB tests team coordination and raid execution. Experience in both may be particularly valuable.\n\nOnce we have enough completed trials, we can compare successful and unsuccessful outcomes, account for overall PvM experience, and identify which bosses are actually predictive of success. Withdrawals and unclear outcomes will be treated separately.\n\nThe goal is to eventually develop a data-driven Raid Trial recommendation to assist staff, not replace staff discretion or change our current requirements.\n\n-# Data collection is already live: 5 existing trials, with 72 boss metrics captured per player. Existing trial snapshots are flagged as late baselines."
+            async for candidate in channel.history(limit=100):
+                if candidate.author.id == self.bot.user.id and candidate.content == body:
+                    with closing(db()) as conn, conn:
+                        conn.execute("INSERT OR IGNORE INTO trial_analytics_notices VALUES (?,?)",(key,candidate.id))
+                    logger.info("Trial analytics council notice already posted channel=%s message=%s",channel.id,candidate.id)
+                    return
+            sent = await channel.send(body,allowed_mentions=discord.AllowedMentions.none())
+            with closing(db()) as conn, conn:
+                conn.execute("INSERT OR IGNORE INTO trial_analytics_notices VALUES (?,?)",(key,sent.id))
+            logger.info("Trial analytics council notice posted channel=%s message=%s",channel.id,sent.id)
+        except Exception:
+            logger.exception("Trial analytics council notice failed")
+        finally:
+            self._council_notice_running = False
+
     @reconcile.before_loop
     async def before_reconcile(self):
         await self.bot.wait_until_ready()

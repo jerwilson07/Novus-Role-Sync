@@ -370,6 +370,24 @@ class ApplicationModal(discord.ui.Modal, title="Novus Membership Application"):
             return
         await self.cog.submit_application(interaction, self.report_id, self.account_type.values[0], self.pathway.values[0], str(self.referral.value), self.gear.values, str(self.details.value or ""))
 
+class ResubmitApplicationModal(discord.ui.Modal, title="Resubmit Application"):
+    def __init__(self, cog, report_id, actor_id):
+        super().__init__(timeout=900)
+        self.cog, self.report_id, self.actor_id = cog, report_id, actor_id
+        self.account_type = discord.ui.Select(placeholder="Keep existing account type", options=[discord.SelectOption(label=x, value=x) for x in ("Main", "Ironman")], required=False, min_values=0, max_values=1)
+        self.pathway = discord.ui.Select(placeholder="Keep existing pathway", options=[discord.SelectOption(label=v, value=k) for k,v in APPLICATION_OPTIONS.items()], required=False, min_values=0, max_values=1)
+        self.referral = discord.ui.TextInput(required=False, max_length=200, placeholder="Leave blank to keep existing answer")
+        self.gear = discord.ui.FileUpload(required=False, min_values=0, max_values=4)
+        self.details = discord.ui.TextInput(required=False, style=discord.TextStyle.paragraph, max_length=500, placeholder="Leave blank to keep existing answer")
+        for label, component in (("Account Type", self.account_type), ("Membership Pathway", self.pathway), ("How did you find Novus?", self.referral), ("Replacement Gear Screenshots", self.gear), ("Additional Information", self.details)):
+            self.add_item(discord.ui.Label(text=label, component=component))
+
+    async def on_submit(self, interaction):
+        if interaction.user.id != self.actor_id:
+            return await notice(interaction, False, "This form belongs to another user.", ephemeral=True)
+        await self.cog.resubmit_application(interaction, self.report_id, next(iter(self.account_type.values), None), next(iter(self.pathway.values), None), str(self.referral.value or "").strip(), self.gear.values, str(self.details.value or "").strip())
+
+
 class ApplicationPromptView(discord.ui.View):
     def __init__(self, cog):
         super().__init__(timeout=None)
@@ -388,6 +406,8 @@ class ApplicationView(discord.ui.View):
             self.remove_item(self.view_vouches)
         if submitted or approved or separate_prompt:
             self.remove_item(self.complete_application)
+        if not submitted or approved:
+            self.remove_item(self.resubmit)
         if not verified or approved:
             self.remove_item(self.final_approve)
         if approved:
@@ -399,6 +419,10 @@ class ApplicationView(discord.ui.View):
     @discord.ui.button(label="Complete Application", style=discord.ButtonStyle.primary, custom_id="novus:application:form:v1", row=2)
     async def complete_application(self, interaction, button):
         await self.cog.open_application_form(interaction)
+
+    @discord.ui.button(label="Resubmit Application", style=discord.ButtonStyle.secondary, custom_id="novus:application:resubmit:v1", row=2)
+    async def resubmit(self, interaction, button):
+        await self.cog.open_resubmit_form(interaction)
 
     @discord.ui.button(label="Refresh Stats", style=discord.ButtonStyle.primary, custom_id="novus:application:refresh:v1", row=0)
     async def refresh(self, interaction, button):
@@ -832,6 +856,91 @@ class ApplicationCog(commands.Cog):
             return
         await interaction.response.send_modal(ApplicationModal(self, report_id, interaction.user.id))
 
+    async def open_resubmit_form(self, interaction):
+        channel = interaction.channel
+        report_id = interaction.message.id if interaction.message else None
+        if not self.form_allowed(channel, interaction.user, report_id) or final_approval(channel.id, report_id) or not form_submission(channel.id, report_id):
+            return await notice(interaction, False, "Only the applicant may revise an unapproved application.", ephemeral=True)
+        await interaction.response.send_modal(ResubmitApplicationModal(self, report_id, interaction.user.id))
+
+    async def resubmit_application(self, interaction, report_id, account_type, pathway, referral, attachments, details):
+        channel = interaction.channel
+        if not self.form_allowed(channel, interaction.user, report_id):
+            return await notice(interaction, False, "This form is no longer available.", ephemeral=True)
+        if (account_type and account_type not in ("Main", "Ironman")) or (pathway and pathway not in APPLICATION_OPTIONS):
+            return await notice(interaction, False, "Invalid application selection.", ephemeral=True)
+        if len(attachments) > 4 or any(not (a.content_type or "").startswith("image/") for a in attachments):
+            return await notice(interaction, False, "Upload up to four image files.", ephemeral=True)
+        limit = min(getattr(channel.guild, "filesize_limit", 10 * 1024 * 1024), 10 * 1024 * 1024)
+        if any(a.size > limit for a in attachments) or sum(a.size for a in attachments) > 25 * 1024 * 1024:
+            return await notice(interaction, False, "Screenshots are too large.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        async with self.locks.setdefault(channel.id, asyncio.Lock()):
+            submission = form_submission(channel.id, report_id)
+            if not self.form_allowed(channel, interaction.user, report_id) or not submission or final_approval(channel.id, report_id):
+                return await notice(interaction, True, "This application is no longer editable.", ephemeral=True)
+            files = []
+            try:
+                original = await channel.fetch_message(submission[1])
+                report = await channel.fetch_message(report_id)
+                if original.author.id != self.bot.user.id or not original.embeds or original.embeds[0].title != "Novus Application Details" or report.author.id != self.bot.user.id or not report.embeds or report.embeds[0].title != REPORT_TITLE:
+                    return await notice(interaction, True, "Original application unavailable. Contact staff.", ephemeral=True)
+                embed = original.embeds[0].copy()
+                values = {f.name: f.value for f in embed.fields}
+                updates = {}
+                if account_type: updates["Account Type"] = account_type
+                if pathway: updates["Membership Pathway"] = APPLICATION_OPTIONS[pathway]
+                if referral: updates["How They Found Us"] = discord.utils.escape_markdown(referral)
+                if details: updates["Additional Information"] = discord.utils.escape_markdown(details)
+                if any(not (updates.get(k) or values.get(k)) for k in ("Account Type", "Membership Pathway", "How They Found Us")):
+                    return await notice(interaction, True, "Complete any missing required answers.", ephemeral=True)
+                retained = [a for a in original.attachments if (a.content_type or "").startswith("image/") or re.search(r"\\.(png|jpe?g|gif|webp|bmp|avif)$", a.filename, re.I)]
+                if not attachments and not retained:
+                    return await notice(interaction, True, "Original gear screenshots are missing. Upload replacements.", ephemeral=True)
+                if not attachments and not any(values.get(k) != v for k,v in updates.items()):
+                    return await notice(interaction, True, "No application changes submitted.", ephemeral=True)
+                if attachments:
+                    for i, attachment in enumerate(attachments, 1):
+                        suffix = attachment.filename.rsplit(".", 1)[-1].lower()
+                        if not re.fullmatch(r"[a-z0-9]{1,5}", suffix): suffix = "img"
+                        files.append(await asyncio.wait_for(attachment.to_file(filename=f"gear-{report_id}-{i}.{suffix}"), timeout=30))
+                images = files if attachments else retained
+                count = len(images)
+                # Any actual revision requires fresh staff review; preserve unchanged answers.
+                updates["Gear Screenshots"] = f"{count} screenshot{'s' if count != 1 else ''} attached"
+                updates["Application Status"] = f"{check()} **Application resubmitted**\\n▫️ Gear verification pending\\n▫️ Staff approval pending"
+                for name, value in updates.items():
+                    index = next((i for i,f in enumerate(embed.fields) if f.name == name), None)
+                    if index is None: embed.add_field(name=name, value=value, inline=False)
+                    else: embed.set_field_at(index, name=name, value=value, inline=False)
+                embed.set_footer(text="Novus Membership • Staff review pending")
+                embed.set_image(url=f"attachment://{images[0].filename}")
+                embeds = [embed]
+                for i, attachment in enumerate(images[1:], 2):
+                    extra = discord.Embed(title=f"Gear Screenshot {i} of {count}", color=discord.Color.blurple())
+                    extra.set_image(url=f"attachment://{attachment.filename}")
+                    embeds.append(extra)
+                # Clear approval eligibility before editing evidence, so failures fail closed.
+                set_gear_review(channel.id, report_id, None)
+                report_card = report.embeds[0].copy()
+                for i, field in enumerate(report_card.fields):
+                    if field.name == "Application Status":
+                        kc = field.value.partition("\\n")[0]
+                        report_card.set_field_at(i, name=field.name, value=f"{kc}\\n▫️ Gear verification pending\\n▫️ Staff approval pending", inline=False)
+                row = get_report(channel.id)
+                await report.edit(embed=report_card, view=ApplicationView(self, row[1], submitted=True, separate_prompt=bool(get_form_prompt(channel.id)), trial=any(f.name == "Trial Member Graduation" for f in report_card.fields)), allowed_mentions=discord.AllowedMentions.none())
+                saved = await original.edit(embeds=embeds, attachments=images, allowed_mentions=discord.AllowedMentions.none())
+                confirmed = await channel.fetch_message(saved.id)
+                if len(confirmed.attachments) != count:
+                    raise RuntimeError("Gear attachment readback mismatch")
+                logger.info("Application resubmitted channel=%s report=%s attachments=%s", channel.id, report_id, count)
+                await notice(interaction, True, "Application updated. Staff will review your revised application.", ephemeral=True)
+            except Exception:
+                logger.exception("Application resubmission failed channel=%s", channel.id)
+                await notice(interaction, True, "Unable to finish resubmission. Check your ticket and retry or contact staff.", ephemeral=True)
+            finally:
+                for file in files: file.close()
+
     async def submit_application(self, interaction, report_id, account_type, pathway, referral, attachments, details):
         channel = interaction.channel
         if not self.form_allowed(channel, interaction.user, report_id):
@@ -1190,3 +1299,5 @@ async def setup(bot):
     bot.add_view(ApplicationView(cog, verified=True))
     bot.add_view(ApplicationView(cog, trial=True))
     bot.add_view(ApplicationView(cog, verified=True, trial=True))
+    bot.add_view(ApplicationView(cog, submitted=True))
+    bot.add_view(ApplicationView(cog, submitted=True, verified=True))

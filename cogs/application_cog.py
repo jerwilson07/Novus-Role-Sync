@@ -29,7 +29,10 @@ RAIDS = (
     ("TFA", "the_fractured_archive"),
 )
 EXTRAS = (("Inferno", "tzkal_zuk"), ("Colosseum", "sol_heredit"))
-TRIAL_REFERENCE = (("Doom of Mokhaiotl", "doom_of_mokhaiotl"),)
+TRIAL_REFERENCE = (
+    ("Doom of Mokhaiotl", "doom_of_mokhaiotl"),
+    ("Phosani's Nightmare", "phosanis_nightmare"),
+)
 REPORT_TITLE = "Novus Applicant Eligibility"
 
 def db():

@@ -151,12 +151,16 @@ class DiaryVerificationCog(commands.Cog):
                 return
             payload={"version":1,"guild":GUILD,"generated":dt.datetime.now(dt.timezone.utc).isoformat(),"members":result}
             file=discord.File(io.BytesIO(json.dumps(payload,separators=(",",":")).encode()),filename=FILENAME)
+            # Discord exempts messages explicitly mentioning the receiving app
+            # from message-content redaction; Apex does not need privileged intent.
+            content=f"<@{APEX}> {MARKER}"
+            mentions=discord.AllowedMentions(everyone=False,roles=False,users=[discord.Object(id=APEX)],replied_user=False)
             async for msg in thread.history(limit=50):
-                if msg.author.id==self.bot.user.id and msg.content==MARKER:
-                    await msg.edit(attachments=[file],allowed_mentions=discord.AllowedMentions.none())
+                if msg.author.id==self.bot.user.id and msg.content in (MARKER,content):
+                    await msg.edit(content=content,attachments=[file],allowed_mentions=mentions)
                     break
             else:
-                await thread.send(MARKER,file=file,silent=True,allowed_mentions=discord.AllowedMentions.none())
+                await thread.send(content,file=file,silent=True,allowed_mentions=mentions)
             logger.info("Apex verification snapshot published thread=%s members=%s",thread.id,len(result))
         except Exception:
             logger.exception("Apex verification snapshot failed")

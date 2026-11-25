@@ -81,7 +81,7 @@ PROTECTED_NON_TENURE_ROLE_NAMES = frozenset({
     "founder", "verified", "guest", "clan friend",
 })
 PROTECTED_NON_TENURE_ROLE_IDS = frozenset({
-    COUNCIL_ROLE_ID, MODERATOR_ROLE_ID, TRIAL_MOD_ROLE_ID,
+    COUNCIL_ROLE_ID, MODERATOR_ROLE_ID, TRIAL_MOD_ROLE_ID, 1532829195657285843,
 })
 
 
@@ -121,7 +121,7 @@ TRIAL_ENDING_SOON_DAYS = 7
 
 def has_novus_command_permission(member: discord.Member) -> bool:
     return any(
-        (role.id in NOVUS_COMMAND_ROLE_IDS or role.name.strip().casefold() == "founder")
+        (role.id in NOVUS_COMMAND_ROLE_IDS or role.id == 1532829195657285843)
         for role in member.roles
     )
 
@@ -3680,7 +3680,7 @@ class TasksCog(commands.Cog):
         previous_days: app_commands.Range[int, 0, 3650]
     ):
         if not any(
-            (role.id in TENURE_CREDIT_ROLE_IDS or role.name.strip().casefold() == "founder")
+            (role.id in TENURE_CREDIT_ROLE_IDS or role.id == 1532829195657285843)
             for role in interaction.user.roles
         ):
             await interaction.response.send_message(

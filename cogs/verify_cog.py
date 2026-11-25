@@ -86,6 +86,7 @@ class VerifyCog(commands.Cog):
         self.panel_message_id = None
         self.panel_channel_id = None
         self.restore_task = None
+        self.restore_generation = 0
 
     def lock(self, member):
         return self.locks.setdefault(member.id, asyncio.Lock())
@@ -145,7 +146,7 @@ class VerifyCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        await self.ensure_panel()
+        await self.ensure_panel(force=True)
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload):
@@ -157,14 +158,42 @@ class VerifyCog(commands.Cog):
         if payload.guild_id == NOVUS_GUILD_ID and self.panel_message_id in payload.message_ids:
             self.schedule_restore()
 
+    @staticmethod
+    def is_welcome_post(message):
+        if not (message.author.bot or message.webhook_id):
+            return False
+        for embed in message.embeds:
+            title = (embed.title or "").casefold()
+            if any(text in title for text in ("welcome to novus", "verify your rsn", "spread the love")):
+                return True
+        return False
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if (
+            message.guild is not None
+            and message.guild.id == NOVUS_GUILD_ID
+            and message.channel.id == self.panel_channel_id
+            and message.author.id != self.bot.user.id
+            and self.is_welcome_post(message)
+        ):
+            self.schedule_restore()
+
     def schedule_restore(self):
+        self.restore_generation += 1
         if self.restore_task is None or self.restore_task.done():
             self.restore_task = asyncio.create_task(self.restore_panel())
 
     async def restore_panel(self):
-        # Allow MEE6 to finish republishing its welcome messages.
-        await asyncio.sleep(20)
-        await self.ensure_panel(force=True)
+        # Debounce the entire batch of republished welcome embeds.
+        while True:
+            generation = self.restore_generation
+            await asyncio.sleep(20)
+            if generation != self.restore_generation:
+                continue
+            await self.ensure_panel(force=True)
+            if generation == self.restore_generation:
+                return
 
     def cog_unload(self):
         if self.restore_task is not None:
@@ -211,10 +240,23 @@ class VerifyCog(commands.Cog):
                         ):
                             message = candidate
                             break
+                old_panel = None
+                if message is not None:
+                    if message.author.id != self.bot.user.id:
+                        raise RuntimeError("Saved verification panel is not owned by Novus Sync")
+                    if not any(
+                        getattr(component, "custom_id", None) == "novus:verify:rsn:v1"
+                        for action_row in message.components
+                        for component in action_row.children
+                    ):
+                        raise RuntimeError("Saved message is not a verification panel")
+                    async for newer in channel.history(limit=100, after=message, oldest_first=False):
+                        if newer.author.id != self.bot.user.id and self.is_welcome_post(newer):
+                            old_panel = message
+                            message = None
+                            break
                 if message is None:
                     message = await channel.send(view=VerifyView(self))
-                elif message.author.id != self.bot.user.id:
-                    raise RuntimeError("Saved verification panel is not owned by Novus Sync")
                 else:
                     await message.edit(content=PANEL_TEXT, view=VerifyView(self))
                 conn.execute(
@@ -225,6 +267,11 @@ class VerifyCog(commands.Cog):
                 self.panel_message_id = message.id
                 self.panel_channel_id = channel.id
                 self.panel_checked = True
+                if old_panel is not None:
+                    try:
+                        await old_panel.delete()
+                    except discord.NotFound:
+                        pass
                 logger.info("Novus verification panel ready: %s/%s", channel.id, message.id)
             except Exception:
                 logger.exception("Could not publish Novus verification panel")

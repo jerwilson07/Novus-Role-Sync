@@ -81,9 +81,6 @@ def set_gear_review(channel_id, message_id, reviewer_id):
 def gear_status(reviewer_id):
     return f"✅ **Gear requirement met** (verified by <@{reviewer_id}>)" if reviewer_id else "Gear verification pending"
 
-def gear_next_step(reviewer_id):
-    return "Await staff review and final approval." if reviewer_id else "Provide the application details requested above."
-
 PATHWAYS = {
     "standard": "200+ total raid KC",
     "alternative": "100+ raid KC + Inferno/Colosseum",
@@ -223,11 +220,6 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None):
             for label, key in TRIAL_REFERENCE
         )
         embed.add_field(name="Raid Trial Reference", value=trial_rows, inline=False)
-    embed.add_field(
-        name="Next Step",
-        value=gear_next_step(reviewer_id),
-        inline=False,
-    )
     timestamp = payload.get("snapshot")
     if timestamp:
         try:
@@ -498,7 +490,7 @@ class ApplicationCog(commands.Cog):
                 embed = message.embeds[0].copy()
                 status_index = next((i for i, field in enumerate(embed.fields) if field.name == "Application Status"), None)
                 next_index = next((i for i, field in enumerate(embed.fields) if field.name == "Next Step"), None)
-                if status_index is None or next_index is None:
+                if status_index is None:
                     await interaction.followup.send("Refresh the report before approval.", ephemeral=True)
                     return
                 if pathway in ("standard", "alternative"):
@@ -527,11 +519,12 @@ class ApplicationCog(commands.Cog):
                 reviewer = gear_reviewer(channel.id, message_id)
                 kc_result = embed.fields[status_index].value.partition("\n")[0]
                 embed.set_field_at(status_index, name="Application Status", value=f"{kc_result}\n{gear_status(reviewer)}\n✅ **{'Test approval' if test else 'Staff approval'} complete** (by <@{interaction.user.id}>)\n**Pathway:** {PATHWAYS[pathway]}", inline=False)
-                embed.set_field_at(next_index, name="Next Step", value="Test complete. No roles changed." if test else "Welcome to Novus!", inline=False)
+                if next_index is not None:
+                    embed.remove_field(next_index)
                 if not test:
                     embed.color = discord.Color.green()
                 try:
-                    await message.edit(embed=embed, view=ApplicationView(self, rsn, verified=True, approved=True), allowed_mentions=discord.AllowedMentions.none())
+                    await message.edit(content=None, embed=embed, view=ApplicationView(self, rsn, verified=True, approved=True), allowed_mentions=discord.AllowedMentions.none())
                 except discord.HTTPException:
                     logger.exception("Approval saved but report edit failed")
                 try:
@@ -576,7 +569,7 @@ class ApplicationCog(commands.Cog):
                 embed = message.embeds[0].copy()
                 status_index = next((i for i, field in enumerate(embed.fields) if field.name == "Application Status"), None)
                 next_index = next((i for i, field in enumerate(embed.fields) if field.name == "Next Step"), None)
-                if status_index is None or next_index is None:
+                if status_index is None:
                     await interaction.followup.send("Refresh the report before verifying gear.", ephemeral=True)
                     return
                 if final_approval(channel.id, message_id):
@@ -590,7 +583,8 @@ class ApplicationCog(commands.Cog):
                 status = embed.fields[status_index].value
                 result, _, _ = status.partition("\n")
                 embed.set_field_at(status_index, name="Application Status", value=f"{result}\n{gear_status(reviewer)}\nStaff approval pending\n\u200b", inline=False)
-                embed.set_field_at(next_index, name="Next Step", value=gear_next_step(reviewer), inline=False)
+                if next_index is not None:
+                    embed.remove_field(next_index)
                 set_gear_review(channel.id, message_id, reviewer)
                 try:
                     await message.edit(content=APPLICATION_INTRO, embed=embed, view=ApplicationView(self, rsn, verified=verified), allowed_mentions=discord.AllowedMentions.none())

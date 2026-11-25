@@ -429,7 +429,7 @@ class VouchesCog(commands.Cog):
         )
         embed.add_field(
             name="Vouch Progress",
-            value=f"**{len(rows)}/{REQUIRED_VOUCHES}** unique vouches",
+            value=f"{'✅' if len(rows) >= REQUIRED_VOUCHES else '▫️'} **{len(rows)}/{REQUIRED_VOUCHES}** unique vouches\n\u200b",
             inline=False,
         )
         add_vouch_feedback(embed, rows)

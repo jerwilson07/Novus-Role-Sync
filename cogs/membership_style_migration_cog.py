@@ -13,7 +13,7 @@ from cogs.application_cog import GUILD, CATEGORY, REPORT_TITLE, db, get_report
 from cogs.vouches_cog import VouchesCog, NOVUS_MOD_CHAT_CHANNEL_ID
 
 logger = logging.getLogger("WOMBot")
-VERSION = "membership-style-v4-neoncheck-20261125"
+VERSION = "membership-style-v5-gear-attachments-20261125"
 
 def brand(embed, logo, footer=None):
     embed.set_thumbnail(url=logo)
@@ -26,7 +26,26 @@ def migrate_details(message, logo):
     if old.title == "Novus Application Details":
         revised = old.copy()
         brand(revised, logo)
-        return [revised] + [e.copy() for e in message.embeds[1:]]
+        # Rebind images to retained attachment names, not expired CDN URLs.
+        images = [a for a in message.attachments if (a.content_type or "").startswith("image/") or re.search(r"\.(png|jpe?g|gif|webp|bmp|avif)$", a.filename, re.I)]
+        if not images:
+            # Never silently claim missing evidence is available.
+            for i, field in enumerate(revised.fields):
+                if field.name == "Gear Screenshots":
+                    revised.set_field_at(i, name=field.name, value="No accessible screenshot attachments. Please re-upload gear screenshots for staff review.", inline=False)
+            revised.set_image(url=None)
+            return [revised]
+        count = len(images)
+        for i, field in enumerate(revised.fields):
+            if field.name == "Gear Screenshots":
+                revised.set_field_at(i, name=field.name, value=f"{count} screenshot{'s' if count != 1 else ''} attached", inline=False)
+        revised.set_image(url=f"attachment://{images[0].filename}")
+        embeds = [revised]
+        for i, attachment in enumerate(images[1:], 2):
+            extra = discord.Embed(title=f"Gear Screenshot {i} of {count}", color=discord.Color.blurple())
+            extra.set_image(url=f"attachment://{attachment.filename}")
+            embeds.append(extra)
+        return embeds
     if old.title != "Application Details" or not message.attachments:
         return None
     # Parse only the exact original field layout. Never guess missing content.

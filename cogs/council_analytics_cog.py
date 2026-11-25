@@ -1,5 +1,6 @@
 """Private aggregate Council reports; read-only Discord/WOM analytics."""
 import asyncio
+import io
 import datetime as dt
 import json
 import logging
@@ -335,7 +336,7 @@ class CouncilAnalyticsCog(commands.Cog):
         label=lambda t:t.astimezone(ET).strftime("%b %d, %Y")
         # End is exclusive for the calendar report.
         period=f"{label(start)} to {label(end if lifetime else end-dt.timedelta(seconds=1))}"
-        embed=discord.Embed(title="Novus | Lifetime Council Report" if lifetime else f"Novus | {start.astimezone(ET):%B %Y} Council Report",description=f"**{period}**\n{'Earliest verified WOM/clan records to date.' if lifetime else 'Previous calendar month.'}\nCouncil only • Aggregate metrics",color=discord.Color.blurple(),timestamp=now())
+        embed=discord.Embed(title="Monthly Novus Report | Lifetime Edition" if lifetime else f"Monthly Novus Report | {start.astimezone(ET):%B %Y}",description=f"**{period}**\n{'Earliest verified WOM/clan records to date.' if lifetime else 'Previous calendar month.'}\nCouncil only • Aggregate metrics",color=discord.Color.blurple(),timestamp=now())
         embed.set_thumbnail(url=(guild.icon or self.bot.user.display_avatar).url)
         def field(name,value):
             embed.add_field(name=name,value=value[:1024],inline=False)
@@ -396,10 +397,47 @@ class CouncilAnalyticsCog(commands.Cog):
         embed.set_footer(text=f"Novus Analytics • Council only • {key}")
         if len(embed)>5900:
             raise RuntimeError("Council report exceeds embed budget")
-        return embed,metrics
+        chart_data={
+            "period":period,"lifetime":lifetime,"full":len(members),"trial":trial_now,
+            "wom":len(roster),"linked":len(linked),"tenures":tenures,
+            "joins":kinds["joined"],"departures":kinds["departed"],"complete":complete,
+            "wom_joins":account_activity["joined"],"wom_leaves":account_activity["left"],"wom_complete":activity_complete,
+            "retention":(100*len(start_set&end_set)/len(start_set)) if complete and start_set else None,
+            "opened":opened,"approved":approved,"converted":converted,"unknown_apps":unknown_apps,
+            "paths":dict(paths),"active":active,"new":new,"late":late,"passed":passed,"other":other,
+            "unknown":unknown,"departed":departed,"vouches":vouches,
+            "duration":statistics.median(durations) if durations else None,
+            "raids":{name:kc[metric] if metric in observed else None for name,metric in RAID_METRICS.items()},
+            "bosses":{m.replace("_"," ").title():n for m,n in kc.most_common() if m not in RAID_METRICS.values() and n>0},
+            "first":dict(first),"diary":sum(diary.values()),"promotions":dict(promo),
+            "ranks":dict(rank_counts),"engaged":len(active_players),"measured":len(measured_members),
+            "unmeasured":len(set(members)-measured_members),"covered":len(covered_accounts),"owners":len(owners),
+            "prior":json.loads(prior[0][0]) if prior else None,"metrics":metrics
+        }
+        return embed,metrics,chart_data
 
     async def deliver(self,guild,channel,start,end,key,lifetime=False):
-        if query("SELECT 1 FROM council_monthly_reports WHERE report_key=?",(key,)):
+        saved=query("SELECT message_id,sent_at FROM council_monthly_reports WHERE report_key=?",(key,))
+        if saved:
+            # Restyle the first text-only lifetime report in place, once.
+            if not lifetime:
+                return
+            try:
+                existing=await channel.fetch_message(saved[0][0])
+            except discord.NotFound:
+                return
+            if existing.author.id!=self.bot.user.id or not existing.embeds or any(a.filename=="novus-membership.png" for a in existing.attachments):
+                return
+            cutoff=parse(saved[0][1]) or end
+            embed,metrics,chart_data=await self.build(guild,start,cutoff,key,lifetime)
+            images=await asyncio.to_thread(render_dashboards,chart_data)
+            embed,chart_embeds,files=dashboard_message(embed,images)
+            if self.council_channel(guild)!=channel:
+                return
+            await existing.edit(embeds=[embed]+chart_embeds,attachments=files,allowed_mentions=discord.AllowedMentions.none())
+            with closing(db()) as conn,conn:
+                conn.execute("UPDATE council_monthly_reports SET metrics_json=? WHERE report_key=?",(json.dumps(metrics),key))
+            logger.info("Council lifetime report updated with charts message=%s",existing.id)
             return
         # Durable recovery: a successful Discord send before a DB commit is
         # recognized by the exact bot-owned footer, never sent twice.
@@ -410,10 +448,12 @@ class CouncilAnalyticsCog(commands.Cog):
                     conn.execute("INSERT OR IGNORE INTO council_monthly_reports VALUES (?,?,?,?)",(key,message.id,"{}",stamp(message.created_at)))
                 logger.info("Council report recovered key=%s message=%s",key,message.id)
                 return
-        embed,metrics=await self.build(guild,start,end,key,lifetime)
+        embed,metrics,chart_data=await self.build(guild,start,end,key,lifetime)
+        images=await asyncio.to_thread(render_dashboards,chart_data)
+        embed,chart_embeds,files=dashboard_message(embed,images)
         if self.council_channel(guild)!=channel:
             raise RuntimeError("Council channel privacy changed")
-        message=await channel.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+        message=await channel.send(embeds=[embed]+chart_embeds,files=files,allowed_mentions=discord.AllowedMentions.none())
         logger.info("Council report posted key=%s channel=%s message=%s metrics=%s",key,channel.id,message.id,json.dumps(metrics,sort_keys=True))
         with closing(db()) as conn,conn:
             conn.execute("INSERT OR IGNORE INTO council_monthly_reports VALUES (?,?,?,?)",(key,message.id,json.dumps(metrics),stamp(now())))
@@ -445,6 +485,107 @@ class CouncilAnalyticsCog(commands.Cog):
     async def before_tick(self):
         await self.bot.wait_until_ready()
         await asyncio.sleep(25)
+
+
+def render_dashboards(d):
+    # Local rendering: no member data is sent to a third-party chart service.
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+    BG="#10151f"; PANEL="#192231"; FG="#f0f4fc"; MUTED="#a5b2c5"
+    BLUE="#8197fa"; GREEN="#4ad6a1"; GOLD="#e7bb68"; RED="#e8828a"
+    def board(title,subtitle):
+        fig,axs=plt.subplots(3,2,figsize=(12,13.5),facecolor=BG)
+        fig.subplots_adjust(left=.16,right=.93,bottom=.08,top=.86,wspace=.43,hspace=.58)
+        fig.text(.055,.957,"NOVUS  /  COUNCIL ANALYTICS",color=GREEN,fontsize=12,weight="bold")
+        fig.text(.055,.925,title,color=FG,fontsize=25,weight="bold")
+        fig.text(.055,.895,d["period"]+"  •  "+subtitle,color=MUTED,fontsize=12)
+        return fig,axs.ravel()
+    def prepare(ax,title):
+        ax.set_facecolor(PANEL)
+        ax.set_title(title,loc="left",color=FG,fontsize=15,weight="bold",pad=12)
+        for sp in ax.spines.values():sp.set_visible(False)
+        ax.tick_params(colors=MUTED,labelsize=10,length=0)
+        ax.set_axisbelow(True)
+    def empty(ax,title,message):
+        prepare(ax,title)
+        ax.set_xticks([]);ax.set_yticks([])
+        ax.text(.5,.5,message,ha="center",va="center",wrap=True,color=MUTED,fontsize=12,transform=ax.transAxes)
+    def bars(ax,title,pairs,colors=BLUE,note=None):
+        valid=[(label,value) for label,value in pairs if value is not None]
+        if not valid:
+            return empty(ax,title,"No comparable data yet")
+        prepare(ax,title)
+        labels,values=zip(*valid)
+        ax.barh(list(range(len(values))),values,color=colors,height=.64)
+        ax.set_yticks(list(range(len(values))),labels=labels)
+        ax.invert_yaxis()
+        ax.set_xlim(0,max(max(values)*1.25,1))
+        ax.xaxis.set_major_formatter(ticker.StrMethodFormatter("{x:,.0f}"))
+        ax.grid(axis="x",alpha=.12,color=MUTED)
+        for i,value in enumerate(values):
+            ax.text(value+max(max(values),1)*.025,i,f"{value:,.0f}",color=FG,va="center",fontsize=11,weight="bold")
+        if note:ax.text(0,-.22,note,color=MUTED,fontsize=9,transform=ax.transAxes,wrap=True)
+    def save(fig,footer):
+        fig.text(.055,.035,footer,color=MUTED,fontsize=10,wrap=True)
+        buf=io.BytesIO();fig.savefig(buf,format="png",dpi=125,facecolor=BG)
+        plt.close(fig);buf.seek(0)
+        return buf
+    f,a=board("Membership & recruitment","Roster, retention and trial outcomes")
+    bars(a[0],"Current membership",[("Full members",d["full"]),("Trial members",d["trial"]),("WOM accounts",d["wom"]),("Linked members",d["linked"])])
+    if d["wom_complete"] or d["wom_joins"] or d["wom_leaves"]:
+        bars(a[1],"WOM account movements",[("Joined",d["wom_joins"]),("Left",d["wom_leaves"])],[GREEN,RED],"Accounts, not unique people." + ("" if d["wom_complete"] else " Partial history."))
+    else:empty(a[1],"WOM account movements","Historical account activity unavailable")
+    if d["retention"] is not None:
+        bars(a[2],"Roster retention",[("Retained (%)",d["retention"])],GREEN)
+        a[2].set_xlim(0,110)
+    elif d["tenures"]:
+        bars(a[2],"Current membership tenure",[("Mean days",statistics.mean(d["tenures"])),("Median days",statistics.median(d["tenures"]))],GOLD,"Historical retention baseline establishing.")
+    else:empty(a[2],"Member retention","Baseline establishing")
+    if d["opened"] or d["approved"]:
+        bars(a[3],"Classified recruitment",[("Applications",d["opened"]),("Approvals",d["approved"])],BLUE,f'{d["unknown_apps"]} historical tickets unclassified.')
+    else:empty(a[3],"Recruitment",f'Baseline establishing\n{d["unknown_apps"]} historical tickets unclassified')
+    bars(a[4],"Trial outcomes (tracked)",[("Active",d["active"]),("Vouch graduation",d["passed"]),("Other pathway",d["other"]),("Unclassified",d["unknown"]),("Closed",d["departed"])],BLUE,"Observed episodes; incomplete historical coverage.")
+    bars(a[5],"Current tenure ranks",[(r.title(),d["ranks"].get(r,0)) for r in RANKS]+[("Unranked",d["ranks"].get("unranked",0))],GREEN)
+    one=save(f,"Current membership is a snapshot. Historical events are partial; staff test applications are excluded where known.")
+    f,a=board("PvM & member progression","Observed gains and achievements")
+    bars(a[0],"Raid KC gained",list(d["raids"].items()),GREEN,"Only comparable WOM metrics shown.")
+    bars(a[1],"Top non-raid bosses",list(d["bosses"].items())[:5],BLUE)
+    if d["covered"]:
+        bars(a[2],"Member PvM engagement",[("Positive gains",d["engaged"]),("No positive gains",d["measured"]-d["engaged"]),("No comparable data",d["unmeasured"])],[GREEN,GOLD,MUTED],f'{d["covered"]}/{d["owners"]} linked accounts measured.')
+        bars(a[3],"First KC transitions",[("Inferno",d["first"].get("tzkal_zuk",0)),("Colosseum",d["first"].get("sol_heredit",0))],GREEN,"Observed 0 to 1+ transitions, lower bound.")
+    else:
+        empty(a[2],"Member PvM engagement","Comparable WOM snapshots unavailable")
+        empty(a[3],"First KC transitions","Comparable WOM snapshots unavailable")
+    bars(a[4],"Observed tenure promotions",[(r.title(),d["promotions"].get(r,0)) for r in RANKS[1:]],BLUE,"Partial history until full monthly coverage.")
+    if d["prior"]:
+        pairs=[(label,d["metrics"].get(k)-d["prior"].get(k)) for k,label in (("full","Full members"),("joins","Member joins"),("approved","Approvals")) if d["metrics"].get(k) is not None and d["prior"].get(k) is not None]
+        if pairs:
+            prepare(a[5],"Month-over-month change")
+            labels,values=zip(*pairs);a[5].barh(range(len(values)),values,color=[GREEN if v>=0 else RED for v in values])
+            a[5].set_yticks(range(len(values)),labels=labels);a[5].invert_yaxis();a[5].axvline(0,color=MUTED,alpha=.5)
+        else:empty(a[5],"Month-over-month","No comparable prior period")
+    else:empty(a[5],"Month-over-month","Baseline edition\nMonthly comparison begins with comparable reports")
+    two=save(f,"WOM gains describe current linked accounts and may predate joining. Missing metrics are not treated as zero.")
+    return [one,two]
+
+def dashboard_message(embed,images):
+    # Keep the nine sections represented in charts, and retain concise
+    # supplemental details for metrics not suitable for charts.
+    selected={"Member Retention","Recruitment","Raid Trial Analytics","Member Achievements","Data Coverage"}
+    for index in reversed(range(len(embed.fields))):
+        if embed.fields[index].name not in selected:
+            embed.remove_field(index)
+    names=["novus-membership.png","novus-pvm.png"]
+    charts=[]
+    files=[]
+    for name,image in zip(names,images):
+        card=discord.Embed(color=discord.Color.blurple())
+        card.set_image(url="attachment://"+name)
+        charts.append(card)
+        files.append(discord.File(image,filename=name))
+    return embed,charts,files
 
 async def setup(bot):
     init()

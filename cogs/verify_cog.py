@@ -342,50 +342,53 @@ class VerifyCog(commands.Cog):
         if not any(r.id in staff_ids for r in interaction.user.roles):
             await interaction.response.send_message("Only Founder, Council, Moderators and Trial Moderators can approve members.", ephemeral=True)
             return
-        if member.bot:
-            await interaction.response.send_message("You cannot approve a bot.", ephemeral=True)
-            return
-        try:
-            full = unique_role(guild, "Member")
-            squire = unique_role(guild, "Squire")
-            trial = unique_role(guild, "Trial Member")
-            verified = unique_role(guild, "Verified")
-            friend = guild.get_role(CLAN_FRIEND_ROLE_ID)
-            guest = guild.get_role(GUEST_ROLE_ID)
-            if guest is None:
-                raise ValueError("Guest role is not configured.")
-            if friend is None:
-                raise ValueError("Clan Friend role is not configured.")
-        except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
-            return
         await interaction.response.defer(ephemeral=True)
         try:
-            async with self.lock(member):
-                member = await guild.fetch_member(member.id)
-                if verified not in member.roles:
-                    await interaction.followup.send("This applicant must complete /rsn first.", ephemeral=True)
-                    return
-                already = full in member.roles
-                add = []
-                if not already:
-                    add.append(full)
-                if not any(r.name.strip().casefold() in NOVUS_TENURE_ROLES for r in member.roles):
-                    add.append(squire)
-                if add:
-                    await member.add_roles(*add, reason=f"Novus /approve by {interaction.user.id}")
-                remove = [r for r in (friend, trial, guest) if r in member.roles]
-                if remove:
-                    await member.remove_roles(*remove, reason=f"Novus /approve by {interaction.user.id}")
+            member, already, logged = await self.approve_member(guild, interaction.user, member)
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
         except discord.HTTPException:
             logger.exception("Approval failed for %s", member.id)
             await interaction.followup.send("Could not complete approval. Please check roles and retry; some changes may already have applied.", ephemeral=True)
             return
-        logged = await self.log_approval(guild, interaction.user, member, already)
         message = f"{member.mention} is approved. Existing ranks and Verified are preserved. WOM linking and tenure are handled by the existing sync."
         if not logged:
             message += " Staff log could not be sent."
         await interaction.followup.send(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    async def approve_member(self, guild, actor, member):
+        """Shared role transition for /approve and ticket approval."""
+        staff_ids = set(NOVUS_COMMAND_ROLE_IDS) | {1532829195657285843}
+        if guild.id != NOVUS_GUILD_ID or not any(r.id in staff_ids for r in actor.roles):
+            raise ValueError("Only authorized Novus staff may approve members.")
+        if member.bot:
+            raise ValueError("You cannot approve a bot.")
+        full = unique_role(guild, "Member")
+        squire = unique_role(guild, "Squire")
+        trial = unique_role(guild, "Trial Member")
+        verified = unique_role(guild, "Verified")
+        friend = guild.get_role(CLAN_FRIEND_ROLE_ID)
+        guest = guild.get_role(GUEST_ROLE_ID)
+        if guest is None or friend is None:
+            raise ValueError("Guest or Clan Friend role is not configured.")
+        async with self.lock(member):
+            member = await guild.fetch_member(member.id)
+            if verified not in member.roles:
+                raise ValueError("This applicant must complete /rsn first.")
+            already = full in member.roles
+            add = []
+            if not already:
+                add.append(full)
+            if not any(r.name.strip().casefold() in NOVUS_TENURE_ROLES for r in member.roles):
+                add.append(squire)
+            if add:
+                await member.add_roles(*add, reason=f"Novus approval by {actor.id}")
+            remove = [r for r in (friend, trial, guest) if r in member.roles]
+            if remove:
+                await member.remove_roles(*remove, reason=f"Novus approval by {actor.id}")
+        logged = await self.log_approval(guild, actor, member, already)
+        return member, already, logged
 
 
 async def setup(bot):

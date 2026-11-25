@@ -189,6 +189,12 @@ class VerifyCog(commands.Cog):
         embed.set_footer(text="Novus • Account Verification")
         kwargs = {"view": view} if view.children else {}
         await interaction.followup.send(embed=embed, ephemeral=True, **kwargs)
+        application_cog = self.bot.get_cog("ApplicationCog")
+        if application_cog is not None:
+            try:
+                await application_cog.cache_verified(guild.id, member.id, nickname)
+            except Exception:
+                logger.exception("Could not cache verified applicant KC")
 
     @commands.Cog.listener()
     async def on_ready(self):

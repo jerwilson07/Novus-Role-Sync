@@ -14,6 +14,7 @@ import discord
 from discord.ext import commands, tasks
 
 from common import WOM_API_KEY, sanitize_rsn
+from cogs.vouches_cog import get_vouches, formatted_vouches, REQUIRED_VOUCHES, is_trial
 
 logger = logging.getLogger("WOMBot")
 GUILD = 1532817291048124466
@@ -204,7 +205,35 @@ def extract(data):
         values[key] = kc if type(kc) is int and kc >= 0 else None
     return {"values": values, "snapshot": snapshot.get("createdAt"), "name": data.get("displayName") or data.get("username")}
 
-def report_embed(rsn, payload, test=False, note=None, reviewer_id=None):
+def trial_vouch_records(applicant_id):
+    """Use /vouches records, excluding known previous trial attempts."""
+    rows = get_vouches(GUILD, applicant_id)
+    with closing(db()) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trial_analytics_episodes'").fetchone():
+            return rows, True
+        episodes = conn.execute("SELECT started_at, entry_source, ended_at FROM trial_analytics_episodes WHERE guild_id=? AND discord_id=? ORDER BY episode_id DESC", (GUILD, applicant_id)).fetchall()
+    if not episodes:
+        return rows, True
+    started, source, ended = episodes[0]
+    if ended:
+        return [], True
+    if len(episodes) == 1 and source == "late_observation":
+        return rows, True
+    cutoff = datetime.datetime.fromisoformat(started)
+    current = []
+    for record in rows:
+        try:
+            stamp = datetime.datetime.fromisoformat(record[3].replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+            if stamp >= cutoff:
+                current.append(record)
+        except (TypeError, ValueError):
+            continue
+    return current, False
+
+
+def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=None):
     payload = payload or {}
     values = payload.get("values", {})
     total = sum(values.get(key) or 0 for _, key in RAIDS)
@@ -217,6 +246,7 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None):
     qualified = standard or alternative
     uncertain = not qualified and (incomplete or (total >= 100 and special_unknown))
     total_indicator = "✅ " if qualified else ("" if uncertain else "❌ ")
+    vouch_ready = trial is not None and trial["count"] is not None and trial["count"] >= REQUIRED_VOUCHES
     if standard or alternative:
         pathway = "200+ raid KC" if standard else "100+ raid KC + Inferno/Colosseum"
         result = f"✅ **KC requirement met** ({pathway})"
@@ -228,6 +258,12 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None):
         result = "❌ **KC thresholds not met**"
         color = discord.Color.red()
 
+    if vouch_ready and not qualified:
+        result = "✅ **Raid Trial vouch requirement met**"
+        color = discord.Color.green()
+    elif trial is not None and not qualified:
+        color = discord.Color.gold()
+
     def fmt(key):
         value = values.get(key)
         return f"{value:,}" if value is not None else "N/A"
@@ -236,7 +272,7 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None):
     total_label = f"{'≥ ' if incomplete else ''}{total:,} / {target:,} KC"
     embed = discord.Embed(
         title=REPORT_TITLE,
-        description=f"**Applicant:** {name}\n\n**Total Raid KC:** {total_indicator}**{total_label}**",
+        description=f"**Applicant:** {name}" + ("\n**Current role:** Trial Member • Full membership application" if trial is not None else "") + f"\n\n**Total Raid KC:** {total_indicator}**{total_label}**",
         color=color,
     )
     # Monospace rows retain their alignment on both mobile and desktop.
@@ -252,7 +288,21 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None):
         value=f"{result}\n{gear_status(reviewer_id)}\nStaff approval pending\n\u200b",
         inline=False,
     )
-    if not qualified:
+    if trial is not None:
+        def pathway_status(passed, unknown=False):
+            return "✅" if passed else ("Pending verification" if unknown else "❌")
+        count = trial["count"]
+        vouches = "Unavailable • staff review" if count is None else f"{'✅ ' if vouch_ready else ''}{count}/{REQUIRED_VOUCHES} unique vouches"
+        graduation = (
+            f"**Raid Trial:** {vouches}\n"
+            f"**200+ total raid KC:** {pathway_status(standard, incomplete)}\n"
+            f"**100+ KC + Inferno/Colosseum:** {pathway_status(alternative, incomplete or special_unknown)}\n"
+            "**Raids Prep Program:** Staff confirmation required"
+        )
+        if trial["legacy"]:
+            graduation += "\n-# Existing vouch records: staff must confirm they apply to this trial."
+        embed.add_field(name="Trial Member Graduation", value=graduation, inline=False)
+    if not qualified and trial is None:
         embed.add_field(name="Alternative Pathways", value="Raids Prep Program or Raid Trial (staff discretion).\nRaid Trial: 3 member vouches within 1-2 weeks.", inline=False)
         trial_rows = "\n".join(
             f"**{label}:** {fmt(key)}" + (" KC" if values.get(key) is not None else "")
@@ -327,10 +377,12 @@ class ApplicationPromptView(discord.ui.View):
         await self.cog.open_application_form(interaction)
 
 class ApplicationView(discord.ui.View):
-    def __init__(self, cog, rsn=None, verified=False, approved=False, submitted=False, separate_prompt=False):
+    def __init__(self, cog, rsn=None, verified=False, approved=False, submitted=False, separate_prompt=False, trial=False):
         super().__init__(timeout=None)
         self.cog = cog
         self.remove_item(self.verify_gear if verified else self.undo_gear)
+        if not trial or approved:
+            self.remove_item(self.view_vouches)
         if submitted or approved or separate_prompt:
             self.remove_item(self.complete_application)
         if not verified or approved:
@@ -356,6 +408,10 @@ class ApplicationView(discord.ui.View):
     @discord.ui.button(label="Undo Gear Verification", style=discord.ButtonStyle.secondary, custom_id="novus:application:gear:undo:v1", row=1)
     async def undo_gear(self, interaction, button):
         await self.cog.review_gear(interaction, False)
+
+    @discord.ui.button(label="View Vouches", style=discord.ButtonStyle.secondary, custom_id="novus:application:vouches:v1", row=2)
+    async def view_vouches(self, interaction, button):
+        await self.cog.show_trial_vouches(interaction)
 
     @discord.ui.button(label="Approve Applicant", style=discord.ButtonStyle.success, custom_id="novus:application:approve:v1", row=1)
     async def final_approve(self, interaction, button):
@@ -459,6 +515,44 @@ class ApplicationCog(commands.Cog):
             saved = conn.execute("SELECT rsn FROM links WHERE guild_id=? AND discord_id=?", (channel.guild.id, member.id)).fetchone()
         rsn = primary_name(saved[0] if saved and saved[0] else member.nick)
         return member.id, rsn
+
+    async def trial_context(self, channel, applicant_id):
+        if not applicant_id or channel.id == TEST_CHANNEL:
+            return None
+        member = await channel.guild.fetch_member(applicant_id)
+        if not is_trial(member):
+            return None
+        try:
+            rows, legacy = trial_vouch_records(applicant_id)
+            return {"count": len(rows), "legacy": legacy}
+        except sqlite3.Error:
+            logger.exception("Trial vouch lookup failed applicant=%s", applicant_id)
+            return {"count": None, "legacy": True}
+
+    async def show_trial_vouches(self, interaction):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY or not is_staff(interaction.user):
+            await interaction.response.send_message("Only staff may view trial vouches.", ephemeral=True)
+            return
+        row = get_report(channel.id)
+        if not row or not row[0] or not interaction.message or row[2] != interaction.message.id:
+            await interaction.response.send_message("This report is no longer active.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            member = await channel.guild.fetch_member(row[0])
+            if not is_trial(member):
+                await interaction.followup.send("This applicant is not a current Trial Member.", ephemeral=True)
+                return
+            rows, legacy = trial_vouch_records(member.id)
+            embed = discord.Embed(title=f"Trial Vouches • {member.display_name}", description=formatted_vouches(rows, limit=10)[:3900], color=discord.Color.green() if len(rows)>=REQUIRED_VOUCHES else discord.Color.blurple())
+            embed.add_field(name="Progress", value=f"**{len(rows)}/{REQUIRED_VOUCHES}** unique vouches", inline=False)
+            if legacy:
+                embed.add_field(name="Staff review", value="Existing vouch records may predate tracking. Confirm these apply to the current trial.", inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            logger.exception("Application vouch review failed")
+            await interaction.followup.send("Vouches could not be retrieved. Try /vouches or refresh later.", ephemeral=True)
 
     async def get_payload(self, rsn, applicant_id, update=False):
         try:
@@ -572,8 +666,9 @@ class ApplicationCog(commands.Cog):
                 logger.info("Recovered application report channel=%s message=%s", channel.id, msg.id)
                 return
             payload, note = await self.get_payload(rsn, applicant_id, update=True)
+            trial = await self.trial_context(channel, applicant_id)
             await self.ensure_form_prompt(channel)
-            message = await channel.send(embed=report_embed(rsn, payload, test, note), view=ApplicationView(self, rsn, separate_prompt=True), allowed_mentions=discord.AllowedMentions.none())
+            message = await channel.send(embed=report_embed(rsn, payload, test, note, trial=trial), view=ApplicationView(self, rsn, separate_prompt=True, trial=trial is not None), allowed_mentions=discord.AllowedMentions.none())
             save_report(channel.id, applicant_id, rsn, message.id)
             logger.info("Application KC report published channel=%s message=%s rsn=%s total=%s", channel.id, message.id, rsn, sum((payload or {}).get("values", {}).get(k) or 0 for _,k in RAIDS))
 
@@ -763,7 +858,7 @@ class ApplicationCog(commands.Cog):
                         try:
                             await self.update_form_prompt(channel, APPLICATION_SUBMITTED)
                             prompt_id = get_form_prompt(channel.id)
-                            await report.edit(content=None if prompt_id else APPLICATION_SUBMITTED, view=ApplicationView(self, get_report(channel.id)[1], submitted=True, separate_prompt=bool(prompt_id)), allowed_mentions=discord.AllowedMentions.none())
+                            await report.edit(content=None if prompt_id else APPLICATION_SUBMITTED, view=ApplicationView(self, get_report(channel.id)[1], submitted=True, separate_prompt=bool(prompt_id), trial=any(f.name == "Trial Member Graduation" for f in report.embeds[0].fields)), allowed_mentions=discord.AllowedMentions.none())
                         except discord.HTTPException:
                             logger.exception("Recovered submission saved but application UI update failed")
                         await interaction.followup.send("Your existing application was recovered. Staff can review it now.", ephemeral=True)
@@ -803,7 +898,7 @@ class ApplicationCog(commands.Cog):
                     prompt_id = get_form_prompt(channel.id)
                     if prompt_id:
                         await self.update_form_prompt(channel, APPLICATION_SUBMITTED)
-                    await report.edit(content=None if prompt_id else APPLICATION_SUBMITTED, view=ApplicationView(self, rsn, submitted=True, separate_prompt=bool(prompt_id)), allowed_mentions=discord.AllowedMentions.none())
+                    await report.edit(content=None if prompt_id else APPLICATION_SUBMITTED, view=ApplicationView(self, rsn, submitted=True, separate_prompt=bool(prompt_id), trial=any(f.name == "Trial Member Graduation" for f in report.embeds[0].fields)), allowed_mentions=discord.AllowedMentions.none())
                 except discord.HTTPException:
                     logger.exception("Form saved but report button update failed")
                 logger.info("Application form submitted channel=%s report=%s response=%s attachments=%s", channel.id, report_id, submitted.id, len(attachments))
@@ -880,6 +975,14 @@ class ApplicationCog(commands.Cog):
                     if current_id != applicant_id or not current_rsn or sanitize_rsn(current_rsn).casefold() != sanitize_rsn(rsn).casefold():
                         await interaction.followup.send("Applicant or RSN no longer matches this report. Use manual staff review.", ephemeral=True)
                         return
+                    if pathway == "raidtrial":
+                        if not is_trial(member):
+                            await interaction.followup.send("The Raid Trial pathway requires a current Trial Member. Choose another completed pathway.", ephemeral=True)
+                            return
+                        rows, legacy = trial_vouch_records(applicant_id)
+                        if len(rows) < REQUIRED_VOUCHES:
+                            await interaction.followup.send(f"Only {len(rows)}/{REQUIRED_VOUCHES} vouches recorded for this trial. Wait for more vouches or select another completed pathway.", ephemeral=True)
+                            return
                     verify = self.bot.get_cog("VerifyCog")
                     if verify is None or not hasattr(verify, "approve_member"):
                         await interaction.followup.send("Approval service unavailable. No roles changed.", ephemeral=True)
@@ -1018,7 +1121,7 @@ class ApplicationCog(commands.Cog):
                     embed.remove_field(next_index)
                 set_gear_review(channel.id, message_id, reviewer)
                 try:
-                    await message.edit(content=form_content(channel.id, message.id), embed=embed, view=ApplicationView(self, rsn, verified=verified, submitted=bool(form_submission(channel.id, message.id)), separate_prompt=bool(get_form_prompt(channel.id))), allowed_mentions=discord.AllowedMentions.none())
+                    await message.edit(content=form_content(channel.id, message.id), embed=embed, view=ApplicationView(self, rsn, verified=verified, submitted=bool(form_submission(channel.id, message.id)), separate_prompt=bool(get_form_prompt(channel.id)), trial=any(f.name == "Trial Member Graduation" for f in embed.fields)), allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
                     set_gear_review(channel.id, message_id, previous)
                     raise
@@ -1056,7 +1159,8 @@ class ApplicationCog(commands.Cog):
                 await interaction.followup.send(note or "WOM unavailable. Existing report retained.", ephemeral=True)
                 return
             reviewer = gear_reviewer(channel.id, interaction.message.id)
-            await interaction.message.edit(content=form_content(channel.id, interaction.message.id), embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, interaction.message.id)), separate_prompt=bool(get_form_prompt(channel.id))), allowed_mentions=discord.AllowedMentions.none())
+            trial = await self.trial_context(channel, applicant_id)
+            await interaction.message.edit(content=form_content(channel.id, interaction.message.id), embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer, trial=trial), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, interaction.message.id)), separate_prompt=bool(get_form_prompt(channel.id)), trial=trial is not None), allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send("Eligibility report refreshed.", ephemeral=True)
 
 async def setup(bot):
@@ -1066,3 +1170,5 @@ async def setup(bot):
     bot.add_view(ApplicationPromptView(cog))
     bot.add_view(ApplicationView(cog))
     bot.add_view(ApplicationView(cog, verified=True))
+    bot.add_view(ApplicationView(cog, trial=True))
+    bot.add_view(ApplicationView(cog, verified=True, trial=True))

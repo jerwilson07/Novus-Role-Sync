@@ -6,7 +6,7 @@ import re
 import sqlite3
 
 import discord
-from novus_logging import check, notice, bind_novus_ui
+from novus_logging import check, notice, bind_novus_ui, _dismiss_private, start_logged_task
 from discord import app_commands
 from discord.ext import commands
 
@@ -203,7 +203,9 @@ class VerifyCog(commands.Cog):
         logo = guild.icon or self.bot.user.display_avatar
         embed.set_thumbnail(url=logo.url)
         kwargs = {"view": view} if view.children else {}
-        await notice(interaction, True, embed=embed, ephemeral=True, **kwargs)
+        confirmation = await notice(interaction, True, embed=embed, ephemeral=True, wait=True, **kwargs)
+        if confirmation is not None and confirmation.flags.ephemeral:
+            start_logged_task(_dismiss_private(confirmation), name="novus-rsn-confirmation-dismiss")
         application_cog = self.bot.get_cog("ApplicationCog")
         if application_cog is not None:
             try:

@@ -670,6 +670,17 @@ class ApplicationCog(commands.Cog):
                 save_report(channel.id, applicant_id, rsn, msg.id)
                 logger.info("Recovered application report channel=%s message=%s", channel.id, msg.id)
                 return
+            # Capture the applicant's status before any approval can change roles.
+            if applicant_id and not test:
+                try:
+                    member = await channel.guild.fetch_member(applicant_id)
+                    role_names = {role.name.strip().casefold() for role in member.roles}
+                    origin = "existing" if "member" in role_names else ("trial" if "trial member" in role_names else "new")
+                    with closing(db()) as conn, conn:
+                        conn.execute("CREATE TABLE IF NOT EXISTS council_application_origins (channel_id INTEGER PRIMARY KEY, applicant_id INTEGER, origin TEXT NOT NULL, recorded_at TEXT NOT NULL)")
+                        conn.execute("INSERT OR IGNORE INTO council_application_origins VALUES (?,?,?,?)", (channel.id, applicant_id, origin, datetime.datetime.now(datetime.timezone.utc).isoformat()))
+                except Exception:
+                    logger.exception("Council application origin not recorded; application continues")
             payload, note = await self.get_payload(rsn, applicant_id, update=True)
             trial = await self.trial_context(channel, applicant_id)
             await self.ensure_form_prompt(channel)

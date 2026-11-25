@@ -409,6 +409,95 @@ def is_case_only_nickname_change(current_name: str | None, proposed_name: str | 
     )
 
 
+def nickname_rsn_key(value):
+    return "|".join(
+        sanitize_rsn(part).casefold()
+        for part in re.split(r"[|/]", value or "")
+        if part.strip()
+    )
+
+
+async def notify_unresolved_nickname(cursor, guild, member, proposed):
+    """At most one DM attempt per outstanding verified nickname mismatch."""
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS nickname_resync_notices (
+            guild_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            proposed_key TEXT NOT NULL,
+            PRIMARY KEY (guild_id, discord_id)
+        )"""
+    )
+    key = nickname_rsn_key(proposed)
+    row = cursor.execute(
+        "SELECT proposed_key FROM nickname_resync_notices WHERE guild_id=? AND discord_id=?",
+        (guild.id, member.id),
+    ).fetchone()
+    if not key or (row and row[0] == key):
+        return
+    # Save the attempt even if DMs are disabled, to avoid daily retries.
+    cursor.execute(
+        """INSERT INTO nickname_resync_notices (guild_id, discord_id, proposed_key)
+           VALUES (?, ?, ?) ON CONFLICT(guild_id, discord_id)
+           DO UPDATE SET proposed_key=excluded.proposed_key""",
+        (guild.id, member.id, key),
+    )
+    channels = [c for c in guild.text_channels if c.name == "welcome-and-verify"]
+    channel = channels[0] if len(channels) == 1 else None
+    link = channel.jump_url if channel else None
+    if channel:
+        exists = cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='verification_panels'"
+        ).fetchone()
+        if exists:
+            panel = cursor.execute(
+                "SELECT channel_id, message_id FROM verification_panels WHERE guild_id=?",
+                (guild.id,),
+            ).fetchone()
+            if panel and panel[0] == channel.id:
+                try:
+                    message = await channel.fetch_message(panel[1])
+                    if any(
+                        getattr(component, "custom_id", None) == "novus:verify:rsn:v1"
+                        for action_row in message.components
+                        for component in action_row.children
+                    ):
+                        link = message.jump_url
+                except discord.HTTPException:
+                    pass
+    destination = f"[Verify Your RSN]({link})" if link else "the verification channel in Novus"
+    try:
+        await member.send(
+            "**RSN Update Detected**\n\n"
+            "Your Discord nickname no longer matches your verified Novus WOM account(s), "
+            "and Novus Sync could not update it automatically.\n\n"
+            f"**Current nickname:** {discord.utils.escape_markdown(member.display_name)}\n"
+            f"**Expected nickname:** {discord.utils.escape_markdown(proposed)}\n\n"
+            f"Please use {destination} or </rsn:1575000836361162773> in the Novus server. "
+            "List your primary account first. If verification cannot change your nickname, contact staff.\n\n"
+            "This does not reset your clan tenure or change your saved account links.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.Forbidden:
+        logger.info("RSN reminder DM unavailable for %s", member.id)
+    except discord.HTTPException:
+        logger.warning("RSN reminder DM failed for %s", member.id)
+
+
+def clear_nickname_resync_notice(cursor, guild_id, discord_id):
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS nickname_resync_notices (
+            guild_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL,
+            proposed_key TEXT NOT NULL,
+            PRIMARY KEY (guild_id, discord_id)
+        )"""
+    )
+    cursor.execute(
+        "DELETE FROM nickname_resync_notices WHERE guild_id=? AND discord_id=?",
+        (guild_id, discord_id),
+    )
+
+
 def ensure_staff_role_removal_candidates(cursor):
     cursor.execute(
         """
@@ -2600,6 +2689,7 @@ class TasksCog(commands.Cog):
                 missing_alts,
             )
             if member.nick == desired_nickname:
+                clear_nickname_resync_notice(cursor, guild.id, member.id)
                 nickname_change_confirmed(
                     cursor, guild.id, member.id, desired_nickname,
                     desired_nickname,
@@ -2624,6 +2714,7 @@ class TasksCog(commands.Cog):
                         ),
                     )
                     nickname_updated_from_wom = True
+                    clear_nickname_resync_notice(cursor, guild.id, member.id)
                     logger.info(
                         "Novus linked WOM nickname updated guild=%s discord=%s nick=%r",
                         guild.id, member.id, desired_nickname,
@@ -2645,6 +2736,18 @@ class TasksCog(commands.Cog):
                         "Could not update WOM nickname for %s (%s)",
                         member, member.id,
                     )
+            if (
+                nickname_update_failed
+                and not removal_needs_confirmation
+                and not missing_alts
+                and nickname_rsn_key(member.nick) != nickname_rsn_key(desired_nickname)
+                and wom_id is not None
+                and current_wom_id == wom_id
+            ):
+                try:
+                    await notify_unresolved_nickname(cursor, guild, member, desired_nickname)
+                except Exception:
+                    logger.exception("Could not process RSN reminder for %s", member.id)
         elif not tenure_only:
             # A missing primary WOM record makes every proposed rename
             # untrustworthy. Discard pending changes and start fresh when

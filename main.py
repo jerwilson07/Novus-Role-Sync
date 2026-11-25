@@ -1,6 +1,6 @@
 import aiohttp
 import discord
-from novus_logging import check, notice, bind_novus_ui
+from novus_logging import check, notice, bind_novus_ui, start_check_migration
 from discord.ext import commands
 import sqlite3
 import datetime
@@ -412,6 +412,7 @@ class WOMBot(
         logger.info(
             "Bot is online and ready!"
         )
+        start_check_migration(self)
 
         # One-time Novus announcements requested on 2026-11-08.
         # Persistent bot_stats flags prevent reposting on later restarts.

@@ -426,12 +426,12 @@ class CouncilAnalyticsCog(commands.Cog):
                 existing=await channel.fetch_message(saved[0][0])
             except discord.NotFound:
                 return
-            if existing.author.id!=self.bot.user.id or not existing.embeds or any(a.filename=="novus-membership.png" for a in existing.attachments):
+            if existing.author.id!=self.bot.user.id or not existing.embeds or (any(a.filename=="novus-membership.png" for a in existing.attachments) and not existing.embeds[0].fields):
                 return
             cutoff=parse(saved[0][1]) or end
             embed,metrics,chart_data=await self.build(guild,start,cutoff,key,lifetime)
             images=await asyncio.to_thread(render_dashboards,chart_data)
-            embed,chart_embeds,files=dashboard_message(embed,images)
+            embed,chart_embeds,files=dashboard_message(embed,images,chart_data)
             if self.council_channel(guild)!=channel:
                 return
             await existing.edit(embeds=[embed]+chart_embeds,attachments=files,allowed_mentions=discord.AllowedMentions.none())
@@ -450,7 +450,7 @@ class CouncilAnalyticsCog(commands.Cog):
                 return
         embed,metrics,chart_data=await self.build(guild,start,end,key,lifetime)
         images=await asyncio.to_thread(render_dashboards,chart_data)
-        embed,chart_embeds,files=dashboard_message(embed,images)
+        embed,chart_embeds,files=dashboard_message(embed,images,chart_data)
         if self.council_channel(guild)!=channel:
             raise RuntimeError("Council channel privacy changed")
         message=await channel.send(embeds=[embed]+chart_embeds,files=files,allowed_mentions=discord.AllowedMentions.none())
@@ -570,13 +570,25 @@ def render_dashboards(d):
     two=save(f,"WOM gains describe current linked accounts and may predate joining. Missing metrics are not treated as zero.")
     return [one,two]
 
-def dashboard_message(embed,images):
-    # Keep the nine sections represented in charts, and retain concise
-    # supplemental details for metrics not suitable for charts.
-    selected={"Member Retention","Recruitment","Raid Trial Analytics","Member Achievements","Data Coverage"}
-    for index in reversed(range(len(embed.fields))):
-        if embed.fields[index].name not in selected:
-            embed.remove_field(index)
+def dashboard_message(embed,images,d):
+    # A short header, charts immediately below, then only supplemental notes.
+    notes=discord.Embed(title="Key context",color=discord.Color.dark_embed())
+    retention=next((f.value for f in embed.fields if f.name=="Member Retention"),"")
+    horizons=[line for line in retention.splitlines() if "-day roster retention:" in line]
+    if horizons:
+        notes.add_field(name="Retention",value="\n".join(horizons),inline=False)
+    paths=" • ".join(f"{PATHWAYS[p]}: {n}" for p,n in d["paths"].items() if p in PATHWAYS and n)
+    notes.add_field(name="Recruitment & trials",value=(
+        f'Application cohort approved: {pct(d["converted"],d["opened"])}\n'
+        +(paths+"\n" if paths else "")
+        +f'Vouches recorded: {d["vouches"]} • Median confirmed trial: '
+        +(f'{d["duration"]:.1f} days' if d["duration"] is not None else "Not measurable")
+        +f'\nHistorical unclassified applications: {d["unknown_apps"]}'
+    ),inline=False)
+    notes.add_field(name="Achievements",value=f'Observed PvM Diary awards: {d["diary"]} • Approved PBs: not integrated',inline=False)
+    notes.description="Historical gaps are not zero activity. Current linked-account WOM gains may predate joining; departed accounts are not reconstructed. Retention and event tracking are prospective."
+    embed.clear_fields()
+    embed.description=f'**{d["period"]}**\n**{d["full"]}** full members • **{d["trial"]}** trial members • **{d["wom"]}** WOM accounts\n'+("Lifetime baseline" if d["lifetime"] else "Previous calendar month")+" • Council only"
     names=["novus-membership.png","novus-pvm.png"]
     charts=[]
     files=[]
@@ -585,7 +597,7 @@ def dashboard_message(embed,images):
         card.set_image(url="attachment://"+name)
         charts.append(card)
         files.append(discord.File(image,filename=name))
-    return embed,charts,files
+    return embed,charts+[notes],files
 
 async def setup(bot):
     init()

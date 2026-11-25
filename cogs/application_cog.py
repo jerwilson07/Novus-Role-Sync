@@ -80,7 +80,7 @@ def report_embed(rsn, payload, test=False, note=None):
         result = f"✅ **KC requirement met** ({pathway})"
         color = discord.Color.green()
     elif incomplete or (total >= 100 and special_unknown):
-        result = "⚠️ **KC assessment incomplete**"
+        result = "**KC assessment incomplete**"
         color = discord.Color.gold()
     else:
         result = "❌ **KC thresholds not met**\nRaids Prep Program may be an option."
@@ -107,7 +107,7 @@ def report_embed(rsn, payload, test=False, note=None):
     )
     embed.add_field(
         name="Application Status",
-        value=f"{result}\n🕒 Gear verification pending\n🕒 Staff approval pending",
+        value=f"{result}\nGear verification pending\nStaff approval pending",
         inline=False,
     )
     embed.add_field(

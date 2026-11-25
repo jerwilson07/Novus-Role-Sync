@@ -62,7 +62,8 @@ class VerifyView(discord.ui.View):
         self.cog = cog
 
     @discord.ui.button(
-        label="Verify Your RSN",
+        label="Click Here to Verify Your RSN",
+        emoji="✅",
         style=discord.ButtonStyle.success,
         custom_id="novus:verify:rsn:v1",
     )
@@ -73,12 +74,7 @@ class VerifyView(discord.ui.View):
         await interaction.response.send_modal(VerifyModal(self.cog))
 
 
-PANEL_TEXT = (
-    "## Verify Your RSN\n"
-    "Click below and enter your exact OSRS username(s). "
-    "Only list clan accounts, with your primary account first.\n"
-    "-# Alternatively, use </rsn:1575000836361162773>."
-)
+PANEL_TEXT = None
 
 
 class VerifyCog(commands.Cog):
@@ -87,6 +83,9 @@ class VerifyCog(commands.Cog):
         self.locks = {}
         self.panel_lock = asyncio.Lock()
         self.panel_checked = False
+        self.panel_message_id = None
+        self.panel_channel_id = None
+        self.restore_task = None
 
     def lock(self, member):
         return self.locks.setdefault(member.id, asyncio.Lock())
@@ -146,9 +145,35 @@ class VerifyCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
+        await self.ensure_panel()
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload):
+        if payload.guild_id == NOVUS_GUILD_ID and payload.message_id == self.panel_message_id:
+            self.schedule_restore()
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, payload):
+        if payload.guild_id == NOVUS_GUILD_ID and self.panel_message_id in payload.message_ids:
+            self.schedule_restore()
+
+    def schedule_restore(self):
+        if self.restore_task is None or self.restore_task.done():
+            self.restore_task = asyncio.create_task(self.restore_panel())
+
+    async def restore_panel(self):
+        # Allow MEE6 to finish republishing its welcome messages.
+        await asyncio.sleep(20)
+        await self.ensure_panel(force=True)
+
+    def cog_unload(self):
+        if self.restore_task is not None:
+            self.restore_task.cancel()
+
+    async def ensure_panel(self, force=False):
         # Reuse the same panel across restarts; never delete existing welcome embeds.
         async with self.panel_lock:
-            if self.panel_checked:
+            if self.panel_checked and not force:
                 return
             guild = self.bot.get_guild(NOVUS_GUILD_ID)
             if guild is None:
@@ -187,7 +212,7 @@ class VerifyCog(commands.Cog):
                             message = candidate
                             break
                 if message is None:
-                    message = await channel.send(PANEL_TEXT, view=VerifyView(self))
+                    message = await channel.send(view=VerifyView(self))
                 elif message.author.id != self.bot.user.id:
                     raise RuntimeError("Saved verification panel is not owned by Novus Sync")
                 else:
@@ -197,6 +222,8 @@ class VerifyCog(commands.Cog):
                     (guild.id, channel.id, message.id),
                 )
                 conn.commit()
+                self.panel_message_id = message.id
+                self.panel_channel_id = channel.id
                 self.panel_checked = True
                 logger.info("Novus verification panel ready: %s/%s", channel.id, message.id)
             except Exception:

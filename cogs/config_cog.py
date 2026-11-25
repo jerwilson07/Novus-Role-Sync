@@ -54,7 +54,7 @@ NOVUS_TENURE_ROLES = {
 
 def has_novus_command_permission(member: discord.Member) -> bool:
     return any(
-        (role.id in NOVUS_COMMAND_ROLE_IDS or role.name.strip().casefold() == "founder")
+        (role.id in NOVUS_COMMAND_ROLE_IDS or role.id == 1532829195657285843)
         for role in member.roles
     )
 

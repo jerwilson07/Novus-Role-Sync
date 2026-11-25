@@ -332,12 +332,7 @@ class VerifyCog(commands.Cog):
         if guild is None or guild.id != NOVUS_GUILD_ID:
             await interaction.response.send_message("This command is only available in Novus.", ephemeral=True)
             return
-        try:
-            founder = unique_role(guild, "Founder")
-            staff_ids = set(NOVUS_COMMAND_ROLE_IDS) | {founder.id}
-        except ValueError:
-            staff_ids = set(NOVUS_COMMAND_ROLE_IDS)
-            logger.warning("Founder role missing or ambiguous")
+        staff_ids = set(NOVUS_COMMAND_ROLE_IDS) | {1532829195657285843}
         if not any(r.id in staff_ids for r in interaction.user.roles):
             await interaction.response.send_message("Only Founder, Council, Moderators and Trial Moderators can approve members.", ephemeral=True)
             return

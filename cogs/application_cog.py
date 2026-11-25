@@ -11,7 +11,7 @@ from contextlib import closing
 from urllib.parse import quote
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from common import WOM_API_KEY, sanitize_rsn
 
@@ -55,6 +55,7 @@ def initialize():
         conn.execute("CREATE TABLE IF NOT EXISTS application_message_tests (test_key TEXT PRIMARY KEY, message_id INTEGER NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS application_form_submissions (channel_id INTEGER NOT NULL, report_id INTEGER NOT NULL, applicant_id INTEGER NOT NULL, response_id INTEGER NOT NULL, submitted_at TEXT NOT NULL, PRIMARY KEY(channel_id, report_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS application_form_prompts (channel_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS application_welcome_delivery (channel_id INTEGER NOT NULL, report_id INTEGER NOT NULL, welcome_id INTEGER, PRIMARY KEY(channel_id, report_id))")
 
 def form_submission(channel_id, report_id):
     with closing(db()) as conn:
@@ -115,6 +116,20 @@ def final_approval(channel_id, message_id):
 def save_final_approval(channel_id, message_id, reviewer_id, pathway):
     with closing(db()) as conn, conn:
         conn.execute("INSERT INTO application_final_approvals VALUES (?, ?, ?, ?, ?)", (channel_id, message_id, reviewer_id, pathway, datetime.datetime.now(datetime.timezone.utc).isoformat()))
+        conn.execute("INSERT OR IGNORE INTO application_welcome_delivery VALUES (?, ?, NULL)", (channel_id, message_id))
+
+def pending_deliveries():
+    with closing(db()) as conn:
+        return conn.execute("SELECT channel_id, report_id FROM application_welcome_delivery WHERE welcome_id IS NULL").fetchall()
+
+def delivered_welcome(channel_id, report_id):
+    with closing(db()) as conn:
+        row = conn.execute("SELECT welcome_id FROM application_welcome_delivery WHERE channel_id=? AND report_id=?", (channel_id, report_id)).fetchone()
+    return row[0] if row else None
+
+def mark_welcome_delivered(channel_id, report_id, message_id):
+    with closing(db()) as conn, conn:
+        conn.execute("UPDATE application_welcome_delivery SET welcome_id=? WHERE channel_id=? AND report_id=?", (message_id, channel_id, report_id))
 
 WELCOME_TEXT = """## Welcome to Novus!
 
@@ -371,6 +386,10 @@ class ApplicationCog(commands.Cog):
         self.locks = {}
         self.cooldowns = {}
         self.test_checked = False
+        self.recovery_loop.start()
+
+    def cog_unload(self):
+        self.recovery_loop.cancel()
 
     async def fetch_stats(self, rsn, update=False):
         url = "https://api.wiseoldman.net/v2/players/" + quote(rsn, safe="")
@@ -410,14 +429,30 @@ class ApplicationCog(commands.Cog):
         except Exception:
             logger.exception("Application KC verification lookup failed")
 
-    def resolve_applicant(self, channel):
+    async def resolve_applicant(self, channel):
         candidates = []
         for target, overwrite in channel.overwrites.items():
-            if isinstance(target, discord.Member) and not target.bot and overwrite.view_channel is True:
-                candidates.append(target)
+            if overwrite.view_channel is not True:
+                continue
+            if isinstance(target, discord.Member):
+                member = target
+            elif isinstance(target, discord.Object) and getattr(target, "type", None) is discord.Member:
+                try:
+                    member = await channel.guild.fetch_member(target.id)
+                except discord.HTTPException:
+                    # Do not silently discard an unresolved member overwrite.
+                    return None, None
+            else:
+                continue
+            if not member.bot:
+                candidates.append(member)
         if len(candidates) != 1:
             return None, None
         member = candidates[0]
+        try:
+            member = await channel.guild.fetch_member(member.id)
+        except discord.HTTPException:
+            return None, None
         if not any(r.name.strip().casefold() == "verified" for r in member.roles):
             return None, None
         with closing(db()) as conn:
@@ -516,18 +551,25 @@ class ApplicationCog(commands.Cog):
         async with lock:
             if get_report(channel.id):
                 return
-            # Avoid duplication if a send succeeded immediately before a restart.
-            async for msg in channel.history(limit=30):
-                if msg.author.id == self.bot.user.id and any(e.title == REPORT_TITLE for e in msg.embeds):
-                    logger.warning("Application report already present without saved mapping: %s", channel.id)
-                    return
             test = channel.id == TEST_CHANNEL
             if test:
                 applicant_id, rsn = None, "Vecs"
             else:
-                applicant_id, rsn = self.resolve_applicant(channel)
+                applicant_id, rsn = await self.resolve_applicant(channel)
             if not rsn:
                 logger.warning("Application applicant not unambiguous in channel %s; skipping report", channel.id)
+                return
+            # Recover a bot-owned report if posting succeeded before the database write.
+            async for msg in channel.history(limit=100):
+                if msg.author.id != self.bot.user.id or not msg.embeds or msg.embeds[0].title != REPORT_TITLE:
+                    continue
+                description = msg.embeds[0].description or ""
+                expected = "**Applicant:** " + discord.utils.escape_markdown(rsn)
+                if description.split("\n", 1)[0].casefold() != expected.casefold():
+                    logger.warning("Unmapped application report has mismatched RSN in %s; manual review needed", channel.id)
+                    return
+                save_report(channel.id, applicant_id, rsn, msg.id)
+                logger.info("Recovered application report channel=%s message=%s", channel.id, msg.id)
                 return
             payload, note = await self.get_payload(rsn, applicant_id, update=True)
             await self.ensure_form_prompt(channel)
@@ -626,6 +668,18 @@ class ApplicationCog(commands.Cog):
             logger.exception("New application report failed for %s", channel.id)
 
     @commands.Cog.listener()
+    async def on_guild_channel_update(self, before, after):
+        if not isinstance(after, discord.TextChannel) or after.guild.id != GUILD or after.category_id != CATEGORY or get_report(after.id):
+            return
+        if before.category_id == after.category_id and before.overwrites == after.overwrites:
+            return
+        await asyncio.sleep(3)
+        try:
+            await self.publish(await self.bot.fetch_channel(after.id))
+        except Exception:
+            logger.exception("Application channel update retry failed channel=%s", after.id)
+
+    @commands.Cog.listener()
     async def on_message(self, message):
         channel = message.channel
         if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY:
@@ -695,6 +749,13 @@ class ApplicationCog(commands.Cog):
                 if report.author.id != self.bot.user.id or not any(e.title == REPORT_TITLE for e in report.embeds):
                     await interaction.followup.send("The application report is no longer available.", ephemeral=True)
                     return
+                # Recover a submission whose Discord send succeeded before the database commit.
+                async for candidate in channel.history(limit=100, after=report):
+                    if candidate.author.id == self.bot.user.id and candidate.reference and candidate.reference.message_id == report_id and candidate.embeds and candidate.embeds[0].title == "Application Details" and candidate.attachments:
+                        save_form_submission(channel.id, report_id, interaction.user.id, candidate.id)
+                        await self.update_form_prompt(channel, APPLICATION_SUBMITTED)
+                        await interaction.followup.send("Your existing application was recovered. Staff can review it now.", ephemeral=True)
+                        return
                 row = get_report(channel.id)
                 rsn = row[1]
                 escape = discord.utils.escape_markdown
@@ -707,8 +768,8 @@ class ApplicationCog(commands.Cog):
                     suffix = attachment.filename.rsplit(".", 1)[-1].lower()
                     if not re.fullmatch(r"[a-z0-9]{1,5}", suffix):
                         suffix = "img"
-                    files.append(await attachment.to_file(filename=f"gear-{i}.{suffix}"))
-                submitted = await channel.send(embed=response, files=files, allowed_mentions=discord.AllowedMentions.none())
+                    files.append(await asyncio.wait_for(attachment.to_file(filename=f"gear-{i}.{suffix}"), timeout=30))
+                submitted = await channel.send(embed=response, files=files, reference=report.to_reference(fail_if_not_exists=False), mention_author=False, allowed_mentions=discord.AllowedMentions.none())
                 save_form_submission(channel.id, report_id, interaction.user.id, submitted.id)
                 try:
                     prompt_id = get_form_prompt(channel.id)
@@ -721,7 +782,7 @@ class ApplicationCog(commands.Cog):
                 await interaction.followup.send("Application submitted. Staff will review your details and gear.", ephemeral=True)
             except Exception:
                 logger.exception("Application form submission failed channel=%s", channel.id)
-                await interaction.followup.send("Could not submit your application. Check the ticket before trying again or post your details and gear manually.", ephemeral=True)
+                await interaction.followup.send("Could not complete submission. Check the ticket before retrying; if screenshots already appear, ask staff to review them. You can also post details and gear manually.", ephemeral=True)
             finally:
                 for file in files:
                     file.close()
@@ -787,7 +848,7 @@ class ApplicationCog(commands.Cog):
                 logged = True
                 if not test:
                     member = await channel.guild.fetch_member(applicant_id)
-                    current_id, current_rsn = self.resolve_applicant(channel)
+                    current_id, current_rsn = await self.resolve_applicant(await self.bot.fetch_channel(channel.id))
                     if current_id != applicant_id or not current_rsn or sanitize_rsn(current_rsn).casefold() != sanitize_rsn(rsn).casefold():
                         await interaction.followup.send("Applicant or RSN no longer matches this report. Use manual staff review.", ephemeral=True)
                         return
@@ -797,29 +858,12 @@ class ApplicationCog(commands.Cog):
                         return
                     member, already, logged = await verify.approve_member(channel.guild, interaction.user, member)
                 save_final_approval(channel.id, message_id, interaction.user.id, pathway)
-                reviewer = gear_reviewer(channel.id, message_id)
-                kc_result = embed.fields[status_index].value.partition("\n")[0]
-                embed.set_field_at(status_index, name="Application Status", value=f"{kc_result}\n{gear_status(reviewer)}\n✅ **{'Test approval' if test else 'Staff approval'} complete** (by <@{interaction.user.id}>)\n**Pathway:** {PATHWAYS[pathway]}", inline=False)
-                if next_index is not None:
-                    embed.remove_field(next_index)
-                if not test:
-                    embed.color = discord.Color.green()
                 try:
-                    await message.edit(content=None, embed=embed, view=ApplicationView(self, rsn, verified=True, approved=True), allowed_mentions=discord.AllowedMentions.none())
-                except discord.HTTPException:
-                    logger.exception("Approval saved but report edit failed")
-                try:
-                    if get_form_prompt(channel.id):
-                        await self.update_form_prompt(channel, "**Application complete.**")
-                except discord.HTTPException:
-                    logger.exception("Approval saved but application prompt update failed")
-                try:
-                    prefix = "**Staff test - welcome preview (no roles changed)**\n" if test else f"{member.mention}\n"
-                    await channel.send(prefix + welcome_text(channel.guild), allowed_mentions=discord.AllowedMentions(users=[member] if member else False, roles=False, everyone=False))
+                    await self.finish_approved_application(channel, message_id)
                     welcome_status = "Welcome message posted."
-                except discord.HTTPException:
-                    logger.exception("Approval saved but welcome message failed")
-                    welcome_status = "Welcome message could not be posted; staff may run !welcome manually."
+                except Exception:
+                    logger.exception("Approval saved but final delivery pending channel=%s", channel.id)
+                    welcome_status = "Approval saved. Welcome/report delivery will retry automatically; do not reapprove."
                 logger.info("Application final approval channel=%s applicant=%s actor=%s pathway=%s test=%s", channel.id, applicant_id, interaction.user.id, pathway, test)
                 await interaction.followup.send(("Test approval complete; no roles changed. " if test else "Applicant approved. ") + welcome_status + ("" if logged else " Staff approval log could not be sent."), ephemeral=True)
             except ValueError as exc:
@@ -827,6 +871,79 @@ class ApplicationCog(commands.Cog):
             except Exception:
                 logger.exception("Application approval failed for channel %s", channel.id)
                 await interaction.followup.send("Approval could not finish. Check the applicant's roles and report before retrying.", ephemeral=True)
+
+    async def finish_approved_application(self, channel, report_id):
+        row = get_report(channel.id)
+        approval = final_approval(channel.id, report_id)
+        if not row or row[2] != report_id or not approval:
+            raise RuntimeError("Approval record mismatch")
+        if delivered_welcome(channel.id, report_id):
+            return
+        applicant_id, rsn, _ = row
+        reviewer_id, pathway = approval
+        test = channel.id == TEST_CHANNEL
+        report = await channel.fetch_message(report_id)
+        if report.author.id != self.bot.user.id or not report.embeds or report.embeds[0].title != REPORT_TITLE:
+            raise RuntimeError("Approved report ownership mismatch")
+        embed = report.embeds[0].copy()
+        index = next((i for i, field in enumerate(embed.fields) if field.name == "Application Status"), None)
+        if index is None:
+            raise RuntimeError("Approved report status missing")
+        kc_result = embed.fields[index].value.partition("\n")[0]
+        embed.set_field_at(index, name="Application Status", value=f"{kc_result}\n{gear_status(gear_reviewer(channel.id, report_id))}\n✅ **{'Test approval' if test else 'Staff approval'} complete** (by <@{reviewer_id}>)\n**Pathway:** {PATHWAYS[pathway]}", inline=False)
+        if not test:
+            embed.color = discord.Color.green()
+        await report.edit(content=None, embed=embed, view=ApplicationView(self, rsn, verified=True, approved=True), allowed_mentions=discord.AllowedMentions.none())
+        if get_form_prompt(channel.id):
+            await self.update_form_prompt(channel, "**Application complete.**")
+        # Reply reference identifies the welcome even if a restart interrupted the database write.
+        async for candidate in channel.history(limit=150, after=report):
+            if candidate.author.id == self.bot.user.id and candidate.reference and candidate.reference.message_id == report_id and "## Welcome to Novus!" in candidate.content:
+                mark_welcome_delivered(channel.id, report_id, candidate.id)
+                return
+        prefix = "**Staff test - welcome preview (no roles changed)**\n" if test else f"<@{applicant_id}>\n"
+        welcome = await channel.send(prefix + welcome_text(channel.guild), reference=report.to_reference(fail_if_not_exists=False), mention_author=False, allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=applicant_id)] if applicant_id and not test else False, roles=False, everyone=False))
+        mark_welcome_delivered(channel.id, report_id, welcome.id)
+        logger.info("Application welcome delivered channel=%s report=%s welcome=%s", channel.id, report_id, welcome.id)
+
+    @tasks.loop(minutes=5)
+    async def recovery_loop(self):
+        for channel_id, report_id in pending_deliveries():
+            try:
+                channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+                if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY:
+                    continue
+                async with self.locks.setdefault(channel.id, asyncio.Lock()):
+                    await self.finish_approved_application(channel, report_id)
+            except discord.NotFound:
+                # Closed/deleted tickets need no delivery.
+                with closing(db()) as conn, conn:
+                    conn.execute("DELETE FROM application_welcome_delivery WHERE channel_id=? AND report_id=? AND welcome_id IS NULL", (channel_id, report_id))
+            except Exception:
+                logger.exception("Application delivery retry failed channel=%s", channel_id)
+        # Catch recently created tickets missed during reconnects or delayed permission updates.
+        guild = self.bot.get_guild(GUILD)
+        if not guild:
+            return
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
+        for channel in guild.text_channels:
+            if channel.id == TEST_CHANNEL or channel.category_id != CATEGORY or channel.created_at < cutoff or get_report(channel.id):
+                continue
+            try:
+                # Limit recovery to tickets with a genuine bot-generated opening embed.
+                found = False
+                async for message in channel.history(limit=20, oldest_first=True):
+                    if message.author.id != self.bot.user.id and (message.author.bot or message.webhook_id) and any("application created" in ((e.title or "") + "\n" + (e.description or "")).casefold() for e in message.embeds):
+                        found = True
+                        break
+                if found:
+                    await self.publish(await self.bot.fetch_channel(channel.id))
+            except Exception:
+                logger.exception("Application ticket recovery failed channel=%s", channel.id)
+
+    @recovery_loop.before_loop
+    async def before_recovery(self):
+        await self.bot.wait_until_ready()
 
     async def review_gear(self, interaction, verified):
         channel = interaction.channel

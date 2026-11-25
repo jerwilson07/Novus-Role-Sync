@@ -14,7 +14,7 @@ import discord
 from discord.ext import commands, tasks
 
 from common import WOM_API_KEY, sanitize_rsn
-from cogs.vouches_cog import get_vouches, formatted_vouches, REQUIRED_VOUCHES, is_trial
+from cogs.vouches_cog import get_vouches, add_vouch_feedback, REQUIRED_VOUCHES, is_trial
 
 logger = logging.getLogger("WOMBot")
 GUILD = 1532817291048124466
@@ -549,7 +549,7 @@ class ApplicationCog(commands.Cog):
             rows, legacy = trial_vouch_records(member.id)
             embed = discord.Embed(title="Novus Trial Vouches", description=f"**Trial Member:** {member.mention}", color=discord.Color.green() if len(rows)>=REQUIRED_VOUCHES else discord.Color.blurple())
             embed.add_field(name="Vouch Progress", value=f"**{len(rows)}/{REQUIRED_VOUCHES}** unique vouches", inline=False)
-            embed.add_field(name="Member Feedback", value=formatted_vouches(rows, limit=10)[:1024], inline=False)
+            add_vouch_feedback(embed, rows)
             embed.set_footer(text="Novus Membership • Private staff review")
             embed.set_thumbnail(url=(channel.guild.icon or self.bot.user.display_avatar).url)
             if legacy:

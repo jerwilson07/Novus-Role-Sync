@@ -1,4 +1,4 @@
-"""Read-only Novus applicant KC screening, separate from approval and tenure."""
+"""Novus applicant KC screening and staff gear review, separate from approval and tenure."""
 import asyncio
 import datetime
 from zoneinfo import ZoneInfo
@@ -42,6 +42,7 @@ def initialize():
     with closing(db()) as conn, conn:
         conn.execute("CREATE TABLE IF NOT EXISTS application_kc_cache (guild_id INTEGER, discord_id INTEGER, rsn TEXT, payload TEXT, PRIMARY KEY(guild_id, discord_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS application_kc_reports (channel_id INTEGER PRIMARY KEY, applicant_id INTEGER, rsn TEXT NOT NULL, message_id INTEGER NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS application_gear_reviews (channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reviewer_id INTEGER NOT NULL, verified_at TEXT NOT NULL, PRIMARY KEY(channel_id, message_id))")
 
 def get_report(channel_id):
     with closing(db()) as conn:
@@ -50,6 +51,24 @@ def get_report(channel_id):
 def save_report(channel_id, applicant_id, rsn, message_id):
     with closing(db()) as conn, conn:
         conn.execute("INSERT OR REPLACE INTO application_kc_reports VALUES (?, ?, ?, ?)", (channel_id, applicant_id, rsn, message_id))
+
+def gear_reviewer(channel_id, message_id):
+    with closing(db()) as conn:
+        row = conn.execute("SELECT reviewer_id FROM application_gear_reviews WHERE channel_id=? AND message_id=?", (channel_id, message_id)).fetchone()
+    return row[0] if row else None
+
+def set_gear_review(channel_id, message_id, reviewer_id):
+    with closing(db()) as conn, conn:
+        if reviewer_id is None:
+            conn.execute("DELETE FROM application_gear_reviews WHERE channel_id=? AND message_id=?", (channel_id, message_id))
+        else:
+            conn.execute("INSERT OR REPLACE INTO application_gear_reviews VALUES (?, ?, ?, ?)", (channel_id, message_id, reviewer_id, datetime.datetime.now(datetime.timezone.utc).isoformat()))
+
+def gear_status(reviewer_id):
+    return f"✅ **Gear requirement met** (verified by <@{reviewer_id}>)" if reviewer_id else "Gear verification pending"
+
+def gear_next_step(reviewer_id):
+    return "Await staff review and final approval." if reviewer_id else "Upload a screenshot of your required gear for staff review."
 
 def is_staff(member):
     return any(role.id in STAFF for role in getattr(member, "roles", ()))
@@ -70,7 +89,7 @@ def extract(data):
         values[key] = kc if type(kc) is int and kc >= 0 else None
     return {"values": values, "snapshot": snapshot.get("createdAt"), "name": data.get("displayName") or data.get("username")}
 
-def report_embed(rsn, payload, test=False, note=None):
+def report_embed(rsn, payload, test=False, note=None, reviewer_id=None):
     payload = payload or {}
     values = payload.get("values", {})
     total = sum(values.get(key) or 0 for _, key in RAIDS)
@@ -115,7 +134,7 @@ def report_embed(rsn, payload, test=False, note=None):
     embed.add_field(name="\u200b", value=solo_rows + "\n\u200b", inline=False)
     embed.add_field(
         name="Application Status",
-        value=f"{result}\nGear verification pending\nStaff approval pending\n\u200b",
+        value=f"{result}\n{gear_status(reviewer_id)}\nStaff approval pending\n\u200b",
         inline=False,
     )
     if not qualified:
@@ -127,7 +146,7 @@ def report_embed(rsn, payload, test=False, note=None):
         embed.add_field(name="Raid Trial Reference", value=trial_rows, inline=False)
     embed.add_field(
         name="Next Step",
-        value="Upload a screenshot of your required gear for staff review.",
+        value=gear_next_step(reviewer_id),
         inline=False,
     )
     timestamp = payload.get("snapshot")
@@ -150,15 +169,24 @@ def report_embed(rsn, payload, test=False, note=None):
     return embed
 
 class ApplicationView(discord.ui.View):
-    def __init__(self, cog, rsn=None):
+    def __init__(self, cog, rsn=None, verified=False):
         super().__init__(timeout=None)
         self.cog = cog
+        self.remove_item(self.verify_gear if verified else self.undo_gear)
         if rsn:
             self.add_item(discord.ui.Button(label="View WOM Profile", url="https://wiseoldman.net/players/" + quote(rsn, safe="")))
 
     @discord.ui.button(label="Refresh Stats", style=discord.ButtonStyle.primary, custom_id="novus:application:refresh:v1")
     async def refresh(self, interaction, button):
         await self.cog.refresh(interaction)
+
+    @discord.ui.button(label="Verify Gear", style=discord.ButtonStyle.success, custom_id="novus:application:gear:verify:v1", row=0)
+    async def verify_gear(self, interaction, button):
+        await self.cog.review_gear(interaction, True)
+
+    @discord.ui.button(label="Undo Gear Verification", style=discord.ButtonStyle.secondary, custom_id="novus:application:gear:undo:v1", row=0)
+    async def undo_gear(self, interaction, button):
+        await self.cog.review_gear(interaction, False)
 
 class ApplicationCog(commands.Cog):
     def __init__(self, bot):
@@ -284,7 +312,8 @@ class ApplicationCog(commands.Cog):
                     if message.author.id == self.bot.user.id and any(e.title == REPORT_TITLE for e in message.embeds):
                         payload, note = await self.get_payload(rsn, applicant_id, update=False)
                         if payload:
-                            await message.edit(embed=report_embed(rsn, payload, True, note), view=ApplicationView(self, rsn))
+                            reviewer = gear_reviewer(channel.id, message.id)
+                            await message.edit(embed=report_embed(rsn, payload, True, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer)), allowed_mentions=discord.AllowedMentions.none())
                             logger.info("Restyled existing application test report channel=%s message=%s", channel.id, message.id)
                 else:
                     await self.publish(channel)
@@ -317,6 +346,57 @@ class ApplicationCog(commands.Cog):
         except Exception:
             logger.exception("Application opening-message report failed")
 
+    async def review_gear(self, interaction, verified):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY:
+            await interaction.response.send_message("This action is only available in application tickets.", ephemeral=True)
+            return
+        if not is_staff(interaction.user):
+            await interaction.response.send_message("Only staff may verify gear.", ephemeral=True)
+            return
+        row = get_report(channel.id)
+        if not row or not interaction.message or interaction.message.id != row[2]:
+            await interaction.response.send_message("This report is no longer active.", ephemeral=True)
+            return
+        applicant_id, rsn, message_id = row
+        if applicant_id == interaction.user.id and channel.id != TEST_CHANNEL:
+            await interaction.response.send_message("Another staff member must verify your gear.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        lock = self.locks.setdefault(channel.id, asyncio.Lock())
+        async with lock:
+            try:
+                message = await channel.fetch_message(message_id)
+                if message.author.id != self.bot.user.id or not message.embeds or message.embeds[0].title != REPORT_TITLE:
+                    await interaction.followup.send("This report is no longer active.", ephemeral=True)
+                    return
+                embed = message.embeds[0].copy()
+                status_index = next((i for i, field in enumerate(embed.fields) if field.name == "Application Status"), None)
+                next_index = next((i for i, field in enumerate(embed.fields) if field.name == "Next Step"), None)
+                if status_index is None or next_index is None:
+                    await interaction.followup.send("Refresh the report before verifying gear.", ephemeral=True)
+                    return
+                previous = gear_reviewer(channel.id, message_id)
+                if bool(previous) == verified:
+                    await interaction.followup.send("Gear is already verified." if verified else "Gear verification is already pending.", ephemeral=True)
+                    return
+                reviewer = interaction.user.id if verified else None
+                status = embed.fields[status_index].value
+                result, _, _ = status.partition("\n")
+                embed.set_field_at(status_index, name="Application Status", value=f"{result}\n{gear_status(reviewer)}\nStaff approval pending\n\u200b", inline=False)
+                embed.set_field_at(next_index, name="Next Step", value=gear_next_step(reviewer), inline=False)
+                set_gear_review(channel.id, message_id, reviewer)
+                try:
+                    await message.edit(embed=embed, view=ApplicationView(self, rsn, verified=verified), allowed_mentions=discord.AllowedMentions.none())
+                except Exception:
+                    set_gear_review(channel.id, message_id, previous)
+                    raise
+                logger.info("Application gear review channel=%s staff=%s verified=%s", channel.id, interaction.user.id, verified)
+                await interaction.followup.send("Gear requirement marked as met." if verified else "Gear verification returned to pending.", ephemeral=True)
+            except Exception:
+                logger.exception("Application gear review failed for %s", channel.id)
+                await interaction.followup.send("Unable to update the gear review. Please try again.", ephemeral=True)
+
     async def refresh(self, interaction):
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY:
@@ -341,7 +421,8 @@ class ApplicationCog(commands.Cog):
             if not payload:
                 await interaction.followup.send(note or "WOM unavailable. Existing report retained.", ephemeral=True)
                 return
-            await interaction.message.edit(embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note), view=ApplicationView(self, rsn))
+            reviewer = gear_reviewer(channel.id, interaction.message.id)
+            await interaction.message.edit(embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer)), allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send("Eligibility report refreshed.", ephemeral=True)
 
 async def setup(bot):
@@ -349,3 +430,4 @@ async def setup(bot):
     cog = ApplicationCog(bot)
     await bot.add_cog(cog)
     bot.add_view(ApplicationView(cog))
+    bot.add_view(ApplicationView(cog, verified=True))

@@ -902,7 +902,10 @@ class WOMBot(
                     # Every Novus command is a standard slash command.
                     self.tree.remove_command(command.name)
 
-            await self.tree.sync()
+            synced_commands = await self.tree.sync()
+            for command in synced_commands:
+                if command.name in {"rsn", "approve"}:
+                    logger.info("Novus command mention: </%s:%s>", command.name, command.id)
 
             logger.info(
                 "Registered Novus operational commands: %s",

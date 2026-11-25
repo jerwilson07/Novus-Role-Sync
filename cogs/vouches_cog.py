@@ -222,12 +222,17 @@ class VouchesCog(commands.Cog):
             )
             return False
         try:
-            await channel.send(
-                f"**New Trial Vouch**\n"
-                f"{voucher.mention} vouched for {trial.mention} "
-                f"(**{total}/{REQUIRED_VOUCHES} vouches**).",
-                allowed_mentions=discord.AllowedMentions.none(),
+            embed = discord.Embed(
+                title="New Trial Vouch",
+                color=discord.Color.green() if total >= REQUIRED_VOUCHES else discord.Color.blurple(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
+            embed.add_field(name="Trial Member", value=trial.mention, inline=False)
+            embed.add_field(name="Vouched by", value=voucher.mention, inline=False)
+            embed.add_field(name="Vouch Progress", value=f"**{total}/{REQUIRED_VOUCHES}** unique vouches", inline=False)
+            embed.set_footer(text="Novus Membership • Raid Trial")
+            embed.set_thumbnail(url=(guild.icon or self.bot.user.display_avatar).url)
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
             logger.exception(
                 "Could not post new trial vouch for %s from %s.",
@@ -254,14 +259,14 @@ class VouchesCog(commands.Cog):
 
             embed = discord.Embed(
                 title="Trial Member Ready for Staff Review",
-                description=(
-                    f"{trial.mention} has received **{len(rows)} unique vouches** "
-                    "and has met the 3-vouch reference requirement.\n\n"
-                    "**Staff review is required before approving membership.**"
-                ),
+                description=f"**Trial Member:** {trial.mention}",
                 color=discord.Color.green(),
                 timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
+            embed.add_field(name="Vouch Progress", value=f"✅ **{len(rows)}/{REQUIRED_VOUCHES}** unique vouches", inline=False)
+            embed.add_field(name="Application Status", value="Vouch requirement met\nStaff approval pending", inline=False)
+            embed.set_footer(text="Novus Membership • Raid Trial")
+            embed.set_thumbnail(url=(guild.icon or self.bot.user.display_avatar).url)
             embed.add_field(
                 name="Member Feedback",
                 value=formatted_vouches(rows, limit=3)[:1024],
@@ -400,19 +405,22 @@ class VouchesCog(commands.Cog):
 
         rows = get_vouches(interaction.guild_id, member.id)
         embed = discord.Embed(
-            title=f"Trial Vouches • {member.display_name}",
-            description=formatted_vouches(rows, limit=10)[:3900],
+            title="Novus Trial Vouches",
+            description=f"**Trial Member:** {member.mention}",
             color=discord.Color.green() if len(rows) >= REQUIRED_VOUCHES
             else discord.Color.blurple(),
         )
         embed.add_field(
-            name="Progress",
+            name="Vouch Progress",
             value=f"**{len(rows)}/{REQUIRED_VOUCHES}** unique vouches",
             inline=False,
         )
+        embed.add_field(name="Member Feedback", value=formatted_vouches(rows, limit=10)[:1024], inline=False)
+        embed.set_footer(text="Novus Membership • Private staff review")
+        embed.set_thumbnail(url=(interaction.guild.icon or self.bot.user.display_avatar).url)
         if len(rows) >= REQUIRED_VOUCHES:
             embed.add_field(
-                name="Staff notification",
+                name="Staff Notification",
                 value="Sent" if has_been_notified(interaction.guild_id, member.id)
                 else "Pending — check the staff notification channel",
                 inline=False,

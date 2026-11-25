@@ -54,6 +54,7 @@ def initialize():
         conn.execute("CREATE TABLE IF NOT EXISTS application_final_approvals (channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reviewer_id INTEGER NOT NULL, pathway TEXT NOT NULL, approved_at TEXT NOT NULL, PRIMARY KEY(channel_id, message_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS application_message_tests (test_key TEXT PRIMARY KEY, message_id INTEGER NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS application_form_submissions (channel_id INTEGER NOT NULL, report_id INTEGER NOT NULL, applicant_id INTEGER NOT NULL, response_id INTEGER NOT NULL, submitted_at TEXT NOT NULL, PRIMARY KEY(channel_id, report_id))")
+        conn.execute("CREATE TABLE IF NOT EXISTS application_form_prompts (channel_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL)")
 
 def form_submission(channel_id, report_id):
     with closing(db()) as conn:
@@ -63,7 +64,18 @@ def save_form_submission(channel_id, report_id, applicant_id, response_id):
     with closing(db()) as conn, conn:
         conn.execute("INSERT INTO application_form_submissions VALUES (?, ?, ?, ?, ?)", (channel_id, report_id, applicant_id, response_id, datetime.datetime.now(datetime.timezone.utc).isoformat()))
 
+def get_form_prompt(channel_id):
+    with closing(db()) as conn:
+        row = conn.execute("SELECT message_id FROM application_form_prompts WHERE channel_id=?", (channel_id,)).fetchone()
+    return row[0] if row else None
+
+def save_form_prompt(channel_id, message_id):
+    with closing(db()) as conn, conn:
+        conn.execute("INSERT OR REPLACE INTO application_form_prompts VALUES (?, ?)", (channel_id, message_id))
+
 def form_content(channel_id, report_id):
+    if get_form_prompt(channel_id):
+        return None
     return APPLICATION_SUBMITTED if form_submission(channel_id, report_id) else APPLICATION_INTRO
 
 def get_report(channel_id):
@@ -290,12 +302,21 @@ class ApplicationModal(discord.ui.Modal, title="Novus Membership Application"):
             return
         await self.cog.submit_application(interaction, self.report_id, self.account_type.values[0], self.pathway.values[0], str(self.referral.value), self.gear.values, str(self.details.value or ""))
 
+class ApplicationPromptView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="Complete Application", style=discord.ButtonStyle.primary, custom_id="novus:application:prompt:v2")
+    async def complete_application(self, interaction, button):
+        await self.cog.open_application_form(interaction)
+
 class ApplicationView(discord.ui.View):
-    def __init__(self, cog, rsn=None, verified=False, approved=False, submitted=False):
+    def __init__(self, cog, rsn=None, verified=False, approved=False, submitted=False, separate_prompt=False):
         super().__init__(timeout=None)
         self.cog = cog
         self.remove_item(self.verify_gear if verified else self.undo_gear)
-        if submitted or approved:
+        if submitted or approved or separate_prompt:
             self.remove_item(self.complete_application)
         if not verified or approved:
             self.remove_item(self.final_approve)
@@ -422,6 +443,72 @@ class ApplicationCog(commands.Cog):
                 return json.loads(cached[1]), "WOM lookup failed; showing previously saved snapshot. Staff should refresh before approval."
         return None, note
 
+    async def ensure_form_prompt(self, channel, submitted=False):
+        prompt_id = get_form_prompt(channel.id)
+        if prompt_id:
+            try:
+                prompt = await channel.fetch_message(prompt_id)
+                if prompt.author.id == self.bot.user.id:
+                    return prompt
+                raise RuntimeError("Saved application prompt is not owned by Novus Sync")
+            except discord.NotFound:
+                pass
+        # Recover a standalone prompt if posting succeeded immediately before a restart.
+        async for candidate in channel.history(limit=30):
+            if candidate.author.id == self.bot.user.id and not candidate.embeds and candidate.content == APPLICATION_INTRO and any(
+                getattr(child, "custom_id", None) == "novus:application:prompt:v2"
+                for action_row in candidate.components for child in action_row.children
+            ):
+                save_form_prompt(channel.id, candidate.id)
+                return candidate
+        prompt = await channel.send(
+            APPLICATION_SUBMITTED if submitted else APPLICATION_INTRO,
+            view=None if submitted else ApplicationPromptView(self),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        save_form_prompt(channel.id, prompt.id)
+        return prompt
+
+    async def update_form_prompt(self, channel, content):
+        prompt_id = get_form_prompt(channel.id)
+        if prompt_id:
+            try:
+                prompt = await channel.fetch_message(prompt_id)
+            except discord.NotFound:
+                return
+            if prompt.author.id == self.bot.user.id:
+                await prompt.edit(content=content, view=None, allowed_mentions=discord.AllowedMentions.none())
+
+    async def separate_test_report(self, channel, row):
+        # Only migrate the explicitly designated test ticket; preserve its saved reviews.
+        if channel.id != TEST_CHANNEL or final_approval(channel.id, row[2]):
+            return
+        applicant_id, rsn, old_id = row
+        old = await channel.fetch_message(old_id)
+        if old.author.id != self.bot.user.id or not old.embeds or old.embeds[0].title != REPORT_TITLE:
+            return
+        prompt_id = get_form_prompt(channel.id)
+        if prompt_id and prompt_id < old_id and not old.content:
+            return
+        submitted = bool(form_submission(channel.id, old_id))
+        reviewer = gear_reviewer(channel.id, old_id)
+        prompt = await self.ensure_form_prompt(channel, submitted)
+        # The old report stays intact until the replacement and database migration succeed.
+        replacement = await channel.send(embed=old.embeds[0].copy(), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=submitted, separate_prompt=True), allowed_mentions=discord.AllowedMentions.none())
+        try:
+            with closing(db()) as conn, conn:
+                conn.execute("UPDATE application_kc_reports SET message_id=? WHERE channel_id=? AND message_id=?", (replacement.id, channel.id, old_id))
+                conn.execute("UPDATE application_gear_reviews SET message_id=? WHERE channel_id=? AND message_id=?", (replacement.id, channel.id, old_id))
+                conn.execute("UPDATE application_form_submissions SET report_id=? WHERE channel_id=? AND report_id=?", (replacement.id, channel.id, old_id))
+        except Exception:
+            await replacement.delete()
+            raise
+        try:
+            await old.delete()
+        except discord.HTTPException:
+            logger.warning("Replacement test report active; old report could not be removed")
+        logger.info("Application prompt separated in test ticket channel=%s prompt=%s report=%s", channel.id, prompt.id, replacement.id)
+
     async def publish(self, channel):
         if channel.guild.id != GUILD or channel.category_id != CATEGORY:
             return
@@ -443,7 +530,8 @@ class ApplicationCog(commands.Cog):
                 logger.warning("Application applicant not unambiguous in channel %s; skipping report", channel.id)
                 return
             payload, note = await self.get_payload(rsn, applicant_id, update=True)
-            message = await channel.send(content=APPLICATION_INTRO, embed=report_embed(rsn, payload, test, note), view=ApplicationView(self, rsn), allowed_mentions=discord.AllowedMentions.none())
+            await self.ensure_form_prompt(channel)
+            message = await channel.send(embed=report_embed(rsn, payload, test, note), view=ApplicationView(self, rsn, separate_prompt=True), allowed_mentions=discord.AllowedMentions.none())
             save_report(channel.id, applicant_id, rsn, message.id)
             logger.info("Application KC report published channel=%s message=%s rsn=%s total=%s", channel.id, message.id, rsn, sum((payload or {}).get("values", {}).get(k) or 0 for _,k in RAIDS))
 
@@ -463,17 +551,20 @@ class ApplicationCog(commands.Cog):
             if isinstance(channel, discord.TextChannel) and channel.guild.id == GUILD and channel.category_id == CATEGORY:
                 row = get_report(channel.id)
                 if row:
+                    await self.separate_test_report(channel, row)
+                    row = get_report(channel.id)
                     applicant_id, rsn, message_id = row
                     message = await channel.fetch_message(message_id)
                     if message.author.id == self.bot.user.id and any(e.title == REPORT_TITLE for e in message.embeds) and not final_approval(channel.id, message.id):
                         payload, note = await self.get_payload(rsn, applicant_id, update=False)
                         if payload:
                             reviewer = gear_reviewer(channel.id, message.id)
-                            await message.edit(content=form_content(channel.id, message.id), embed=report_embed(rsn, payload, True, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, message.id))), allowed_mentions=discord.AllowedMentions.none())
+                            await message.edit(content=form_content(channel.id, message.id), embed=report_embed(rsn, payload, True, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, message.id)), separate_prompt=bool(get_form_prompt(channel.id))), allowed_mentions=discord.AllowedMentions.none())
                             logger.info("Restyled existing application test report channel=%s message=%s", channel.id, message.id)
                 else:
                     await self.publish(channel)
-                await self.test_application_messages(channel)
+                if not get_form_prompt(channel.id):
+                    await self.test_application_messages(channel)
         except Exception:
             logger.exception("Application test report failed")
 
@@ -558,6 +649,12 @@ class ApplicationCog(commands.Cog):
     async def open_application_form(self, interaction):
         channel = interaction.channel
         report_id = interaction.message.id if interaction.message else None
+        if isinstance(channel, discord.TextChannel) and report_id == get_form_prompt(channel.id):
+            row = get_report(channel.id)
+            if not row:
+                await interaction.response.send_message("Your eligibility report is being prepared. Try again shortly.", ephemeral=True)
+                return
+            report_id = row[2]
         if not self.form_allowed(channel, interaction.user, report_id):
             await interaction.response.send_message("Only the applicant may complete this form.", ephemeral=True)
             return
@@ -614,7 +711,10 @@ class ApplicationCog(commands.Cog):
                 submitted = await channel.send(embed=response, files=files, allowed_mentions=discord.AllowedMentions.none())
                 save_form_submission(channel.id, report_id, interaction.user.id, submitted.id)
                 try:
-                    await report.edit(content=APPLICATION_SUBMITTED, view=ApplicationView(self, rsn, submitted=True), allowed_mentions=discord.AllowedMentions.none())
+                    prompt_id = get_form_prompt(channel.id)
+                    if prompt_id:
+                        await self.update_form_prompt(channel, APPLICATION_SUBMITTED)
+                    await report.edit(content=None if prompt_id else APPLICATION_SUBMITTED, view=ApplicationView(self, rsn, submitted=True, separate_prompt=bool(prompt_id)), allowed_mentions=discord.AllowedMentions.none())
                 except discord.HTTPException:
                     logger.exception("Form saved but report button update failed")
                 logger.info("Application form submitted channel=%s report=%s response=%s attachments=%s", channel.id, report_id, submitted.id, len(attachments))
@@ -709,6 +809,11 @@ class ApplicationCog(commands.Cog):
                 except discord.HTTPException:
                     logger.exception("Approval saved but report edit failed")
                 try:
+                    if get_form_prompt(channel.id):
+                        await self.update_form_prompt(channel, "**Application complete.**")
+                except discord.HTTPException:
+                    logger.exception("Approval saved but application prompt update failed")
+                try:
                     prefix = "**Staff test - welcome preview (no roles changed)**\n" if test else f"{member.mention}\n"
                     await channel.send(prefix + welcome_text(channel.guild), allowed_mentions=discord.AllowedMentions(users=[member] if member else False, roles=False, everyone=False))
                     welcome_status = "Welcome message posted."
@@ -768,7 +873,7 @@ class ApplicationCog(commands.Cog):
                     embed.remove_field(next_index)
                 set_gear_review(channel.id, message_id, reviewer)
                 try:
-                    await message.edit(content=form_content(channel.id, message.id), embed=embed, view=ApplicationView(self, rsn, verified=verified, submitted=bool(form_submission(channel.id, message.id))), allowed_mentions=discord.AllowedMentions.none())
+                    await message.edit(content=form_content(channel.id, message.id), embed=embed, view=ApplicationView(self, rsn, verified=verified, submitted=bool(form_submission(channel.id, message.id)), separate_prompt=bool(get_form_prompt(channel.id))), allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
                     set_gear_review(channel.id, message_id, previous)
                     raise
@@ -806,12 +911,13 @@ class ApplicationCog(commands.Cog):
                 await interaction.followup.send(note or "WOM unavailable. Existing report retained.", ephemeral=True)
                 return
             reviewer = gear_reviewer(channel.id, interaction.message.id)
-            await interaction.message.edit(content=form_content(channel.id, interaction.message.id), embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, interaction.message.id))), allowed_mentions=discord.AllowedMentions.none())
+            await interaction.message.edit(content=form_content(channel.id, interaction.message.id), embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, interaction.message.id)), separate_prompt=bool(get_form_prompt(channel.id))), allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send("Eligibility report refreshed.", ephemeral=True)
 
 async def setup(bot):
     initialize()
     cog = ApplicationCog(bot)
     await bot.add_cog(cog)
+    bot.add_view(ApplicationPromptView(cog))
     bot.add_view(ApplicationView(cog))
     bot.add_view(ApplicationView(cog, verified=True))

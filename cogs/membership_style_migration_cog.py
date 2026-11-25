@@ -12,7 +12,7 @@ from cogs.application_cog import GUILD, CATEGORY, REPORT_TITLE, db, get_report
 from cogs.vouches_cog import VouchesCog, NOVUS_MOD_CHAT_CHANNEL_ID
 
 logger = logging.getLogger("WOMBot")
-VERSION = "membership-style-v1-20261125"
+VERSION = "membership-style-v2-20261125"
 
 def brand(embed, logo, footer=None):
     embed.set_thumbnail(url=logo)
@@ -54,6 +54,22 @@ def migrate_details(message, logo):
 
 def migrate_staff(message, logo):
     content=message.content or ""
+    if len(message.embeds)==1 and message.embeds[0].title in ("Membership Reviewed","✅ Membership Approved"):
+        old=message.embeds[0]
+        prefix="Novus Membership • "
+        footer=old.footer.text or ""
+        if not footer.startswith(prefix) or any(f.name=="Status" for f in old.fields):
+            return None
+        status=footer[len(prefix):]
+        if status not in ("Existing Member • No membership promotion required","Trial Member → Member","Member access granted"):
+            return None
+        embed=old.copy()
+        for i,f in enumerate(old.fields):
+            if f.name in ("Member","Reviewed by","Approved by","Pathway"):
+                embed.set_field_at(i,name=f.name,value=f.value.rstrip("\n\u200b")+"\n\u200b",inline=False)
+        embed.add_field(name="Status",value="Existing member • No promotion required" if status.startswith("Existing Member") else "✅ "+status,inline=False)
+        brand(embed,logo,"Novus Membership")
+        return content,embed
     if not message.embeds:
         # Only transform the bot's exact old approval format. Historical
         # pathways cannot be inferred from a generic /approve log.
@@ -62,11 +78,12 @@ def migrate_staff(message, logo):
             action, member, _name, actor=match.groups()
             reviewed=action=="Reviewed existing membership"
             embed=discord.Embed(title="Membership Reviewed" if reviewed else "✅ Membership Approved",color=discord.Color.blurple() if reviewed else discord.Color.green(),timestamp=message.created_at)
-            embed.add_field(name="Member",value=member,inline=False)
+            embed.add_field(name="Member",value=member+"\n\u200b",inline=False)
             if not reviewed:
-                embed.add_field(name="Pathway",value="Not recorded in original log",inline=False)
-            embed.add_field(name="Reviewed by" if reviewed else "Approved by",value=actor,inline=False)
-            brand(embed,logo,"Novus Membership • "+("Existing Member • No membership promotion required" if reviewed else "Member access granted"))
+                embed.add_field(name="Pathway",value="Not recorded in original log\n\u200b",inline=False)
+            embed.add_field(name="Reviewed by" if reviewed else "Approved by",value=actor+"\n\u200b",inline=False)
+            embed.add_field(name="Status",value="Existing member • No promotion required" if reviewed else "✅ Member access granted",inline=False)
+            brand(embed,logo,"Novus Membership")
             return "",embed
         match=re.fullmatch(r"\*\*New Trial Vouch\*\*\n(<@!?\d+>) vouched for (<@!?\d+>) \(\*\*(\d+)/(\d+) vouches\*\*\)\.",content)
         if match:
@@ -140,6 +157,20 @@ class MembershipStyleMigrationCog(commands.Cog):
                                 if footer.startswith("Wise Old Man • Last updated: "):
                                     footer=footer.replace("Wise Old Man • Last updated: ","Novus Membership • WOM: ",1)
                                 brand(embed,logo,footer or None)
+                                report=get_report(channel_id)
+                                desc=embed.description or ""
+                                if report and report[2]==message_id and report[0] and desc.startswith("**Applicant:** ") and not desc.startswith(f"**Applicant:** <@{report[0]}>"):
+                                    first,sep,rest=desc.partition("\n")
+                                    if not first.startswith("**Applicant:** <@"):
+                                        embed.description=f"**Applicant:** <@{report[0]}>\n**RSN:** "+first.removeprefix("**Applicant:** ")+sep+rest
+                                for i,f in enumerate(embed.fields):
+                                    if f.name=="Application Status":
+                                        val="\n".join("▫️ "+line if line in ("Gear verification pending","Staff approval pending") else line for line in f.value.split("\n"))
+                                        embed.set_field_at(i,name=f.name,value=val,inline=f.inline)
+                                        if "KC thresholds not met" in val and "approval complete" not in val and any(x.name=="Alternative Pathways" for x in embed.fields):
+                                            embed.color=discord.Color.gold()
+                                    elif f.name=="Alternative Pathways":
+                                        embed.set_field_at(i,name=f.name,value=f.value.rstrip("\n\u200b")+"\n\u200b",inline=f.inline)
                                 if embed.to_dict()==message.embeds[0].to_dict():
                                     continue
                                 await message.edit(embeds=[embed]+[e.copy() for e in message.embeds[1:]],allowed_mentions=discord.AllowedMentions.none())

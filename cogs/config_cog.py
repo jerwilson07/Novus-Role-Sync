@@ -54,7 +54,7 @@ NOVUS_TENURE_ROLES = {
 
 def has_novus_command_permission(member: discord.Member) -> bool:
     return any(
-        role.id in NOVUS_COMMAND_ROLE_IDS
+        (role.id in NOVUS_COMMAND_ROLE_IDS or role.name.strip().casefold() == "founder")
         for role in member.roles
     )
 
@@ -309,7 +309,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -413,7 +413,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -478,7 +478,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -515,6 +515,13 @@ class ConfigCog(commands.Cog):
                 f"Specialty and achievement roles are intentionally "
                 f"left unmanaged.",
                 ephemeral=True
+            )
+            return
+
+        if discord_role.name.strip().casefold() != wom_role:
+            await interaction.response.send_message(
+                "A tenure rank must map to the Discord role with the same name. Other roles cannot be managed by tenure sync.",
+                ephemeral=True,
             )
             return
 
@@ -665,7 +672,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -726,7 +733,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -2254,7 +2261,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -2359,7 +2366,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -2679,7 +2686,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -2988,7 +2995,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -3059,7 +3066,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -3270,7 +3277,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -3360,7 +3367,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -3448,7 +3455,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )
@@ -3532,7 +3539,7 @@ class ConfigCog(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member "
+                "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
             )

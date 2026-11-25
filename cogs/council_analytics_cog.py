@@ -426,7 +426,7 @@ class CouncilAnalyticsCog(commands.Cog):
                 existing=await channel.fetch_message(saved[0][0])
             except discord.NotFound:
                 return
-            if existing.author.id!=self.bot.user.id or not existing.embeds or (any(a.filename=="novus-membership.png" for a in existing.attachments) and not existing.embeds[0].fields):
+            if existing.author.id!=self.bot.user.id or not existing.embeds or (any(a.filename=="novus-roster-v2.png" for a in existing.attachments)):
                 return
             cutoff=parse(saved[0][1]) or end
             embed,metrics,chart_data=await self.build(guild,start,cutoff,key,lifetime)
@@ -488,87 +488,99 @@ class CouncilAnalyticsCog(commands.Cog):
 
 
 def render_dashboards(d):
-    # Local rendering: no member data is sent to a third-party chart service.
+    # Render privately and locally, with one column for mobile readers.
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import matplotlib.ticker as ticker
     BG="#10151f"; PANEL="#192231"; FG="#f0f4fc"; MUTED="#a5b2c5"
     BLUE="#8197fa"; GREEN="#4ad6a1"; GOLD="#e7bb68"; RED="#e8828a"
-    def board(title,subtitle):
-        fig,axs=plt.subplots(3,2,figsize=(12,13.5),facecolor=BG)
-        fig.subplots_adjust(left=.16,right=.93,bottom=.08,top=.86,wspace=.43,hspace=.58)
-        fig.text(.055,.957,"NOVUS  /  COUNCIL ANALYTICS",color=GREEN,fontsize=12,weight="bold")
-        fig.text(.055,.925,title,color=FG,fontsize=25,weight="bold")
-        fig.text(.055,.895,d["period"]+"  •  "+subtitle,color=MUTED,fontsize=12)
-        return fig,axs.ravel()
+    def board(title,subtitle,heights):
+        fig,axs=plt.subplots(len(heights),1,figsize=(8.5,2.3+sum(heights)),facecolor=BG,
+            gridspec_kw={"height_ratios":heights})
+        fig.subplots_adjust(left=.31,right=.91,bottom=.085,top=.83,wspace=0,hspace=.72)
+        fig.text(.045,.965,"NOVUS  /  COUNCIL ANALYTICS",color=GREEN,fontsize=13,weight="bold",va="top")
+        fig.text(.045,.925,title,color=FG,fontsize=25,weight="bold",va="top")
+        fig.text(.045,.88,d["period"]+"  •  "+subtitle,color=MUTED,fontsize=11,va="top")
+        return fig,axs
     def prepare(ax,title):
         ax.set_facecolor(PANEL)
-        ax.set_title(title,loc="left",color=FG,fontsize=15,weight="bold",pad=12)
+        ax.set_title(title,loc="left",color=FG,fontsize=17,weight="bold",pad=10)
         for sp in ax.spines.values():sp.set_visible(False)
-        ax.tick_params(colors=MUTED,labelsize=10,length=0)
-        ax.set_axisbelow(True)
+        ax.tick_params(colors=MUTED,labelsize=13,length=0,pad=8)
+        ax.set_xticks([])
     def empty(ax,title,message):
         prepare(ax,title)
-        ax.set_xticks([]);ax.set_yticks([])
-        ax.text(.5,.5,message,ha="center",va="center",wrap=True,color=MUTED,fontsize=12,transform=ax.transAxes)
-    def bars(ax,title,pairs,colors=BLUE,note=None):
-        valid=[(label,value) for label,value in pairs if value is not None]
-        if not valid:
-            return empty(ax,title,"No comparable data yet")
+        ax.set_yticks([])
+        ax.text(.5,.5,message,ha="center",va="center",color=MUTED,fontsize=15,transform=ax.transAxes)
+    def bars(ax,title,pairs,color=BLUE):
+        if not pairs or all(v is None for _,v in pairs):
+            return empty(ax,title,"Not yet tracked")
         prepare(ax,title)
-        labels,values=zip(*valid)
-        ax.barh(list(range(len(values))),values,color=colors,height=.64)
-        ax.set_yticks(list(range(len(values))),labels=labels)
+        labels=[label for label,_ in pairs]
+        values=[v for _,v in pairs]
+        maximum=max([v for v in values if v is not None]+[1])
+        colors=[color]*len(values) if isinstance(color,str) else color
+        ax.barh(range(len(values)),[v or 0 for v in values],color=colors,height=.62)
+        ax.set_yticks(range(len(values)),labels=labels)
         ax.invert_yaxis()
-        ax.set_xlim(0,max(max(values)*1.25,1))
-        ax.xaxis.set_major_formatter(ticker.StrMethodFormatter("{x:,.0f}"))
-        ax.grid(axis="x",alpha=.12,color=MUTED)
-        for i,value in enumerate(values):
-            ax.text(value+max(max(values),1)*.025,i,f"{value:,.0f}",color=FG,va="center",fontsize=11,weight="bold")
-        if note:ax.text(0,-.22,note,color=MUTED,fontsize=9,transform=ax.transAxes,wrap=True)
+        ax.set_xlim(0,maximum*1.32)
+        for i,v in enumerate(values):
+            ax.text((v or 0)+maximum*.025,i,"N/A" if v is None else f"{v:,.0f}",color=MUTED if v is None else FG,va="center",fontsize=14,weight="bold")
     def save(fig,footer):
-        fig.text(.055,.035,footer,color=MUTED,fontsize=10,wrap=True)
-        buf=io.BytesIO();fig.savefig(buf,format="png",dpi=125,facecolor=BG)
+        fig.text(.045,.027,footer,color=MUTED,fontsize=10,va="bottom",linespacing=1.5)
+        buf=io.BytesIO()
+        fig.savefig(buf,format="png",dpi=135,facecolor=BG)
         plt.close(fig);buf.seek(0)
         return buf
-    f,a=board("Membership & recruitment","Roster, retention and trial outcomes")
+    f,a=board("Membership","Roster and retention",[2.4,1.7,2.0])
     bars(a[0],"Current membership",[("Full members",d["full"]),("Trial members",d["trial"]),("WOM accounts",d["wom"]),("Linked members",d["linked"])])
     if d["wom_complete"] or d["wom_joins"] or d["wom_leaves"]:
-        bars(a[1],"WOM account movements",[("Joined",d["wom_joins"]),("Left",d["wom_leaves"])],[GREEN,RED],"Accounts, not unique people." + ("" if d["wom_complete"] else " Partial history."))
-    else:empty(a[1],"WOM account movements","Historical account activity unavailable")
+        bars(a[1],"WOM account movements"+("" if d["wom_complete"] else " (partial)"),[("Joined",d["wom_joins"]),("Left",d["wom_leaves"])],[GREEN,RED])
+    else:empty(a[1],"WOM account movements","History unavailable")
     if d["retention"] is not None:
         bars(a[2],"Roster retention",[("Retained (%)",d["retention"])],GREEN)
-        a[2].set_xlim(0,110)
+        a[2].set_xlim(0,132)
     elif d["tenures"]:
-        bars(a[2],"Current membership tenure",[("Mean days",statistics.mean(d["tenures"])),("Median days",statistics.median(d["tenures"]))],GOLD,"Historical retention baseline establishing.")
-    else:empty(a[2],"Member retention","Baseline establishing")
-    if d["opened"] or d["approved"]:
-        bars(a[3],"Classified recruitment",[("Applications",d["opened"]),("Approvals",d["approved"])],BLUE,f'{d["unknown_apps"]} historical tickets unclassified.')
-    else:empty(a[3],"Recruitment",f'Baseline establishing\n{d["unknown_apps"]} historical tickets unclassified')
-    bars(a[4],"Trial outcomes (tracked)",[("Active",d["active"]),("Vouch graduation",d["passed"]),("Other pathway",d["other"]),("Unclassified",d["unknown"]),("Closed",d["departed"])],BLUE,"Observed episodes; incomplete historical coverage.")
-    bars(a[5],"Current tenure ranks",[(r.title(),d["ranks"].get(r,0)) for r in RANKS]+[("Unranked",d["ranks"].get("unranked",0))],GREEN)
-    one=save(f,"Current membership is a snapshot. Historical events are partial; staff test applications are excluded where known.")
-    f,a=board("PvM & member progression","Observed gains and achievements")
-    bars(a[0],"Raid KC gained",list(d["raids"].items()),GREEN,"Only comparable WOM metrics shown.")
+        bars(a[2],"Current in-game tenure",[("Mean days",statistics.mean(d["tenures"])),("Median days",statistics.median(d["tenures"]))],GOLD)
+    else:empty(a[2],"Member retention","Not yet tracked")
+    one=save(f,"Account movements are not unique member joins or departures.\nHistorical retention needs comparable roster snapshots.")
+    f,a=board("Recruitment & tenure","Observed applications and trials",[1.8,2.7,3.1])
+    if d["opened"] or d["approved"] or d["complete"]:
+        bars(a[0],"Classified recruitment",[("Applications",d["opened"]),("Approvals",d["approved"])],BLUE)
+    else:empty(a[0],"Recruitment",f'Not yet tracked reliably\n{d["unknown_apps"]} unclassified tickets')
+    bars(a[1],"Tracked trial outcomes",[("Active",d["active"]),("Vouch graduation",d["passed"] or (0 if d["complete"] else None)),("Other pathway",d["other"] or (0 if d["complete"] else None)),("Unclassified",d["unknown"] or (0 if d["complete"] else None)),("Closed",d["departed"] or (0 if d["complete"] else None))],BLUE)
+    bars(a[2],"Current tenure ranks",[(r.title(),d["ranks"].get(r,0)) for r in RANKS]+[("Unranked",d["ranks"].get("unranked",0))],GREEN)
+    two=save(f,"Historical application and trial records are incomplete.\nN/A means unavailable, not zero.")
+    f,a=board("PvM activity","Observed WOM kill-count gains",[3.4,2.8,2.1])
+    bars(a[0],"Raid KC gained",list(d["raids"].items()),GREEN)
     bars(a[1],"Top non-raid bosses",list(d["bosses"].items())[:5],BLUE)
     if d["covered"]:
-        bars(a[2],"Member PvM engagement",[("Positive gains",d["engaged"]),("No positive gains",d["measured"]-d["engaged"]),("No comparable data",d["unmeasured"])],[GREEN,GOLD,MUTED],f'{d["covered"]}/{d["owners"]} linked accounts measured.')
-        bars(a[3],"First KC transitions",[("Inferno",d["first"].get("tzkal_zuk",0)),("Colosseum",d["first"].get("sol_heredit",0))],GREEN,"Observed 0 to 1+ transitions, lower bound.")
-    else:
-        empty(a[2],"Member PvM engagement","Comparable WOM snapshots unavailable")
-        empty(a[3],"First KC transitions","Comparable WOM snapshots unavailable")
-    bars(a[4],"Observed tenure promotions",[(r.title(),d["promotions"].get(r,0)) for r in RANKS[1:]],BLUE,"Partial history until full monthly coverage.")
+        bars(a[2],"Member PvM engagement",[("Positive gains",d["engaged"]),("No positive gains",d["measured"]-d["engaged"]),("No comparable data",d["unmeasured"])],[GREEN,GOLD,MUTED])
+    else:empty(a[2],"Member PvM engagement","Comparable snapshots unavailable")
+    three=save(f,f'{d["covered"]}/{d["owners"]} linked accounts measured. Current accounts only.\nGains may predate joining; departed accounts are not reconstructed.')
+    f,a=board("Progression & trends","Achievements and monthly changes",[1.9,2.9,2.2])
+    first=d["first"]
+    if first.get("tzkal_zuk") or first.get("sol_heredit"):
+        bars(a[0],"Verified first KC transitions",[("Inferno",first.get("tzkal_zuk") or None),("Colosseum",first.get("sol_heredit") or None)],GREEN)
+    else:empty(a[0],"First KC transitions","Historical first completions\nnot reliably tracked yet")
+    if d["complete"] or any(d["promotions"].values()):
+        bars(a[1],"Observed tenure promotions",[(r.title(),d["promotions"].get(r,0) if d["complete"] else d["promotions"].get(r)) for r in RANKS[1:]],BLUE)
+    else:empty(a[1],"Tenure promotions","Historical promotions\nnot yet tracked")
     if d["prior"]:
         pairs=[(label,d["metrics"].get(k)-d["prior"].get(k)) for k,label in (("full","Full members"),("joins","Member joins"),("approved","Approvals")) if d["metrics"].get(k) is not None and d["prior"].get(k) is not None]
         if pairs:
-            prepare(a[5],"Month-over-month change")
-            labels,values=zip(*pairs);a[5].barh(range(len(values)),values,color=[GREEN if v>=0 else RED for v in values])
-            a[5].set_yticks(range(len(values)),labels=labels);a[5].invert_yaxis();a[5].axvline(0,color=MUTED,alpha=.5)
-        else:empty(a[5],"Month-over-month","No comparable prior period")
-    else:empty(a[5],"Month-over-month","Baseline edition\nMonthly comparison begins with comparable reports")
-    two=save(f,"WOM gains describe current linked accounts and may predate joining. Missing metrics are not treated as zero.")
-    return [one,two]
+            prepare(a[2],"Month-over-month change")
+            labels,values=zip(*pairs)
+            a[2].barh(range(len(values)),values,color=[GREEN if v>=0 else RED for v in values],height=.62)
+            a[2].set_yticks(range(len(values)),labels=labels);a[2].invert_yaxis()
+            limit=max([abs(v) for v in values]+[1])*1.4
+            a[2].set_xlim(-limit,limit);a[2].axvline(0,color=MUTED,alpha=.5)
+            for i,v in enumerate(values):
+                a[2].text(v+(.035*limit if v>=0 else -.035*limit),i,f"{v:+,}",color=FG,ha="left" if v>=0 else "right",va="center",fontsize=14)
+        else:empty(a[2],"Month-over-month","No comparable prior period")
+    else:empty(a[2],"Month-over-month","Baseline edition\nComparable monthly data pending")
+    four=save(f,"First KC counts are lower bounds, not a complete achievement history.\nUnverified historical completions are not included.")
+    return [one,two,three,four]
 
 def dashboard_message(embed,images,d):
     # A short header, charts immediately below, then only supplemental notes.
@@ -585,11 +597,11 @@ def dashboard_message(embed,images,d):
         +(f'{d["duration"]:.1f} days' if d["duration"] is not None else "Not measurable")
         +f'\nHistorical unclassified applications: {d["unknown_apps"]}'
     ),inline=False)
-    notes.add_field(name="Achievements",value=f'Observed PvM Diary awards: {d["diary"]} • Approved PBs: not integrated',inline=False)
-    notes.description="Historical gaps are not zero activity. Current linked-account WOM gains may predate joining; departed accounts are not reconstructed. Retention and event tracking are prospective."
+    notes.add_field(name="Achievements",value=(f'Observed PvM Diary awards: {d["diary"]}' if d["diary"] or d["complete"] else "PvM Diary awards: not yet tracked")+" • Approved PBs: not integrated",inline=False)
+    notes.description="Historical gaps are not zero activity. Roster and event tracking began in late November; full monthly tracking starts in December."
     embed.clear_fields()
     embed.description=f'**{d["period"]}**\n**{d["full"]}** full members • **{d["trial"]}** trial members • **{d["wom"]}** WOM accounts\n'+("Lifetime baseline" if d["lifetime"] else "Previous calendar month")+" • Council only"
-    names=["novus-membership.png","novus-pvm.png"]
+    names=["novus-roster-v2.png","novus-recruitment-v2.png","novus-pvm-v2.png","novus-progression-v2.png"]
     charts=[]
     files=[]
     for name,image in zip(names,images):

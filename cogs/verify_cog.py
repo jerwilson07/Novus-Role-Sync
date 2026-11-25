@@ -1,5 +1,6 @@
 """Replacement Novus Verify commands; no direct tenure or WOM-link writes."""
 import asyncio
+import datetime
 import logging
 import re
 import sqlite3
@@ -91,18 +92,27 @@ class VerifyCog(commands.Cog):
     def lock(self, member):
         return self.locks.setdefault(member.id, asyncio.Lock())
 
-    async def log_approval(self, guild, actor, member, already):
+    async def log_approval(self, guild, actor, member, already, *, was_trial=False, pathway=None):
         channel = guild.get_channel(NOVUS_MOD_CHAT_CHANNEL_ID)
         if channel is None:
             logger.warning("Approval log channel unavailable")
             return False
         try:
-            action = "Reviewed existing membership" if already else "Approved new member"
-            await channel.send(
-                f"**{action}:** {member.mention} ({discord.utils.escape_markdown(member.display_name)}) "
-                f"by {actor.mention}.",
-                allowed_mentions=discord.AllowedMentions.none(),
+            reviewed = already and not was_trial
+            embed = discord.Embed(
+                title="Membership Reviewed" if reviewed else "✅ Membership Approved",
+                color=discord.Color.blurple() if reviewed else discord.Color.green(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
+            embed.add_field(name="Member", value=member.mention, inline=False)
+            if not reviewed:
+                embed.add_field(name="Pathway", value=pathway or "Manual staff approval (/approve)", inline=False)
+            embed.add_field(name="Reviewed by" if reviewed else "Approved by", value=actor.mention, inline=False)
+            status = "Existing Member • No membership promotion required" if reviewed else ("Trial Member → Member" if was_trial else "Member access granted")
+            embed.set_footer(text=f"Novus Membership • {status}")
+            logo = guild.icon or self.bot.user.display_avatar
+            embed.set_thumbnail(url=logo.url)
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
             return True
         except discord.HTTPException:
             logger.exception("Could not log approval for %s", member.id)
@@ -186,7 +196,9 @@ class VerifyCog(commands.Cog):
                 url=f"https://discord.com/channels/{guild.id}/1537889319220551753",
             ))
         embed = discord.Embed(title=title, description=description, color=discord.Color.green())
-        embed.set_footer(text="Novus • Account Verification")
+        embed.set_footer(text="Novus Membership • Account Verification")
+        logo = guild.icon or self.bot.user.display_avatar
+        embed.set_thumbnail(url=logo.url)
         kwargs = {"view": view} if view.children else {}
         await interaction.followup.send(embed=embed, ephemeral=True, **kwargs)
         application_cog = self.bot.get_cog("ApplicationCog")
@@ -357,7 +369,7 @@ class VerifyCog(commands.Cog):
             message += " Staff log could not be sent."
         await interaction.followup.send(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
-    async def approve_member(self, guild, actor, member):
+    async def approve_member(self, guild, actor, member, *, pathway=None):
         """Shared role transition for /approve and ticket approval."""
         staff_ids = set(NOVUS_COMMAND_ROLE_IDS) | {1532829195657285843}
         if guild.id != NOVUS_GUILD_ID or not any(r.id in staff_ids for r in actor.roles):
@@ -377,6 +389,7 @@ class VerifyCog(commands.Cog):
             if verified not in member.roles:
                 raise ValueError("This applicant must complete /rsn first.")
             already = full in member.roles
+            was_trial = trial in member.roles
             add = []
             if not already:
                 add.append(full)
@@ -387,7 +400,7 @@ class VerifyCog(commands.Cog):
             remove = [r for r in (friend, trial, guest) if r in member.roles]
             if remove:
                 await member.remove_roles(*remove, reason=f"Novus approval by {actor.id}")
-        logged = await self.log_approval(guild, actor, member, already)
+        logged = await self.log_approval(guild, actor, member, already, was_trial=was_trial, pathway=pathway)
         return member, already, logged
 
 

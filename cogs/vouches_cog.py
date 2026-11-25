@@ -24,7 +24,7 @@ REQUIRED_VOUCHES = 3
 
 
 def is_staff(member: discord.Member) -> bool:
-    return any(role.id in STAFF_ROLE_IDS or role.name.strip().casefold() == "founder" for role in getattr(member, "roles", ()))
+    return any(role.id in STAFF_ROLE_IDS or role.id == 1532829195657285843 for role in getattr(member, "roles", ()))
 
 
 def is_trial(member: discord.Member) -> bool:

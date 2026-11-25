@@ -104,8 +104,11 @@ def report_embed(rsn, payload, test=False, note=None):
     # Monospace rows retain their alignment on both mobile and desktop.
     rows = "\n".join(f"{label:<11} {fmt(key):>7}" for label, key in RAIDS)
     embed.add_field(name="Raid KC", value=f"\x60\x60\x60\n{rows}\n\x60\x60\x60", inline=False)
-    embed.add_field(name="Inferno", value=f"**{fmt(EXTRAS[0][1])} KC**" if values.get(EXTRAS[0][1]) is not None else "N/A", inline=True)
-    embed.add_field(name="Colosseum", value=f"**{fmt(EXTRAS[1][1])} KC**" if values.get(EXTRAS[1][1]) is not None else "N/A", inline=True)
+    solo_rows = "\n".join(
+        f"**{label}:** {fmt(key)}" + (" KC" if values.get(key) is not None else "")
+        for label, key in EXTRAS
+    )
+    embed.add_field(name="\u200b", value=solo_rows + "\n\u200b", inline=False)
     embed.add_field(
         name="Application Status",
         value=f"{result}\nGear verification pending\nStaff approval pending\n\u200b",

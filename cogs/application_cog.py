@@ -894,7 +894,7 @@ class ApplicationCog(commands.Cog):
                 if details: updates["Additional Information"] = discord.utils.escape_markdown(details)
                 if any(not (updates.get(k) or values.get(k)) for k in ("Account Type", "Membership Pathway", "How They Found Us")):
                     return await notice(interaction, True, "Complete any missing required answers.", ephemeral=True)
-                retained = [a for a in original.attachments if (a.content_type or "").startswith("image/") or re.search(r"\\.(png|jpe?g|gif|webp|bmp|avif)$", a.filename, re.I)]
+                retained = [a for a in original.attachments if (a.content_type or "").startswith("image/") or re.search(r"\.(png|jpe?g|gif|webp|bmp|avif)$", a.filename, re.I)]
                 if not attachments and not retained:
                     return await notice(interaction, True, "Original gear screenshots are missing. Upload replacements.", ephemeral=True)
                 if not attachments and not any(values.get(k) != v for k,v in updates.items()):
@@ -908,7 +908,7 @@ class ApplicationCog(commands.Cog):
                 count = len(images)
                 # Any actual revision requires fresh staff review; preserve unchanged answers.
                 updates["Gear Screenshots"] = f"{count} screenshot{'s' if count != 1 else ''} attached"
-                updates["Application Status"] = f"{check()} **Application resubmitted**\\n▫️ Gear verification pending\\n▫️ Staff approval pending"
+                updates["Application Status"] = f"{check()} **Application resubmitted**\n▫️ Gear verification pending\n▫️ Staff approval pending"
                 for name, value in updates.items():
                     index = next((i for i,f in enumerate(embed.fields) if f.name == name), None)
                     if index is None: embed.add_field(name=name, value=value, inline=False)
@@ -925,14 +925,17 @@ class ApplicationCog(commands.Cog):
                 report_card = report.embeds[0].copy()
                 for i, field in enumerate(report_card.fields):
                     if field.name == "Application Status":
-                        kc = field.value.partition("\\n")[0]
-                        report_card.set_field_at(i, name=field.name, value=f"{kc}\\n▫️ Gear verification pending\\n▫️ Staff approval pending", inline=False)
+                        kc = field.value.replace("\\n", "\n").partition("\n")[0]
+                        report_card.set_field_at(i, name=field.name, value=f"{kc}\n▫️ Gear verification pending\n▫️ Staff approval pending", inline=False)
                 row = get_report(channel.id)
                 await report.edit(embed=report_card, view=ApplicationView(self, row[1], submitted=True, separate_prompt=bool(get_form_prompt(channel.id)), trial=any(f.name == "Trial Member Graduation" for f in report_card.fields)), allowed_mentions=discord.AllowedMentions.none())
                 saved = await original.edit(embeds=embeds, attachments=images, allowed_mentions=discord.AllowedMentions.none())
                 confirmed = await channel.fetch_message(saved.id)
                 if len(confirmed.attachments) != count:
-                    raise RuntimeError("Gear attachment readback mismatch")
+                    visible = sum(bool(e.image.url) for e in confirmed.embeds)
+                    if visible != count:
+                        raise RuntimeError("Gear attachment and embedded image readback mismatch")
+                    logger.warning("Gear images rendered but attachment metadata missing: channel=%s report=%s expected=%s attachments=%s", channel.id, report_id, count, len(confirmed.attachments))
                 logger.info("Application resubmitted channel=%s report=%s attachments=%s", channel.id, report_id, count)
                 await notice(interaction, True, "Application updated. Staff will review your revised application.", ephemeral=True)
             except Exception:

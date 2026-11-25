@@ -233,7 +233,7 @@ def trial_vouch_records(applicant_id):
     return current, False
 
 
-def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=None):
+def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=None, logo_url=None):
     payload = payload or {}
     values = payload.get("values", {})
     total = sum(values.get(key) or 0 for _, key in RAIDS)
@@ -275,6 +275,8 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=No
         description=f"**Applicant:** {name}" + ("\n**Current role:** Trial Member • Full membership application" if trial is not None else "") + f"\n\n**Total Raid KC:** {total_indicator}**{total_label}**",
         color=color,
     )
+    if logo_url:
+        embed.set_thumbnail(url=logo_url)
     # Monospace rows retain their alignment on both mobile and desktop.
     rows = "\n".join(f"{label:<11} {fmt(key):>7}" for label, key in RAIDS)
     embed.add_field(name="Raid KC", value=f"\x60\x60\x60\n{rows}\n\x60\x60\x60", inline=False)
@@ -318,13 +320,13 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=No
             timestamp = "Unknown"
     else:
         timestamp = "Unavailable"
-    footer = f"Wise Old Man • Last updated: {timestamp}"
+    footer = f"Novus Membership • WOM: {timestamp}"
     if test:
         footer += " • Staff test"
     if incomplete or special_unknown:
-        embed.add_field(name="Data note", value="N/A = unranked or unavailable; totals may be incomplete.", inline=False)
+        embed.add_field(name="Data Note", value="N/A = unranked or unavailable; totals may be incomplete.", inline=False)
     if note:
-        embed.add_field(name="Snapshot status", value=note, inline=False)
+        embed.add_field(name="Snapshot Status", value=note, inline=False)
     embed.set_footer(text=footer)
     return embed
 
@@ -545,8 +547,11 @@ class ApplicationCog(commands.Cog):
                 await interaction.followup.send("This applicant is not a current Trial Member.", ephemeral=True)
                 return
             rows, legacy = trial_vouch_records(member.id)
-            embed = discord.Embed(title=f"Trial Vouches • {member.display_name}", description=formatted_vouches(rows, limit=10)[:3900], color=discord.Color.green() if len(rows)>=REQUIRED_VOUCHES else discord.Color.blurple())
-            embed.add_field(name="Progress", value=f"**{len(rows)}/{REQUIRED_VOUCHES}** unique vouches", inline=False)
+            embed = discord.Embed(title="Novus Trial Vouches", description=f"**Trial Member:** {member.mention}", color=discord.Color.green() if len(rows)>=REQUIRED_VOUCHES else discord.Color.blurple())
+            embed.add_field(name="Vouch Progress", value=f"**{len(rows)}/{REQUIRED_VOUCHES}** unique vouches", inline=False)
+            embed.add_field(name="Member Feedback", value=formatted_vouches(rows, limit=10)[:1024], inline=False)
+            embed.set_footer(text="Novus Membership • Private staff review")
+            embed.set_thumbnail(url=(channel.guild.icon or self.bot.user.display_avatar).url)
             if legacy:
                 embed.add_field(name="Staff review", value="Existing vouch records may predate tracking. Confirm these apply to the current trial.", inline=False)
             await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
@@ -668,7 +673,7 @@ class ApplicationCog(commands.Cog):
             payload, note = await self.get_payload(rsn, applicant_id, update=True)
             trial = await self.trial_context(channel, applicant_id)
             await self.ensure_form_prompt(channel)
-            message = await channel.send(embed=report_embed(rsn, payload, test, note, trial=trial), view=ApplicationView(self, rsn, separate_prompt=True, trial=trial is not None), allowed_mentions=discord.AllowedMentions.none())
+            message = await channel.send(embed=report_embed(rsn, payload, test, note, trial=trial, logo_url=(channel.guild.icon or self.bot.user.display_avatar).url), view=ApplicationView(self, rsn, separate_prompt=True, trial=trial is not None), allowed_mentions=discord.AllowedMentions.none())
             save_report(channel.id, applicant_id, rsn, message.id)
             logger.info("Application KC report published channel=%s message=%s rsn=%s total=%s", channel.id, message.id, rsn, sum((payload or {}).get("values", {}).get(k) or 0 for _,k in RAIDS))
 
@@ -696,7 +701,7 @@ class ApplicationCog(commands.Cog):
                         payload, note = await self.get_payload(rsn, applicant_id, update=False)
                         if payload:
                             reviewer = gear_reviewer(channel.id, message.id)
-                            await message.edit(content=form_content(channel.id, message.id), embed=report_embed(rsn, payload, True, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, message.id)), separate_prompt=bool(get_form_prompt(channel.id))), allowed_mentions=discord.AllowedMentions.none())
+                            await message.edit(content=form_content(channel.id, message.id), embed=report_embed(rsn, payload, True, note, reviewer, logo_url=(channel.guild.icon or self.bot.user.display_avatar).url), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, message.id)), separate_prompt=bool(get_form_prompt(channel.id))), allowed_mentions=discord.AllowedMentions.none())
                             logger.info("Restyled existing application test report channel=%s message=%s", channel.id, message.id)
                 else:
                     await self.publish(channel)
@@ -877,7 +882,7 @@ class ApplicationCog(commands.Cog):
                     response.add_field(name="Additional Information", value=escape(details), inline=False)
                 count = len(attachments)
                 response.add_field(name="Gear Screenshots", value=f"{count} screenshot{'s' if count != 1 else ''} attached", inline=False)
-                response.add_field(name="Application Status", value="✅ **Application submitted**\nGear verification pending", inline=False)
+                response.add_field(name="Application Status", value="✅ **Application submitted**\nGear verification pending\nStaff approval pending", inline=False)
                 response.set_footer(text="Novus Membership • Staff review pending")
                 for i, attachment in enumerate(attachments, 1):
                     suffix = attachment.filename.rsplit(".", 1)[-1].lower()
@@ -987,7 +992,7 @@ class ApplicationCog(commands.Cog):
                     if verify is None or not hasattr(verify, "approve_member"):
                         await interaction.followup.send("Approval service unavailable. No roles changed.", ephemeral=True)
                         return
-                    member, already, logged = await verify.approve_member(channel.guild, interaction.user, member)
+                    member, already, logged = await verify.approve_member(channel.guild, interaction.user, member, pathway=PATHWAYS[pathway])
                 save_final_approval(channel.id, message_id, interaction.user.id, pathway)
                 try:
                     await self.finish_approved_application(channel, message_id)
@@ -1024,6 +1029,7 @@ class ApplicationCog(commands.Cog):
         embed.set_field_at(index, name="Application Status", value=f"{kc_result}\n{gear_status(gear_reviewer(channel.id, report_id))}\n✅ **{'Test approval' if test else 'Staff approval'} complete** (by <@{reviewer_id}>)\n**Pathway:** {PATHWAYS[pathway]}", inline=False)
         if not test:
             embed.color = discord.Color.green()
+        embed.set_thumbnail(url=(channel.guild.icon or self.bot.user.display_avatar).url)
         await report.edit(content=None, embed=embed, view=ApplicationView(self, rsn, verified=True, approved=True), allowed_mentions=discord.AllowedMentions.none())
         if get_form_prompt(channel.id):
             await self.update_form_prompt(channel, "**Application complete.**")
@@ -1160,7 +1166,7 @@ class ApplicationCog(commands.Cog):
                 return
             reviewer = gear_reviewer(channel.id, interaction.message.id)
             trial = await self.trial_context(channel, applicant_id)
-            await interaction.message.edit(content=form_content(channel.id, interaction.message.id), embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer, trial=trial), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, interaction.message.id)), separate_prompt=bool(get_form_prompt(channel.id)), trial=trial is not None), allowed_mentions=discord.AllowedMentions.none())
+            await interaction.message.edit(content=form_content(channel.id, interaction.message.id), embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer, trial=trial, logo_url=(channel.guild.icon or self.bot.user.display_avatar).url), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, interaction.message.id)), separate_prompt=bool(get_form_prompt(channel.id)), trial=trial is not None), allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send("Eligibility report refreshed.", ephemeral=True)
 
 async def setup(bot):

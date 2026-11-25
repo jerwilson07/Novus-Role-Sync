@@ -37,15 +37,10 @@ REPORT_TITLE = "Novus Applicant Eligibility"
 
 APPLICATION_INTRO = """## Thanks for applying to Novus!
 
-Please provide the following if you haven't already:
+Click **Complete Application** to provide your account type, membership option, gear screenshots and how you found us.
 
-- **Account type:** Main or Ironman
-- **Gear screenshots**
-- **How you found us**
-
-If you're just short of our requirements or applying through Raids Prep or Raid Trial, let us know!
-
--# Your PvM statistics and KC eligibility are automatically retrieved through Wise Old Man."""
+-# Your raid KC is retrieved automatically through Wise Old Man."""
+APPLICATION_SUBMITTED = "**Application details submitted.** Staff will review your application and gear screenshots. Add any further information in this ticket."
 
 
 def db():
@@ -58,6 +53,18 @@ def initialize():
         conn.execute("CREATE TABLE IF NOT EXISTS application_gear_reviews (channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reviewer_id INTEGER NOT NULL, verified_at TEXT NOT NULL, PRIMARY KEY(channel_id, message_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS application_final_approvals (channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reviewer_id INTEGER NOT NULL, pathway TEXT NOT NULL, approved_at TEXT NOT NULL, PRIMARY KEY(channel_id, message_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS application_message_tests (test_key TEXT PRIMARY KEY, message_id INTEGER NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS application_form_submissions (channel_id INTEGER NOT NULL, report_id INTEGER NOT NULL, applicant_id INTEGER NOT NULL, response_id INTEGER NOT NULL, submitted_at TEXT NOT NULL, PRIMARY KEY(channel_id, report_id))")
+
+def form_submission(channel_id, report_id):
+    with closing(db()) as conn:
+        return conn.execute("SELECT applicant_id, response_id FROM application_form_submissions WHERE channel_id=? AND report_id=?", (channel_id, report_id)).fetchone()
+
+def save_form_submission(channel_id, report_id, applicant_id, response_id):
+    with closing(db()) as conn, conn:
+        conn.execute("INSERT INTO application_form_submissions VALUES (?, ?, ?, ?, ?)", (channel_id, report_id, applicant_id, response_id, datetime.datetime.now(datetime.timezone.utc).isoformat()))
+
+def form_content(channel_id, report_id):
+    return APPLICATION_SUBMITTED if form_submission(channel_id, report_id) else APPLICATION_INTRO
 
 def get_report(channel_id):
     with closing(db()) as conn:
@@ -244,11 +251,52 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None):
     embed.set_footer(text=footer)
     return embed
 
+APPLICATION_OPTIONS = {
+    "standard": "200+ total raid KC",
+    "alternative": "100+ raid KC + Infernal Cape / Dizana's Quiver",
+    "rpp": "Raids Prep Program",
+    "raidtrial": "Raid Trial (staff discretion)",
+    "unsure": "Unsure / just short of requirements",
+}
+
+class ApplicationModal(discord.ui.Modal, title="Novus Membership Application"):
+    def __init__(self, cog, report_id, actor_id):
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.report_id = report_id
+        self.actor_id = actor_id
+        self.account_type = discord.ui.Select(
+            placeholder="Select account type",
+            options=[discord.SelectOption(label="Main", value="Main"), discord.SelectOption(label="Ironman", value="Ironman")],
+            required=True,
+        )
+        self.pathway = discord.ui.Select(
+            placeholder="Select membership option",
+            options=[discord.SelectOption(label=label, value=value) for value, label in APPLICATION_OPTIONS.items()],
+            required=True,
+        )
+        self.referral = discord.ui.TextInput(placeholder="Friend, Reddit, Discord, in-game, etc.", max_length=200, required=True)
+        self.gear = discord.ui.FileUpload(required=True, min_values=1, max_values=4)
+        self.details = discord.ui.TextInput(style=discord.TextStyle.paragraph, max_length=500, required=False, placeholder="Anything else staff should know?")
+        self.add_item(discord.ui.Label(text="Account Type", component=self.account_type))
+        self.add_item(discord.ui.Label(text="Membership Pathway", component=self.pathway))
+        self.add_item(discord.ui.Label(text="How did you find Novus?", component=self.referral))
+        self.add_item(discord.ui.Label(text="Gear Screenshots", component=self.gear, description="Upload 1-4 images of your gear."))
+        self.add_item(discord.ui.Label(text="Additional Information", component=self.details))
+
+    async def on_submit(self, interaction):
+        if interaction.user.id != self.actor_id:
+            await interaction.response.send_message("This application form belongs to another user.", ephemeral=True)
+            return
+        await self.cog.submit_application(interaction, self.report_id, self.account_type.values[0], self.pathway.values[0], str(self.referral.value), self.gear.values, str(self.details.value or ""))
+
 class ApplicationView(discord.ui.View):
-    def __init__(self, cog, rsn=None, verified=False, approved=False):
+    def __init__(self, cog, rsn=None, verified=False, approved=False, submitted=False):
         super().__init__(timeout=None)
         self.cog = cog
         self.remove_item(self.verify_gear if verified else self.undo_gear)
+        if submitted or approved:
+            self.remove_item(self.complete_application)
         if not verified or approved:
             self.remove_item(self.final_approve)
         if approved:
@@ -256,6 +304,10 @@ class ApplicationView(discord.ui.View):
             self.remove_item(self.undo_gear if verified else self.verify_gear)
         if rsn:
             self.add_item(discord.ui.Button(label="View WOM Profile", url="https://wiseoldman.net/players/" + quote(rsn, safe="")))
+
+    @discord.ui.button(label="Complete Application", style=discord.ButtonStyle.primary, custom_id="novus:application:form:v1", row=1)
+    async def complete_application(self, interaction, button):
+        await self.cog.open_application_form(interaction)
 
     @discord.ui.button(label="Refresh Stats", style=discord.ButtonStyle.primary, custom_id="novus:application:refresh:v1")
     async def refresh(self, interaction, button):
@@ -417,7 +469,7 @@ class ApplicationCog(commands.Cog):
                         payload, note = await self.get_payload(rsn, applicant_id, update=False)
                         if payload:
                             reviewer = gear_reviewer(channel.id, message.id)
-                            await message.edit(content=APPLICATION_INTRO, embed=report_embed(rsn, payload, True, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer)), allowed_mentions=discord.AllowedMentions.none())
+                            await message.edit(content=form_content(channel.id, message.id), embed=report_embed(rsn, payload, True, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, message.id))), allowed_mentions=discord.AllowedMentions.none())
                             logger.info("Restyled existing application test report channel=%s message=%s", channel.id, message.id)
                 else:
                     await self.publish(channel)
@@ -496,6 +548,83 @@ class ApplicationCog(commands.Cog):
             await self.publish(await self.bot.fetch_channel(channel.id))
         except Exception:
             logger.exception("Application opening-message report failed")
+
+    def form_allowed(self, channel, actor, report_id):
+        if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY:
+            return False
+        row = get_report(channel.id)
+        return bool(row and row[2] == report_id and (row[0] == actor.id or (channel.id == TEST_CHANNEL and is_staff(actor))))
+
+    async def open_application_form(self, interaction):
+        channel = interaction.channel
+        report_id = interaction.message.id if interaction.message else None
+        if not self.form_allowed(channel, interaction.user, report_id):
+            await interaction.response.send_message("Only the applicant may complete this form.", ephemeral=True)
+            return
+        if final_approval(channel.id, report_id) or form_submission(channel.id, report_id):
+            await interaction.response.send_message("Application already completed. Post any additional details in this ticket.", ephemeral=True)
+            return
+        if gear_reviewer(channel.id, report_id):
+            await interaction.response.send_message("Gear is already verified. Ask staff to undo verification before submitting new gear.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ApplicationModal(self, report_id, interaction.user.id))
+
+    async def submit_application(self, interaction, report_id, account_type, pathway, referral, attachments, details):
+        channel = interaction.channel
+        if not self.form_allowed(channel, interaction.user, report_id):
+            await interaction.response.send_message("This form is no longer available to you.", ephemeral=True)
+            return
+        referral = referral.strip()
+        details = details.strip()
+        if account_type not in ("Main", "Ironman") or pathway not in APPLICATION_OPTIONS or not referral or not 1 <= len(attachments) <= 4:
+            await interaction.response.send_message("Please complete all required fields and include gear screenshots. Reopen the form to try again.", ephemeral=True)
+            return
+        if any(not (a.content_type or "").startswith("image/") for a in attachments):
+            await interaction.response.send_message("Please upload image files only (PNG, JPG, or another supported image format). Reopen the form to try again.", ephemeral=True)
+            return
+        limit = min(getattr(channel.guild, "filesize_limit", 10 * 1024 * 1024), 10 * 1024 * 1024)
+        if any(a.size > limit for a in attachments) or sum(a.size for a in attachments) > 25 * 1024 * 1024:
+            await interaction.response.send_message("Screenshots are too large. Please use smaller images and reopen the form.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        lock = self.locks.setdefault(channel.id, asyncio.Lock())
+        async with lock:
+            if not self.form_allowed(channel, interaction.user, report_id) or final_approval(channel.id, report_id) or form_submission(channel.id, report_id) or gear_reviewer(channel.id, report_id):
+                await interaction.followup.send("Application already submitted, verified or closed. Contact staff for changes.", ephemeral=True)
+                return
+            files = []
+            try:
+                report = await channel.fetch_message(report_id)
+                if report.author.id != self.bot.user.id or not any(e.title == REPORT_TITLE for e in report.embeds):
+                    await interaction.followup.send("The application report is no longer available.", ephemeral=True)
+                    return
+                row = get_report(channel.id)
+                rsn = row[1]
+                escape = discord.utils.escape_markdown
+                response = discord.Embed(title="Application Details", color=discord.Color.blurple())
+                response.description = f"**Applicant:** {escape(rsn)}\n**Account type:** {account_type}\n**Membership option:** {APPLICATION_OPTIONS[pathway]}\n**How you found us:** {escape(referral)}"
+                if details:
+                    response.add_field(name="Additional Information", value=escape(details), inline=False)
+                response.set_footer(text="Gear screenshots attached • Staff review pending")
+                for i, attachment in enumerate(attachments, 1):
+                    suffix = attachment.filename.rsplit(".", 1)[-1].lower()
+                    if not re.fullmatch(r"[a-z0-9]{1,5}", suffix):
+                        suffix = "img"
+                    files.append(await attachment.to_file(filename=f"gear-{i}.{suffix}"))
+                submitted = await channel.send(embed=response, files=files, allowed_mentions=discord.AllowedMentions.none())
+                save_form_submission(channel.id, report_id, interaction.user.id, submitted.id)
+                try:
+                    await report.edit(content=APPLICATION_SUBMITTED, view=ApplicationView(self, rsn, submitted=True), allowed_mentions=discord.AllowedMentions.none())
+                except discord.HTTPException:
+                    logger.exception("Form saved but report button update failed")
+                logger.info("Application form submitted channel=%s report=%s response=%s attachments=%s", channel.id, report_id, submitted.id, len(attachments))
+                await interaction.followup.send("Application submitted. Staff will review your details and gear.", ephemeral=True)
+            except Exception:
+                logger.exception("Application form submission failed channel=%s", channel.id)
+                await interaction.followup.send("Could not submit your application. Check the ticket before trying again or post your details and gear manually.", ephemeral=True)
+            finally:
+                for file in files:
+                    file.close()
 
     async def confirm_approval(self, interaction):
         channel = interaction.channel
@@ -639,7 +768,7 @@ class ApplicationCog(commands.Cog):
                     embed.remove_field(next_index)
                 set_gear_review(channel.id, message_id, reviewer)
                 try:
-                    await message.edit(content=APPLICATION_INTRO, embed=embed, view=ApplicationView(self, rsn, verified=verified), allowed_mentions=discord.AllowedMentions.none())
+                    await message.edit(content=form_content(channel.id, message.id), embed=embed, view=ApplicationView(self, rsn, verified=verified, submitted=bool(form_submission(channel.id, message.id))), allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
                     set_gear_review(channel.id, message_id, previous)
                     raise
@@ -677,7 +806,7 @@ class ApplicationCog(commands.Cog):
                 await interaction.followup.send(note or "WOM unavailable. Existing report retained.", ephemeral=True)
                 return
             reviewer = gear_reviewer(channel.id, interaction.message.id)
-            await interaction.message.edit(content=APPLICATION_INTRO, embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer)), allowed_mentions=discord.AllowedMentions.none())
+            await interaction.message.edit(content=form_content(channel.id, interaction.message.id), embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, interaction.message.id))), allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send("Eligibility report refreshed.", ephemeral=True)
 
 async def setup(bot):

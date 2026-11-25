@@ -71,7 +71,7 @@ class BroadcastConfirmationView(discord.ui.View):
         
         for item in self.children:
             item.disabled = True
-        await interaction.edit_original_response(content="❌ Broadcast cancelled.", view=self)
+        await interaction.edit_original_response(content="✖️ Broadcast cancelled.", view=self)
 
 class OwnerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):

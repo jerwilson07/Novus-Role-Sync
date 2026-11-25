@@ -786,7 +786,7 @@ class WOMBot(
 
                     except Exception as e:
                         print(
-                            f"❌ Error: {e}"
+                            f"✖️ Error: {e}"
                         )
 
                 elif action in [

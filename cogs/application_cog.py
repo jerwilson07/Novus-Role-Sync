@@ -246,7 +246,7 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=No
     target = 100 if special and not standard else 200
     qualified = standard or alternative
     uncertain = not qualified and (incomplete or (total >= 100 and special_unknown))
-    total_indicator = f"{check()} " if qualified else ("" if uncertain else "❌ ")
+    total_indicator = f"{check()} " if qualified else ("" if uncertain else "✖️ ")
     vouch_ready = trial is not None and trial["count"] is not None and trial["count"] >= REQUIRED_VOUCHES
     if standard or alternative:
         pathway = "200+ raid KC" if standard else "100+ raid KC + Inferno/Colosseum"
@@ -256,7 +256,7 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=No
         result = "**KC assessment incomplete**"
         color = discord.Color.gold()
     else:
-        result = "❌ **KC thresholds not met**"
+        result = "✖️ **KC thresholds not met**"
         color = discord.Color.gold()
 
     if vouch_ready and not qualified:
@@ -293,7 +293,7 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=No
     )
     if trial is not None:
         def pathway_status(passed, unknown=False):
-            return f"{check()}" if passed else ("Pending verification" if unknown else "❌")
+            return f"{check()}" if passed else ("Pending verification" if unknown else "✖️")
         count = trial["count"]
         vouches = "Unavailable • staff review" if count is None else f"{(check()+' ') if vouch_ready else ''}{count}/{REQUIRED_VOUCHES} unique vouches"
         graduation = (

@@ -6,13 +6,14 @@ import re
 from contextlib import closing
 
 import discord
+from novus_logging import check, notice, bind_novus_ui
 from discord.ext import commands
 
 from cogs.application_cog import GUILD, CATEGORY, REPORT_TITLE, db, get_report
 from cogs.vouches_cog import VouchesCog, NOVUS_MOD_CHAT_CHANNEL_ID
 
 logger = logging.getLogger("WOMBot")
-VERSION = "membership-style-v2-20261125"
+VERSION = "membership-style-v3-check-20261125"
 
 def brand(embed, logo, footer=None):
     embed.set_thumbnail(url=logo)
@@ -52,9 +53,21 @@ def migrate_details(message, logo):
         embeds.append(extra)
     return embeds
 
+def brand_checks(embed):
+    revised=embed.to_dict()
+    def convert(value):
+        if isinstance(value,str):
+            return value.replace("✅",check())
+        if isinstance(value,list):
+            return [convert(v) for v in value]
+        if isinstance(value,dict):
+            return {k:convert(v) for k,v in value.items()}
+        return value
+    return discord.Embed.from_dict(convert(revised))
+
 def migrate_staff(message, logo):
     content=message.content or ""
-    if len(message.embeds)==1 and message.embeds[0].title in ("Membership Reviewed","✅ Membership Approved"):
+    if len(message.embeds)==1 and message.embeds[0].title in ("Membership Reviewed","✅ Membership Approved",f"{check()} Membership Approved"):
         old=message.embeds[0]
         prefix="Novus Membership • "
         footer=old.footer.text or ""
@@ -171,6 +184,7 @@ class MembershipStyleMigrationCog(commands.Cog):
                                             embed.color=discord.Color.gold()
                                     elif f.name=="Alternative Pathways":
                                         embed.set_field_at(i,name=f.name,value=f.value.rstrip("\n\u200b")+"\n\u200b",inline=f.inline)
+                                embed=brand_checks(embed)
                                 if embed.to_dict()==message.embeds[0].to_dict():
                                     continue
                                 await message.edit(embeds=[embed]+[e.copy() for e in message.embeds[1:]],allowed_mentions=discord.AllowedMentions.none())
@@ -179,6 +193,7 @@ class MembershipStyleMigrationCog(commands.Cog):
                                 if embeds is None:
                                     counts["skipped"]+=1
                                     continue
+                                embeds=[brand_checks(e) for e in embeds]
                                 if [e.to_dict() for e in embeds]==[e.to_dict() for e in message.embeds]:
                                     continue
                                 # Explicitly retain the originals; no download/reupload.
@@ -201,8 +216,14 @@ class MembershipStyleMigrationCog(commands.Cog):
                             continue
                         result=migrate_staff(message,logo)
                         if result is None:
-                            continue
+                            if len(message.embeds)!=1 or message.embeds[0].title not in ("Membership Reviewed","✅ Membership Approved",f"{check()} Membership Approved","New Trial Vouch","Trial Member Ready for Staff Review"):
+                                continue
+                            revised=brand_checks(message.embeds[0])
+                            if revised.to_dict()==message.embeds[0].to_dict():
+                                continue
+                            result=(message.content or "",revised)
                         content,embed=result
+                        embed=brand_checks(embed)
                         await message.edit(content=content,embed=embed,allowed_mentions=discord.AllowedMentions.none())
                         counts["staff"]+=1
                         await asyncio.sleep(0.25)

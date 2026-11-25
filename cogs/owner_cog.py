@@ -1,4 +1,5 @@
 import discord
+from novus_logging import check, notice, bind_novus_ui
 from discord import app_commands
 from discord.ext import commands
 import sqlite3
@@ -59,7 +60,7 @@ class BroadcastConfirmationView(discord.ui.View):
         self.stop()
         
         await interaction.edit_original_response(
-            content=f"✅ Broadcast complete.\nSent to **{sent_count}** servers.\nFailed for **{failed_count}** servers."
+            content=f"{check()} Broadcast complete.\nSent to **{sent_count}** servers.\nFailed for **{failed_count}** servers."
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
@@ -118,7 +119,7 @@ class OwnerCog(commands.Cog):
 
         if not config or not config[0]:
             conn.close()
-            await interaction.followup.send("No WOM Group ID configured for this server. Use `/groupid` to set it.")
+            await notice(interaction, True, "No WOM Group ID configured for this server. Use `/groupid` to set it.")
             return
 
         group_id = config[0]
@@ -128,26 +129,26 @@ class OwnerCog(commands.Cog):
         conn.close()
 
         if not links:
-            await interaction.followup.send("No players have been linked in this server yet. Use `/linkuser` to add one.")
+            await notice(interaction, True, "No players have been linked in this server yet. Use `/linkuser` to add one.")
             return
 
         view = PlayerListView(interaction, links, interaction.guild.name, group_id)
         embed = await view.get_embed()
         view.update_buttons()
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        await notice(interaction, True, embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(name="sync", description="Force sync (Developer Only)")
     @app_commands.describe(group_id="Optional: The Group ID to force sync.")
     @app_commands.checks.has_permissions(administrator=True)
     async def manual_sync(self, interaction: discord.Interaction, group_id: Optional[int] = None):
         if interaction.user.id != self.bot.owner_id:
-            return await interaction.response.send_message("Restricted to Bot Developer.", ephemeral=True)
+            return await notice(interaction, False, "Restricted to Bot Developer.", ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
 
         tasks_cog = self.bot.get_cog('TasksCog')
         if not tasks_cog:
-            return await interaction.followup.send("Tasks cog is not loaded.")
+            return await notice(interaction, True, "Tasks cog is not loaded.")
 
         if group_id:
             conn = sqlite3.connect('wom_multi.db')
@@ -162,14 +163,14 @@ class OwnerCog(commands.Cog):
                 if guild:
                     synced, failed, checked = await tasks_cog.sync_guild(guild, group_id, log_channel_id, nickname_enforcement, dm_notifications_on)
                     logger.info(f"Manual sync finished for Group ID {group_id}. {checked} members checked, {synced} updated, {failed} failed.")
-                    await interaction.followup.send(f"Sync finished for Group ID **{group_id}** in guild **{guild.name}**.\n"
+                    await notice(interaction, True, f"Sync finished for Group ID **{group_id}** in guild **{guild.name}**.\n"
                                                       f"Checked: `{checked}`\n"
                                                       f"Updated: `{synced}`\n"
                                                       f"Failed: `{failed}`")
                 else:
-                    await interaction.followup.send(f"Bot is not in the guild associated with Group ID **{group_id}** (Guild ID: {target_guild_id}). Sync cannot be performed.")
+                    await notice(interaction, True, f"Bot is not in the guild associated with Group ID **{group_id}** (Guild ID: {target_guild_id}). Sync cannot be performed.")
             else:
-                await interaction.followup.send(f"No guild found configured for Group ID **{group_id}**.")
+                await notice(interaction, True, f"No guild found configured for Group ID **{group_id}**.")
         else:
             conn = sqlite3.connect('wom_multi.db')
             c = conn.cursor()
@@ -181,12 +182,12 @@ class OwnerCog(commands.Cog):
                 group_id, log_channel_id, nickname_enforcement, dm_notifications_on = res[0], res[1], res[2], res[3]
                 synced, failed, checked = await tasks_cog.sync_guild(interaction.guild, group_id, log_channel_id, nickname_enforcement, dm_notifications_on)
                 logger.info(f"Manual sync finished for guild {interaction.guild.name}. {checked} members checked, {synced} updated, {failed} failed.")
-                await interaction.followup.send(f"Sync finished for **{interaction.guild.name}**.\n"
+                await notice(interaction, True, f"Sync finished for **{interaction.guild.name}**.\n"
                                                   f"Checked: `{checked}`\n"
                                                   f"Updated: `{synced}`\n"
                                                   f"Failed: `{failed}`")
             else:
-                await interaction.followup.send("No Group ID set for this server.")
+                await notice(interaction, True, "No Group ID set for this server.")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(OwnerCog(bot))

@@ -1,5 +1,6 @@
 import aiohttp
 import discord
+from novus_logging import check, notice, bind_novus_ui
 from discord.ext import commands
 import sqlite3
 import datetime
@@ -777,7 +778,7 @@ class WOMBot(
                             )
 
                         print(
-                            f"✅ Successfully "
+                            f"{check()} Successfully "
                             f"{action}ed cog: "
                             f"{cog_name}"
                         )
@@ -923,6 +924,7 @@ class WOMBot(
 
 if __name__ == "__main__":
     bot = WOMBot()
+    bind_novus_ui(bot)
 
     bot.run(
         TOKEN,

@@ -1,4 +1,5 @@
 import discord
+from novus_logging import check, notice, bind_novus_ui
 from discord import app_commands
 from discord.ext import commands
 import sqlite3
@@ -308,7 +309,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -316,7 +317,7 @@ class ConfigCog(commands.Cog):
             return
 
         if not interaction.guild:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "This command can only be used in a server.",
                 ephemeral=True
             )
@@ -337,7 +338,7 @@ class ConfigCog(commands.Cog):
         if not c.fetchone():
             conn.close()
 
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Please set a Group ID first with `/groupid`.",
                 ephemeral=True
             )
@@ -360,7 +361,7 @@ class ConfigCog(commands.Cog):
             ):
                 conn.close()
 
-                await interaction.response.send_message(
+                await notice(interaction, False, 
                     f"I don't have permission to send messages "
                     f"and embeds in {channel.mention}.",
                     ephemeral=True
@@ -385,13 +386,13 @@ class ConfigCog(commands.Cog):
         conn.close()
 
         if log_channel_id:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"Sync events will now be logged "
                 f"in {channel.mention}.",
                 ephemeral=True
             )
         else:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Sync event logging has been disabled.",
                 ephemeral=True
             )
@@ -412,7 +413,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -448,7 +449,7 @@ class ConfigCog(commands.Cog):
         conn.commit()
         conn.close()
 
-        await interaction.response.send_message(
+        await notice(interaction, False, 
             f"Group ID set to **{group_id}**.",
             ephemeral=True
         )
@@ -477,7 +478,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -485,7 +486,7 @@ class ConfigCog(commands.Cog):
             return
 
         if interaction.guild is None:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "This command can only be used in a server.",
                 ephemeral=True
             )
@@ -509,7 +510,7 @@ class ConfigCog(commands.Cog):
                 ]
             )
 
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"**{wom_role}** cannot be mapped by Novus Sync.\n\n"
                 f"Allowed tenure ranks: **{allowed_roles}**.\n"
                 f"Specialty and achievement roles are intentionally "
@@ -519,14 +520,14 @@ class ConfigCog(commands.Cog):
             return
 
         if discord_role.name.strip().casefold() != wom_role:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "A tenure rank must map to the Discord role with the same name. Other roles cannot be managed by tenure sync.",
                 ephemeral=True,
             )
             return
 
         if discord_role.is_default():
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "The `@everyone` role cannot be used as a "
                 "Novus Sync role mapping.",
                 ephemeral=True
@@ -534,7 +535,7 @@ class ConfigCog(commands.Cog):
             return
 
         if discord_role.managed:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"{discord_role.mention} is managed by Discord or an "
                 f"integration and cannot be used as a Novus Sync mapping.",
                 ephemeral=True
@@ -549,14 +550,14 @@ class ConfigCog(commands.Cog):
             )
 
         if bot_member is None:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "I could not verify my Discord role hierarchy.",
                 ephemeral=True
             )
             return
 
         if not bot_member.guild_permissions.manage_roles:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Novus Sync does not currently have the "
                 "`Manage Roles` permission.",
                 ephemeral=True
@@ -564,7 +565,7 @@ class ConfigCog(commands.Cog):
             return
 
         if discord_role >= bot_member.top_role:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"I cannot manage {discord_role.mention} because it is "
                 f"at or above my highest Discord role. Move the "
                 f"**Novus Sync** bot role above it first.",
@@ -591,7 +592,7 @@ class ConfigCog(commands.Cog):
         if not config or config[0] is None:
             conn.close()
 
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Please set the server's WOM Group ID "
                 "first using `/groupid`.",
                 ephemeral=True
@@ -620,7 +621,7 @@ class ConfigCog(commands.Cog):
         if conflicting_mapping:
             conn.close()
 
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"{discord_role.mention} is already mapped to "
                 f"**{conflicting_mapping[0]}**.\n\n"
                 f"Remove that mapping first with `/unlinkrole`.",
@@ -647,7 +648,7 @@ class ConfigCog(commands.Cog):
         conn.commit()
         conn.close()
 
-        await interaction.response.send_message(
+        await notice(interaction, False, 
             f"Mapped Novus tenure rank **{wom_role.title()}** "
             f"to {discord_role.mention}.",
             ephemeral=True
@@ -671,7 +672,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -701,12 +702,12 @@ class ConfigCog(commands.Cog):
         conn.close()
 
         if changes:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"Mapping for **{wom_role}** removed.",
                 ephemeral=True
             )
         else:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"No mapping was found for **{wom_role}**.",
                 ephemeral=True
             )
@@ -732,7 +733,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -740,7 +741,7 @@ class ConfigCog(commands.Cog):
             return
 
         if not can_manually_link_novus_member(user):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"{user.mention} needs Verified, Member, Trial Member, Guest, or Clan Friend.",
                 ephemeral=True
             )
@@ -765,7 +766,7 @@ class ConfigCog(commands.Cog):
         if not config or config[0] is None:
             conn.close()
 
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Please set the server's WOM Group ID first.",
                 ephemeral=True
             )
@@ -780,7 +781,7 @@ class ConfigCog(commands.Cog):
         if not raw_accounts:
             conn.close()
 
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Please provide at least one RuneScape name.",
                 ephemeral=True
             )
@@ -815,7 +816,7 @@ class ConfigCog(commands.Cog):
         desired_nickname = separator.join(unique_accounts)
         if len(desired_nickname) > 32:
             conn.close()
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "That linked nickname is longer than Discord's 32-character "
                 "limit. Shorten the list of visible alts and try again; "
                 "no links were changed.",
@@ -934,7 +935,7 @@ class ConfigCog(commands.Cog):
             link_status = (
                 "Account link saved. Linking does not grant clan membership or a tenure role."
             )
-        await interaction.followup.send(
+        await notice(interaction, True, 
             f"Linked {user.mention}.\n\n"
             f"**Primary RSN:** `{primary_rsn}`\n"
             f"**Alt accounts:**\n{alt_text}\n\n"
@@ -2260,7 +2261,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -2275,7 +2276,7 @@ class ConfigCog(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
@@ -2299,7 +2300,7 @@ class ConfigCog(commands.Cog):
             conn.close()
 
         if not config or not config[0]:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "No WOM group is configured.",
                 ephemeral=True
             )
@@ -2318,7 +2319,7 @@ class ConfigCog(commands.Cog):
             ) as response:
 
                 if response.status != 200:
-                    await interaction.followup.send(
+                    await notice(interaction, True, 
                         f"Wise Old Man returned API "
                         f"error `{response.status}`.",
                         ephemeral=True
@@ -2332,7 +2333,7 @@ class ConfigCog(commands.Cog):
                 f"/autolink WOM request failed: {e}"
             )
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Could not retrieve the Novus WOM group.",
                 ephemeral=True
             )
@@ -2343,7 +2344,7 @@ class ConfigCog(commands.Cog):
             data
         )
 
-        await interaction.followup.send(
+        await notice(interaction, True, 
             self.format_autolink_result(
                 result
             ),
@@ -2365,7 +2366,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -2380,7 +2381,7 @@ class ConfigCog(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This command can only be used "
                 "inside the Novus server.",
                 ephemeral=True
@@ -2406,7 +2407,7 @@ class ConfigCog(commands.Cog):
         if not config or not config[0]:
             conn.close()
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "No WOM group is configured.",
                 ephemeral=True
             )
@@ -2429,7 +2430,7 @@ class ConfigCog(commands.Cog):
                 if response.status != 200:
                     conn.close()
 
-                    await interaction.followup.send(
+                    await notice(interaction, True, 
                         f"Wise Old Man returned API "
                         f"error `{response.status}`.",
                         ephemeral=True
@@ -2445,7 +2446,7 @@ class ConfigCog(commands.Cog):
                 f"/audit WOM request failed: {e}"
             )
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Could not retrieve the Novus WOM group.",
                 ephemeral=True
             )
@@ -2661,7 +2662,7 @@ class ConfigCog(commands.Cog):
                 + "\n\n...audit shortened."
             )
 
-        await interaction.followup.send(
+        await notice(interaction, True, 
             response,
             ephemeral=True
         )
@@ -2685,7 +2686,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -2700,7 +2701,7 @@ class ConfigCog(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This command can only be used "
                 "inside the Novus server.",
                 ephemeral=True
@@ -2709,7 +2710,7 @@ class ConfigCog(commands.Cog):
 
         non_clan = has_non_clan_role(member)
         if not non_clan and not has_novus_member_role(member):
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"{member.mention} isn't an active Novus clan member "
                 "(Discord Member role required).",
                 ephemeral=True
@@ -2735,7 +2736,7 @@ class ConfigCog(commands.Cog):
         if not config or not config[0]:
             conn.close()
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "No WOM group is configured.",
                 ephemeral=True
             )
@@ -2761,7 +2762,7 @@ class ConfigCog(commands.Cog):
         if not primary:
             conn.close()
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"{member.mention} is not linked yet. "
                 f"Use `/linkuser` first.",
                 ephemeral=True
@@ -2790,7 +2791,7 @@ class ConfigCog(commands.Cog):
 
         if non_clan:
             alts = "\n".join(f"- `{rsn}`" for rsn, _ in alt_rows) or "None"
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"**Saved non-clan link for {member.mention}**\n"
                 f"Primary RSN: `{primary_rsn}`\n"
                 f"Alt accounts:\n{alts}\n"
@@ -2812,7 +2813,7 @@ class ConfigCog(commands.Cog):
             ) as response:
 
                 if response.status != 200:
-                    await interaction.followup.send(
+                    await notice(interaction, True, 
                         f"Wise Old Man returned API "
                         f"error `{response.status}`.",
                         ephemeral=True
@@ -2826,7 +2827,7 @@ class ConfigCog(commands.Cog):
                 f"/accounts WOM request failed: {e}"
             )
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Could not retrieve the Novus WOM group.",
                 ephemeral=True
             )
@@ -2840,7 +2841,7 @@ class ConfigCog(commands.Cog):
         if not is_active_novus_member_link(
             member, primary_rsn, primary_wom_id, memberships
         ):
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"{member.mention} isn't in the current Novus WOM group "
                 "and is excluded from clan reports.",
                 ephemeral=True
@@ -2974,7 +2975,7 @@ class ConfigCog(commands.Cog):
                 + "\n\n...report shortened."
             )
 
-        await interaction.followup.send(
+        await notice(interaction, True, 
             response,
             ephemeral=True
         )
@@ -2994,7 +2995,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -3045,7 +3046,7 @@ class ConfigCog(commands.Cog):
             "confirm the member's RSN first."
         )
 
-        await interaction.response.send_message(
+        await notice(interaction, False, 
             response,
             ephemeral=True
         )
@@ -3065,7 +3066,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -3080,7 +3081,7 @@ class ConfigCog(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This command can only be used "
                 "inside the Novus server.",
                 ephemeral=True
@@ -3106,7 +3107,7 @@ class ConfigCog(commands.Cog):
         if not config or not config[0]:
             conn.close()
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "No WOM group is configured.",
                 ephemeral=True
             )
@@ -3149,7 +3150,7 @@ class ConfigCog(commands.Cog):
             ) as response:
 
                 if response.status != 200:
-                    await interaction.followup.send(
+                    await notice(interaction, True, 
                         f"Wise Old Man returned API "
                         f"error `{response.status}`.",
                         ephemeral=True
@@ -3163,7 +3164,7 @@ class ConfigCog(commands.Cog):
                 f"/unmatched WOM request failed: {e}"
             )
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Could not retrieve the Novus WOM group.",
                 ephemeral=True
             )
@@ -3223,7 +3224,7 @@ class ConfigCog(commands.Cog):
         )
 
         if not unmatched_accounts:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"**Novus WOM Link Audit**\n\n"
                 f"Current WOM clan accounts: "
                 f"**{len(memberships)}**\n"
@@ -3255,7 +3256,7 @@ class ConfigCog(commands.Cog):
                 + "\n\n...report shortened."
             )
 
-        await interaction.followup.send(
+        await notice(interaction, True, 
             response,
             ephemeral=True
         )
@@ -3276,7 +3277,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -3323,13 +3324,13 @@ class ConfigCog(commands.Cog):
             primary_changes > 0
             or alt_changes > 0
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"{user.mention} and all associated "
                 f"RuneScape accounts have been unlinked.",
                 ephemeral=True
             )
         else:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"{user.mention} does not have "
                 f"any linked accounts.",
                 ephemeral=True
@@ -3366,7 +3367,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -3401,7 +3402,7 @@ class ConfigCog(commands.Cog):
         conn.commit()
         conn.close()
 
-        await interaction.response.send_message(
+        await notice(interaction, False, 
             f"Nickname enforcement has been "
             f"set to `{state.name}`.",
             ephemeral=True
@@ -3454,7 +3455,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -3496,12 +3497,12 @@ class ConfigCog(commands.Cog):
         conn.close()
 
         if reminder_days == 0:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Inactivity reminders have been disabled.",
                 ephemeral=True
             )
         else:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"Inactivity reminders will be sent after "
                 f"**{interval.name}** of no sync changes.",
                 ephemeral=True
@@ -3538,7 +3539,7 @@ class ConfigCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator "
                 "to use this command.",
                 ephemeral=True
@@ -3572,12 +3573,12 @@ class ConfigCog(commands.Cog):
         conn.close()
 
         if new_state:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Players will now receive role-change DMs.",
                 ephemeral=True
             )
         else:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Players will no longer receive role-change DMs.",
                 ephemeral=True
             )

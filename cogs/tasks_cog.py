@@ -1,5 +1,6 @@
 from novus_logging import start_logged_task
 import discord
+from novus_logging import check, notice, bind_novus_ui
 from discord import app_commands
 from discord.ext import tasks, commands
 from zoneinfo import ZoneInfo
@@ -3234,7 +3235,7 @@ class TasksCog(commands.Cog):
         member: discord.Member
     ):
         if not has_novus_command_permission(interaction.user):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Only Novus staff can inspect historical tenure.",
                 ephemeral=True
             )
@@ -3243,7 +3244,7 @@ class TasksCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         if guild is None or not has_novus_member_role(member):
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Select an active Discord Novus Member.",
                 ephemeral=True
             )
@@ -3264,7 +3265,7 @@ class TasksCog(commands.Cog):
             )
             link = c.fetchone()
             if not group_id or not link:
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "This member must have a linked primary RSN and a configured WOM group.",
                     ephemeral=True
                 )
@@ -3272,7 +3273,7 @@ class TasksCog(commands.Cog):
 
             group_data, api_status = await self.get_wom_group(group_id)
             if not isinstance(group_data, dict):
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "WOM group data is unavailable; no tenure records were changed.",
                     ephemeral=True
                 )
@@ -3282,7 +3283,7 @@ class TasksCog(commands.Cog):
             if not is_active_novus_member_link(
                 member, link[0], link[1], memberships
             ):
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "This account is not a current Novus WOM member.",
                     ephemeral=True
                 )
@@ -3362,7 +3363,7 @@ class TasksCog(commands.Cog):
         if len(response) > 1900:
             response = response[:1850] + "\n...additional details omitted."
 
-        await interaction.followup.send(response, ephemeral=True)
+        await notice(interaction, True, response, ephemeral=True)
 
     # ========================================================
     # /TENURE
@@ -3383,7 +3384,7 @@ class TasksCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
@@ -3397,7 +3398,7 @@ class TasksCog(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
@@ -3420,7 +3421,7 @@ class TasksCog(commands.Cog):
             row = c.fetchone()
 
             if not row or not row[0]:
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "No Wise Old Man group is configured.",
                     ephemeral=True
                 )
@@ -3434,7 +3435,7 @@ class TasksCog(commands.Cog):
                 group_data,
                 dict
             ):
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "Could not retrieve the Novus WOM group.",
                     ephemeral=True
                 )
@@ -3458,7 +3459,7 @@ class TasksCog(commands.Cog):
             )
 
             if not accounts:
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "No linked account for that member is currently in the Novus WOM clan.",
                     ephemeral=True
                 )
@@ -3653,7 +3654,7 @@ class TasksCog(commands.Cog):
 
             conn.commit()
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 response,
                 ephemeral=True
             )
@@ -3683,7 +3684,7 @@ class TasksCog(commands.Cog):
             (role.id in TENURE_CREDIT_ROLE_IDS or role.id == 1532829195657285843)
             for role in interaction.user.roles
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Only Novus Founder, Council or Moderators can set historical tenure.",
                 ephemeral=True
             )
@@ -3692,7 +3693,7 @@ class TasksCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         if guild is None or not has_novus_member_role(member):
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This requires an active Discord Novus Member.",
                 ephemeral=True
             )
@@ -3714,7 +3715,7 @@ class TasksCog(commands.Cog):
             link = c.fetchone()
 
             if not group_id or not link:
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "This member must have a linked primary RSN and a configured WOM group.",
                     ephemeral=True
                 )
@@ -3722,7 +3723,7 @@ class TasksCog(commands.Cog):
 
             group_data, status = await self.get_wom_group(group_id)
             if not isinstance(group_data, dict):
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "WOM is unavailable. No historical credit was changed.",
                     ephemeral=True
                 )
@@ -3732,7 +3733,7 @@ class TasksCog(commands.Cog):
             if not is_active_novus_member_link(
                 member, link[0], link[1], memberships
             ):
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "The linked primary account is not in the current Novus WOM group.",
                     ephemeral=True
                 )
@@ -3744,7 +3745,7 @@ class TasksCog(commands.Cog):
             player_id = current_membership["player"]["id"]
             joined_at = get_membership_joined_at(current_membership)
             if joined_at is None:
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "WOM has no current clan join date. No credit was changed.",
                     ephemeral=True
                 )
@@ -3754,7 +3755,7 @@ class TasksCog(commands.Cog):
             await self.prepare_tenure_history(c, guild, group_data)
             if previous_days and get_tenure_reset(c, guild.id, group_id, player_id):
                 conn.commit()
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "This account has a confirmed tenure reset. Earlier stints cannot be credited.",
                     ephemeral=True,
                 )
@@ -3780,7 +3781,7 @@ class TasksCog(commands.Cog):
                 "The current stint is counted separately. "
                 "Use `/syncuser` to recalculate their rank now."
             )
-            await interaction.followup.send(message, ephemeral=True)
+            await notice(interaction, True, message, ephemeral=True)
         finally:
             conn.close()
 
@@ -3803,7 +3804,7 @@ class TasksCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
@@ -3817,7 +3818,7 @@ class TasksCog(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
@@ -3841,7 +3842,7 @@ class TasksCog(commands.Cog):
 
         if not config or not config[0]:
             conn.close()
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "No Wise Old Man group is configured.",
                 ephemeral=True
             )
@@ -3862,7 +3863,7 @@ class TasksCog(commands.Cog):
                 else "The Wise Old Man API request failed."
             )
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 message,
                 ephemeral=True
             )
@@ -3883,7 +3884,7 @@ class TasksCog(commands.Cog):
         status = result["status"]
 
         if status == "non_clan_ignored":
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"{member.mention} has Guest or Clan Friend and is excluded "
                 "from clan rank sync. Saved account links are kept.",
                 ephemeral=True
@@ -3891,7 +3892,7 @@ class TasksCog(commands.Cog):
             return
 
         if status == "not_linked":
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"{member.mention} is not linked yet. Use `/linkuser` first.",
                 ephemeral=True
             )
@@ -3910,7 +3911,7 @@ class TasksCog(commands.Cog):
                 if removed_roles
                 else "no removable membership roles were present"
             )
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"{member.mention} has no linked RSN currently active in Novus. "
                 f"Removed: {removed_text}. Saved account links and tenure history "
                 "were preserved for audit.",
@@ -3922,7 +3923,7 @@ class TasksCog(commands.Cog):
             "inactive_cleanup_forbidden",
             "inactive_cleanup_error"
         ):
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"{member.mention} has no active linked RSN, but I could not "
                 "remove the Member/tenure roles. Check the bot's Manage Roles "
                 "permission and role hierarchy.",
@@ -3931,7 +3932,7 @@ class TasksCog(commands.Cog):
             return
 
         if status == "not_current_member":
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"{member.mention} is not an active Novus member. "
                 "The Discord Member role and at least one linked RSN in the "
                 "current Novus WOM group are required.",
@@ -3940,7 +3941,7 @@ class TasksCog(commands.Cog):
             return
 
         if status == "staff_role_missing":
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"Found `{result['rsn']}` as WOM rank "
                 f"`{result['wom_role']}`, but the matching "
                 f"Novus staff role could not be found.",
@@ -3949,7 +3950,7 @@ class TasksCog(commands.Cog):
             return
 
         if status == "forbidden":
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "I could not update that member's roles. Check the Novus Sync "
                 "role hierarchy and Manage Roles permission.",
                 ephemeral=True
@@ -3957,7 +3958,7 @@ class TasksCog(commands.Cog):
             return
 
         if status == "error":
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Something went wrong while updating that member's roles.",
                 ephemeral=True
             )
@@ -4094,7 +4095,7 @@ class TasksCog(commands.Cog):
                 )
             )
 
-        await interaction.followup.send(
+        await notice(interaction, True, 
             response[:1950],
             ephemeral=True
         )
@@ -4114,7 +4115,7 @@ class TasksCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
@@ -4128,7 +4129,7 @@ class TasksCog(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
@@ -4151,7 +4152,7 @@ class TasksCog(commands.Cog):
             row = c.fetchone()
 
             if not row or not row[0]:
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "No Wise Old Man group is configured.",
                     ephemeral=True
                 )
@@ -4165,7 +4166,7 @@ class TasksCog(commands.Cog):
                 group_data,
                 dict
             ):
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "Could not retrieve the Novus WOM group.",
                     ephemeral=True
                 )
@@ -4523,7 +4524,7 @@ class TasksCog(commands.Cog):
 
             conn.commit()
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 response,
                 ephemeral=True
             )
@@ -4546,7 +4547,7 @@ class TasksCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
@@ -4560,7 +4561,7 @@ class TasksCog(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
@@ -4584,7 +4585,7 @@ class TasksCog(commands.Cog):
 
         if not config or not config[0]:
             conn.close()
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "No Wise Old Man group is configured.",
                 ephemeral=True
             )
@@ -4598,7 +4599,7 @@ class TasksCog(commands.Cog):
             clear_staff_role_removal_candidates(c, guild.id)
             conn.commit()
             conn.close()
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Could not retrieve the Novus WOM group.",
                 ephemeral=True
             )
@@ -4961,7 +4962,7 @@ class TasksCog(commands.Cog):
                 + "\n\n...additional sync details omitted."
             )
 
-        await interaction.followup.send(
+        await notice(interaction, True, 
             response,
             ephemeral=True
         )
@@ -4981,7 +4982,7 @@ class TasksCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
@@ -4995,7 +4996,7 @@ class TasksCog(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
@@ -5018,7 +5019,7 @@ class TasksCog(commands.Cog):
             config = c.fetchone()
 
             if not config or not config[0]:
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "No Wise Old Man group is configured.",
                     ephemeral=True
                 )
@@ -5032,7 +5033,7 @@ class TasksCog(commands.Cog):
                 group_data,
                 dict
             ):
-                await interaction.followup.send(
+                await notice(interaction, True, 
                     "Could not retrieve the Novus WOM group.",
                     ephemeral=True
                 )
@@ -5157,7 +5158,7 @@ class TasksCog(commands.Cog):
 
             conn.commit()
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 response,
                 ephemeral=True
             )
@@ -5319,7 +5320,7 @@ class TasksCog(commands.Cog):
         if not has_novus_command_permission(
             interaction.user
         ):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
@@ -5333,7 +5334,7 @@ class TasksCog(commands.Cog):
         guild = interaction.guild
 
         if guild is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "This command can only be used inside the Novus server.",
                 ephemeral=True
             )
@@ -5357,7 +5358,7 @@ class TasksCog(commands.Cog):
 
         if not config or not config[0]:
             conn.close()
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "No Wise Old Man group is configured.",
                 ephemeral=True
             )
@@ -5369,7 +5370,7 @@ class TasksCog(commands.Cog):
 
         if group_data is None:
             conn.close()
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Could not retrieve the Novus WOM group.",
                 ephemeral=True
             )
@@ -5521,7 +5522,7 @@ class TasksCog(commands.Cog):
                     )
                 )
 
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 response[:1950],
                 ephemeral=True
             )
@@ -5597,7 +5598,7 @@ class TasksCog(commands.Cog):
                 + "\n\n...additional trial members omitted."
             )
 
-        await interaction.followup.send(
+        await notice(interaction, True, 
             response,
             ephemeral=True
         )

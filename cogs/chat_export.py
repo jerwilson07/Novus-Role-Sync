@@ -9,6 +9,7 @@ import logging
 import os
 
 import discord
+from novus_logging import check, notice, bind_novus_ui
 from discord import app_commands
 from discord.ext import commands
 
@@ -38,19 +39,19 @@ class ChatExport(commands.Cog):
         before: str | None = None,
     ):
         if interaction.user.id != OWNER_ID:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You are not authorized to use this command.", ephemeral=True
             )
             return
 
         if channel.guild.id != interaction.guild_id or channel.name not in ALLOWED_CHANNEL_NAMES:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Only #council-chat and #mod-chat may be exported.", ephemeral=True
             )
             return
 
         if not self.bot.intents.message_content:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Export is disabled until the Message Content intent is enabled "
                 "in Discord's Developer Portal and EXPORT_MESSAGE_CONTENT_ENABLED=true "
                 "is configured for this bot.",
@@ -61,7 +62,7 @@ class ChatExport(commands.Cog):
         cursor = None
         if before:
             if not before.isdecimal():
-                await interaction.response.send_message(
+                await notice(interaction, False, 
                     "The before field must be a Discord message ID.", ephemeral=True
                 )
                 return
@@ -87,14 +88,14 @@ class ChatExport(commands.Cog):
                     ],
                 })
         except discord.Forbidden:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Bot lacks permission to view this channel or read its history.",
                 ephemeral=True,
             )
             return
         except discord.HTTPException:
             logger.exception("Staff export Discord API error")
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Discord could not complete this export.", ephemeral=True
             )
             return
@@ -102,7 +103,7 @@ class ChatExport(commands.Cog):
         records.reverse()
         payload = json.dumps(records, ensure_ascii=False, indent=2).encode("utf-8")
         if len(payload) > 7_000_000:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Export exceeds the safe attachment size. Retry with a smaller limit.",
                 ephemeral=True,
             )
@@ -115,7 +116,7 @@ class ChatExport(commands.Cog):
             f" To continue backward, run again with before:{next_before}."
             if next_before else ""
         )
-        await interaction.followup.send(
+        await notice(interaction, True, 
             f"Exported {len(records)} messages from {channel.mention}."
             + next_note
             + " This is a private response; handle the file as confidential.",

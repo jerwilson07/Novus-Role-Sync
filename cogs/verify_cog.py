@@ -6,6 +6,7 @@ import re
 import sqlite3
 
 import discord
+from novus_logging import check, notice, bind_novus_ui
 from discord import app_commands
 from discord.ext import commands
 
@@ -61,6 +62,7 @@ class VerifyView(discord.ui.View):
     def __init__(self, cog):
         super().__init__(timeout=None)
         self.cog = cog
+        self.verify_button.emoji = check()
 
     @discord.ui.button(
         label="Click Here to Verify Your RSN",
@@ -70,7 +72,7 @@ class VerifyView(discord.ui.View):
     )
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild_id != NOVUS_GUILD_ID:
-            await interaction.response.send_message("This button is only available in Novus.", ephemeral=True)
+            await notice(interaction, False, "This button is only available in Novus.", ephemeral=True)
             return
         await interaction.response.send_modal(VerifyModal(self.cog))
 
@@ -100,7 +102,7 @@ class VerifyCog(commands.Cog):
         try:
             reviewed = already and not was_trial
             embed = discord.Embed(
-                title="Membership Reviewed" if reviewed else "✅ Membership Approved",
+                title="Membership Reviewed" if reviewed else f"{check()} Membership Approved",
                 color=discord.Color.blurple() if reviewed else discord.Color.green(),
                 timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
@@ -108,7 +110,7 @@ class VerifyCog(commands.Cog):
             if not reviewed:
                 embed.add_field(name="Pathway", value=(pathway or "Manual staff approval (/approve)")+"\n\u200b", inline=False)
             embed.add_field(name="Reviewed by" if reviewed else "Approved by", value=actor.mention+"\n\u200b", inline=False)
-            status = "Existing member • No promotion required" if reviewed else ("✅ Trial Member → Member" if was_trial else "✅ Member access granted")
+            status = "Existing member • No promotion required" if reviewed else (f"{check()} Trial Member → Member" if was_trial else f"{check()} Member access granted")
             embed.add_field(name="Status", value=status, inline=False)
             embed.set_footer(text="Novus Membership")
             logo = guild.icon or self.bot.user.display_avatar
@@ -128,7 +130,7 @@ class VerifyCog(commands.Cog):
     async def verify_rsn(self, interaction: discord.Interaction, username: str):
         guild = interaction.guild
         if guild is None or guild.id != NOVUS_GUILD_ID:
-            await interaction.response.send_message("This command is only available in Novus.", ephemeral=True)
+            await notice(interaction, False, "This command is only available in Novus.", ephemeral=True)
             return
         try:
             nickname = parse_rsn(username)
@@ -137,7 +139,7 @@ class VerifyCog(commands.Cog):
             if guest is None:
                 raise ValueError("Guest role is not configured.")
         except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            await notice(interaction, False, str(exc), ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         try:
@@ -156,10 +158,10 @@ class VerifyCog(commands.Cog):
                     ).fetchone()
                 claimed = {sanitize_rsn(row[0]).casefold() for row in rows if row[0]}
                 if claimed.intersection(submitted):
-                    await interaction.followup.send("An entered RSN is already linked to another Discord account. Please contact staff.", ephemeral=True)
+                    await notice(interaction, True, "An entered RSN is already linked to another Discord account. Please contact staff.", ephemeral=True)
                     return
                 if own and own[0] and sanitize_rsn(own[0]).casefold() != submitted[0]:
-                    await interaction.followup.send("Your saved primary account differs from the submitted RSN. If you changed your in-game name, allow WOM to update your link first. To switch primary accounts, contact staff.", ephemeral=True)
+                    await notice(interaction, True, "Your saved primary account differs from the submitted RSN. If you changed your in-game name, allow WOM to update your link first. To switch primary accounts, contact staff.", ephemeral=True)
                     return
                 was_verified = verified in member.roles
                 role_names = {role.name.strip().casefold() for role in member.roles}
@@ -171,7 +173,7 @@ class VerifyCog(commands.Cog):
                     await member.remove_roles(guest, reason="Novus /rsn")
         except discord.HTTPException:
             logger.exception("RSN verification failed for %s", interaction.user.id)
-            await interaction.followup.send("Could not complete verification. Please contact staff or retry; some changes may already have applied.", ephemeral=True)
+            await notice(interaction, True, "Could not complete verification. Please contact staff or retry; some changes may already have applied.", ephemeral=True)
             return
         view = discord.ui.View()
         rsn = discord.utils.escape_markdown(nickname)
@@ -201,7 +203,7 @@ class VerifyCog(commands.Cog):
         logo = guild.icon or self.bot.user.display_avatar
         embed.set_thumbnail(url=logo.url)
         kwargs = {"view": view} if view.children else {}
-        await interaction.followup.send(embed=embed, ephemeral=True, **kwargs)
+        await notice(interaction, True, embed=embed, ephemeral=True, **kwargs)
         application_cog = self.bot.get_cog("ApplicationCog")
         if application_cog is not None:
             try:
@@ -349,26 +351,26 @@ class VerifyCog(commands.Cog):
     async def approve(self, interaction: discord.Interaction, member: discord.Member):
         guild = interaction.guild
         if guild is None or guild.id != NOVUS_GUILD_ID:
-            await interaction.response.send_message("This command is only available in Novus.", ephemeral=True)
+            await notice(interaction, False, "This command is only available in Novus.", ephemeral=True)
             return
         staff_ids = set(NOVUS_COMMAND_ROLE_IDS) | {1532829195657285843}
         if not any(r.id in staff_ids for r in interaction.user.roles):
-            await interaction.response.send_message("Only Founder, Council, Moderators and Trial Moderators can approve members.", ephemeral=True)
+            await notice(interaction, False, "Only Founder, Council, Moderators and Trial Moderators can approve members.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         try:
             member, already, logged = await self.approve_member(guild, interaction.user, member)
         except ValueError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
+            await notice(interaction, True, str(exc), ephemeral=True)
             return
         except discord.HTTPException:
             logger.exception("Approval failed for %s", member.id)
-            await interaction.followup.send("Could not complete approval. Please check roles and retry; some changes may already have applied.", ephemeral=True)
+            await notice(interaction, True, "Could not complete approval. Please check roles and retry; some changes may already have applied.", ephemeral=True)
             return
         message = f"{member.mention} is approved. Existing ranks and Verified are preserved. WOM linking and tenure are handled by the existing sync."
         if not logged:
             message += " Staff log could not be sent."
-        await interaction.followup.send(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        await notice(interaction, True, message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     async def approve_member(self, guild, actor, member, *, pathway=None):
         """Shared role transition for /approve and ticket approval."""

@@ -6,6 +6,7 @@ import os
 import sqlite3
 
 import discord
+from novus_logging import check, notice, bind_novus_ui
 from discord import app_commands
 from discord.ext import commands
 
@@ -280,7 +281,7 @@ class VouchesCog(commands.Cog):
                 color=discord.Color.green(),
                 timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
-            embed.add_field(name="Vouch Progress", value=f"✅ **{len(rows)}/{REQUIRED_VOUCHES}** unique vouches", inline=False)
+            embed.add_field(name="Vouch Progress", value=f"{check()} **{len(rows)}/{REQUIRED_VOUCHES}** unique vouches", inline=False)
             embed.add_field(name="Application Status", value="Vouch requirement met\nStaff approval pending", inline=False)
             embed.set_footer(text="Novus Membership • Raid Trial")
             embed.set_thumbnail(url=(guild.icon or self.bot.user.display_avatar).url)
@@ -324,25 +325,25 @@ class VouchesCog(commands.Cog):
         comments: str = "",
     ):
         if not is_eligible_voucher(interaction.user):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Only full Novus Members and staff can submit vouches.",
                 ephemeral=True,
             )
             return
         if not is_trial(trial_member):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "The first selection must have the Trial Member role.",
                 ephemeral=True,
             )
             return
         if trial_member.id == interaction.user.id:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You cannot vouch for yourself.", ephemeral=True
             )
             return
         comments = comments.strip()
         if len(comments) > 500:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Comments must be 500 characters or fewer.", ephemeral=True
             )
             return
@@ -354,7 +355,7 @@ class VouchesCog(commands.Cog):
         )
         rows = get_vouches(interaction.guild_id, trial_member.id)
         if not inserted:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 f"You have already vouched for {trial_member.mention}. "
                 "Each member can only vouch once per trial member.",
                 ephemeral=True,
@@ -380,7 +381,7 @@ class VouchesCog(commands.Cog):
             )
         elif len(rows) >= REQUIRED_VOUCHES:
             message += "\nThe 3-vouch staff notification was already sent."
-        await interaction.followup.send(message, ephemeral=True)
+        await notice(interaction, True, message, ephemeral=True)
 
     @app_commands.command(
         name="vouches",
@@ -393,7 +394,7 @@ class VouchesCog(commands.Cog):
         self, interaction: discord.Interaction, trial_member: str
     ):
         if not is_staff(interaction.user):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Only Trial Moderators, Moderators, and Council may view vouches.",
                 ephemeral=True,
             )
@@ -402,7 +403,7 @@ class VouchesCog(commands.Cog):
         # Autocomplete values are Discord IDs, not mutable display names.
         # Validate again on execution since an API user can submit arbitrary text.
         if not trial_member.isdecimal():
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Please select a trial member from the suggestions.",
                 ephemeral=True,
             )
@@ -414,7 +415,7 @@ class VouchesCog(commands.Cog):
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 member = None
         if member is None or not is_trial(member):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "This person is not a current Trial Member. Select a trial member from the suggestions.",
                 ephemeral=True,
             )
@@ -429,7 +430,7 @@ class VouchesCog(commands.Cog):
         )
         embed.add_field(
             name="Vouch Progress",
-            value=f"{'✅' if len(rows) >= REQUIRED_VOUCHES else '▫️'} **{len(rows)}/{REQUIRED_VOUCHES}** unique vouches\n\u200b",
+            value=f"{check() if len(rows) >= REQUIRED_VOUCHES else '▫️'} **{len(rows)}/{REQUIRED_VOUCHES}** unique vouches\n\u200b",
             inline=False,
         )
         add_vouch_feedback(embed, rows)
@@ -442,7 +443,7 @@ class VouchesCog(commands.Cog):
                 else "Pending — check the staff notification channel",
                 inline=False,
             )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await notice(interaction, False, embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

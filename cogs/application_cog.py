@@ -11,6 +11,7 @@ from contextlib import closing
 from urllib.parse import quote
 
 import discord
+from novus_logging import check, notice, bind_novus_ui
 from discord.ext import commands, tasks
 
 from common import WOM_API_KEY, sanitize_rsn
@@ -101,7 +102,7 @@ def set_gear_review(channel_id, message_id, reviewer_id):
             conn.execute("INSERT OR REPLACE INTO application_gear_reviews VALUES (?, ?, ?, ?)", (channel_id, message_id, reviewer_id, datetime.datetime.now(datetime.timezone.utc).isoformat()))
 
 def gear_status(reviewer_id):
-    return f"✅ **Gear requirement met** (verified by <@{reviewer_id}>)" if reviewer_id else "▫️ Gear verification pending"
+    return f"{check()} **Gear requirement met** (verified by <@{reviewer_id}>)" if reviewer_id else "▫️ Gear verification pending"
 
 PATHWAYS = {
     "standard": "200+ total raid KC",
@@ -245,11 +246,11 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=No
     target = 100 if special and not standard else 200
     qualified = standard or alternative
     uncertain = not qualified and (incomplete or (total >= 100 and special_unknown))
-    total_indicator = "✅ " if qualified else ("" if uncertain else "❌ ")
+    total_indicator = f"{check()} " if qualified else ("" if uncertain else "❌ ")
     vouch_ready = trial is not None and trial["count"] is not None and trial["count"] >= REQUIRED_VOUCHES
     if standard or alternative:
         pathway = "200+ raid KC" if standard else "100+ raid KC + Inferno/Colosseum"
-        result = f"✅ **KC requirement met** ({pathway})"
+        result = f"{check()} **KC requirement met** ({pathway})"
         color = discord.Color.green()
     elif uncertain:
         result = "**KC assessment incomplete**"
@@ -259,7 +260,7 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=No
         color = discord.Color.gold()
 
     if vouch_ready and not qualified:
-        result = "✅ **Raid Trial vouch requirement met**"
+        result = f"{check()} **Raid Trial vouch requirement met**"
         color = discord.Color.green()
     elif trial is not None and not qualified:
         color = discord.Color.gold()
@@ -292,9 +293,9 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=No
     )
     if trial is not None:
         def pathway_status(passed, unknown=False):
-            return "✅" if passed else ("Pending verification" if unknown else "❌")
+            return f"{check()}" if passed else ("Pending verification" if unknown else "❌")
         count = trial["count"]
-        vouches = "Unavailable • staff review" if count is None else f"{'✅ ' if vouch_ready else ''}{count}/{REQUIRED_VOUCHES} unique vouches"
+        vouches = "Unavailable • staff review" if count is None else f"{(check()+' ') if vouch_ready else ''}{count}/{REQUIRED_VOUCHES} unique vouches"
         graduation = (
             f"**Raid Trial:** {vouches}\n"
             f"**200+ total raid KC:** {pathway_status(standard, incomplete)}\n"
@@ -365,7 +366,7 @@ class ApplicationModal(discord.ui.Modal, title="Novus Membership Application"):
 
     async def on_submit(self, interaction):
         if interaction.user.id != self.actor_id:
-            await interaction.response.send_message("This application form belongs to another user.", ephemeral=True)
+            await notice(interaction, False, "This application form belongs to another user.", ephemeral=True)
             return
         await self.cog.submit_application(interaction, self.report_id, self.account_type.values[0], self.pathway.values[0], str(self.referral.value), self.gear.values, str(self.details.value or ""))
 
@@ -434,7 +435,7 @@ class ApprovalChoice(discord.ui.View):
     ])
     async def choose(self, interaction, select):
         if interaction.user.id != self.actor_id:
-            await interaction.response.send_message("Only the initiating staff member may confirm.", ephemeral=True)
+            await notice(interaction, False, "Only the initiating staff member may confirm.", ephemeral=True)
             return
         await self.cog.complete_approval(interaction, self.message_id, select.values[0])
 
@@ -534,17 +535,17 @@ class ApplicationCog(commands.Cog):
     async def show_trial_vouches(self, interaction):
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY or not is_staff(interaction.user):
-            await interaction.response.send_message("Only staff may view trial vouches.", ephemeral=True)
+            await notice(interaction, False, "Only staff may view trial vouches.", ephemeral=True)
             return
         row = get_report(channel.id)
         if not row or not row[0] or not interaction.message or row[2] != interaction.message.id:
-            await interaction.response.send_message("This report is no longer active.", ephemeral=True)
+            await notice(interaction, False, "This report is no longer active.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             member = await channel.guild.fetch_member(row[0])
             if not is_trial(member):
-                await interaction.followup.send("This applicant is not a current Trial Member.", ephemeral=True)
+                await notice(interaction, True, "This applicant is not a current Trial Member.", ephemeral=True)
                 return
             rows, legacy = trial_vouch_records(member.id)
             embed = discord.Embed(title="Novus Trial Vouches", description=f"**Trial Member:** {member.mention}", color=discord.Color.green() if len(rows)>=REQUIRED_VOUCHES else discord.Color.blurple())
@@ -554,10 +555,10 @@ class ApplicationCog(commands.Cog):
             embed.set_thumbnail(url=(channel.guild.icon or self.bot.user.display_avatar).url)
             if legacy:
                 embed.add_field(name="Staff review", value="Existing vouch records may predate tracking. Confirm these apply to the current trial.", inline=False)
-            await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            await notice(interaction, True, embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             logger.exception("Application vouch review failed")
-            await interaction.followup.send("Vouches could not be retrieved. Try /vouches or refresh later.", ephemeral=True)
+            await notice(interaction, True, "Vouches could not be retrieved. Try /vouches or refresh later.", ephemeral=True)
 
     async def get_payload(self, rsn, applicant_id, update=False):
         try:
@@ -817,48 +818,48 @@ class ApplicationCog(commands.Cog):
         if isinstance(channel, discord.TextChannel) and report_id == get_form_prompt(channel.id):
             row = get_report(channel.id)
             if not row:
-                await interaction.response.send_message("Your eligibility report is being prepared. Try again shortly.", ephemeral=True)
+                await notice(interaction, False, "Your eligibility report is being prepared. Try again shortly.", ephemeral=True)
                 return
             report_id = row[2]
         if not self.form_allowed(channel, interaction.user, report_id):
-            await interaction.response.send_message("Only the applicant may complete this form.", ephemeral=True)
+            await notice(interaction, False, "Only the applicant may complete this form.", ephemeral=True)
             return
         if final_approval(channel.id, report_id) or form_submission(channel.id, report_id):
-            await interaction.response.send_message("Application already completed. Post any additional details in this ticket.", ephemeral=True)
+            await notice(interaction, False, "Application already completed. Post any additional details in this ticket.", ephemeral=True)
             return
         if gear_reviewer(channel.id, report_id):
-            await interaction.response.send_message("Gear is already verified. Ask staff to undo verification before submitting new gear.", ephemeral=True)
+            await notice(interaction, False, "Gear is already verified. Ask staff to undo verification before submitting new gear.", ephemeral=True)
             return
         await interaction.response.send_modal(ApplicationModal(self, report_id, interaction.user.id))
 
     async def submit_application(self, interaction, report_id, account_type, pathway, referral, attachments, details):
         channel = interaction.channel
         if not self.form_allowed(channel, interaction.user, report_id):
-            await interaction.response.send_message("This form is no longer available to you.", ephemeral=True)
+            await notice(interaction, False, "This form is no longer available to you.", ephemeral=True)
             return
         referral = referral.strip()
         details = details.strip()
         if account_type not in ("Main", "Ironman") or pathway not in APPLICATION_OPTIONS or not referral or not 1 <= len(attachments) <= 4:
-            await interaction.response.send_message("Please complete all required fields and include gear screenshots. Reopen the form to try again.", ephemeral=True)
+            await notice(interaction, False, "Please complete all required fields and include gear screenshots. Reopen the form to try again.", ephemeral=True)
             return
         if any(not (a.content_type or "").startswith("image/") for a in attachments):
-            await interaction.response.send_message("Please upload image files only (PNG, JPG, or another supported image format). Reopen the form to try again.", ephemeral=True)
+            await notice(interaction, False, "Please upload image files only (PNG, JPG, or another supported image format). Reopen the form to try again.", ephemeral=True)
             return
         limit = min(getattr(channel.guild, "filesize_limit", 10 * 1024 * 1024), 10 * 1024 * 1024)
         if any(a.size > limit for a in attachments) or sum(a.size for a in attachments) > 25 * 1024 * 1024:
-            await interaction.response.send_message("Screenshots are too large. Please use smaller images and reopen the form.", ephemeral=True)
+            await notice(interaction, False, "Screenshots are too large. Please use smaller images and reopen the form.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         lock = self.locks.setdefault(channel.id, asyncio.Lock())
         async with lock:
             if not self.form_allowed(channel, interaction.user, report_id) or final_approval(channel.id, report_id) or form_submission(channel.id, report_id) or gear_reviewer(channel.id, report_id):
-                await interaction.followup.send("Application already submitted, verified or closed. Contact staff for changes.", ephemeral=True)
+                await notice(interaction, True, "Application already submitted, verified or closed. Contact staff for changes.", ephemeral=True)
                 return
             files = []
             try:
                 report = await channel.fetch_message(report_id)
                 if report.author.id != self.bot.user.id or not any(e.title == REPORT_TITLE for e in report.embeds):
-                    await interaction.followup.send("The application report is no longer available.", ephemeral=True)
+                    await notice(interaction, True, "The application report is no longer available.", ephemeral=True)
                     return
                 # Recover a submission whose Discord send succeeded before the database commit.
                 # The new attachment filenames carry the report ID, replacing
@@ -877,7 +878,7 @@ class ApplicationCog(commands.Cog):
                             await report.edit(content=None if prompt_id else APPLICATION_SUBMITTED, view=ApplicationView(self, get_report(channel.id)[1], submitted=True, separate_prompt=bool(prompt_id), trial=any(f.name == "Trial Member Graduation" for f in report.embeds[0].fields)), allowed_mentions=discord.AllowedMentions.none())
                         except discord.HTTPException:
                             logger.exception("Recovered submission saved but application UI update failed")
-                        await interaction.followup.send("Your existing application was recovered. Staff can review it now.", ephemeral=True)
+                        await notice(interaction, True, "Your existing application was recovered. Staff can review it now.", ephemeral=True)
                         return
                 row = get_report(channel.id)
                 rsn = row[1]
@@ -893,7 +894,7 @@ class ApplicationCog(commands.Cog):
                     response.add_field(name="Additional Information", value=escape(details), inline=False)
                 count = len(attachments)
                 response.add_field(name="Gear Screenshots", value=f"{count} screenshot{'s' if count != 1 else ''} attached", inline=False)
-                response.add_field(name="Application Status", value="✅ **Application submitted**\n▫️ Gear verification pending\n▫️ Staff approval pending", inline=False)
+                response.add_field(name="Application Status", value=f"{check()} **Application submitted**\n▫️ Gear verification pending\n▫️ Staff approval pending", inline=False)
                 response.set_footer(text="Novus Membership • Staff review pending")
                 for i, attachment in enumerate(attachments, 1):
                     suffix = attachment.filename.rsplit(".", 1)[-1].lower()
@@ -918,10 +919,10 @@ class ApplicationCog(commands.Cog):
                 except discord.HTTPException:
                     logger.exception("Form saved but report button update failed")
                 logger.info("Application form submitted channel=%s report=%s response=%s attachments=%s", channel.id, report_id, submitted.id, len(attachments))
-                await interaction.followup.send("Application submitted. Staff will review your details and gear.", ephemeral=True)
+                await notice(interaction, True, "Application submitted. Staff will review your details and gear.", ephemeral=True)
             except Exception:
                 logger.exception("Application form submission failed channel=%s", channel.id)
-                await interaction.followup.send("Could not complete submission. Check the ticket before retrying; if screenshots already appear, ask staff to review them. You can also post details and gear manually.", ephemeral=True)
+                await notice(interaction, True, "Could not complete submission. Check the ticket before retrying; if screenshots already appear, ask staff to review them. You can also post details and gear manually.", ephemeral=True)
             finally:
                 for file in files:
                     file.close()
@@ -929,19 +930,19 @@ class ApplicationCog(commands.Cog):
     async def confirm_approval(self, interaction):
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY or not is_staff(interaction.user):
-            await interaction.response.send_message("Only staff may approve applications.", ephemeral=True)
+            await notice(interaction, False, "Only staff may approve applications.", ephemeral=True)
             return
         row = get_report(channel.id)
         if not row or not interaction.message or row[2] != interaction.message.id:
-            await interaction.response.send_message("This report is no longer active.", ephemeral=True)
+            await notice(interaction, False, "This report is no longer active.", ephemeral=True)
             return
         if final_approval(channel.id, row[2]) or not gear_reviewer(channel.id, row[2]):
-            await interaction.response.send_message("Application already approved or gear review still pending.", ephemeral=True)
+            await notice(interaction, False, "Application already approved or gear review still pending.", ephemeral=True)
             return
         if row[0] == interaction.user.id:
-            await interaction.response.send_message("Another staff member must approve your application.", ephemeral=True)
+            await notice(interaction, False, "Another staff member must approve your application.", ephemeral=True)
             return
-        await interaction.response.send_message(
+        await notice(interaction, False, 
             "Select the completed membership pathway to confirm final approval. Selecting a pathway grants Member access and posts the welcome message." + ("\n**Test ticket: no roles will change.**" if channel.id == TEST_CHANNEL else ""),
             view=ApprovalChoice(self, interaction.user.id, row[2]), ephemeral=True,
         )
@@ -949,30 +950,30 @@ class ApplicationCog(commands.Cog):
     async def complete_approval(self, interaction, message_id, pathway):
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY or not is_staff(interaction.user) or pathway not in PATHWAYS:
-            await interaction.response.send_message("Only authorized staff may approve applications.", ephemeral=True)
+            await notice(interaction, False, "Only authorized staff may approve applications.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         lock = self.locks.setdefault(channel.id, asyncio.Lock())
         async with lock:
             row = get_report(channel.id)
             if not row or row[2] != message_id or not gear_reviewer(channel.id, message_id) or final_approval(channel.id, message_id):
-                await interaction.followup.send("Approval is no longer available. Check gear verification and application status.", ephemeral=True)
+                await notice(interaction, True, "Approval is no longer available. Check gear verification and application status.", ephemeral=True)
                 return
             applicant_id, rsn, _ = row
             test = channel.id == TEST_CHANNEL
             if applicant_id == interaction.user.id or (not applicant_id and not test):
-                await interaction.followup.send("Applicant identity cannot be confirmed for approval.", ephemeral=True)
+                await notice(interaction, True, "Applicant identity cannot be confirmed for approval.", ephemeral=True)
                 return
             try:
                 message = await channel.fetch_message(message_id)
                 if message.author.id != self.bot.user.id or not message.embeds or message.embeds[0].title != REPORT_TITLE:
-                    await interaction.followup.send("This report is no longer active.", ephemeral=True)
+                    await notice(interaction, True, "This report is no longer active.", ephemeral=True)
                     return
                 embed = message.embeds[0].copy()
                 status_index = next((i for i, field in enumerate(embed.fields) if field.name == "Application Status"), None)
                 next_index = next((i for i, field in enumerate(embed.fields) if field.name == "Next Step"), None)
                 if status_index is None:
-                    await interaction.followup.send("Refresh the report before approval.", ephemeral=True)
+                    await notice(interaction, True, "Refresh the report before approval.", ephemeral=True)
                     return
                 if pathway in ("standard", "alternative"):
                     payload, note = await self.get_payload(rsn, applicant_id, update=False)
@@ -981,7 +982,7 @@ class ApplicationCog(commands.Cog):
                     special = any((values.get(key) or 0) >= 1 for _, key in EXTRAS)
                     valid = total >= 200 if pathway == "standard" else total >= 100 and special
                     if not valid:
-                        await interaction.followup.send("WOM does not confirm the selected pathway. Refresh stats or select a genuinely completed manual pathway.", ephemeral=True)
+                        await notice(interaction, True, "WOM does not confirm the selected pathway. Refresh stats or select a genuinely completed manual pathway.", ephemeral=True)
                         return
                 member = None
                 logged = True
@@ -989,19 +990,19 @@ class ApplicationCog(commands.Cog):
                     member = await channel.guild.fetch_member(applicant_id)
                     current_id, current_rsn = await self.resolve_applicant(await self.bot.fetch_channel(channel.id))
                     if current_id != applicant_id or not current_rsn or sanitize_rsn(current_rsn).casefold() != sanitize_rsn(rsn).casefold():
-                        await interaction.followup.send("Applicant or RSN no longer matches this report. Use manual staff review.", ephemeral=True)
+                        await notice(interaction, True, "Applicant or RSN no longer matches this report. Use manual staff review.", ephemeral=True)
                         return
                     if pathway == "raidtrial":
                         if not is_trial(member):
-                            await interaction.followup.send("The Raid Trial pathway requires a current Trial Member. Choose another completed pathway.", ephemeral=True)
+                            await notice(interaction, True, "The Raid Trial pathway requires a current Trial Member. Choose another completed pathway.", ephemeral=True)
                             return
                         rows, legacy = trial_vouch_records(applicant_id)
                         if len(rows) < REQUIRED_VOUCHES:
-                            await interaction.followup.send(f"Only {len(rows)}/{REQUIRED_VOUCHES} vouches recorded for this trial. Wait for more vouches or select another completed pathway.", ephemeral=True)
+                            await notice(interaction, True, f"Only {len(rows)}/{REQUIRED_VOUCHES} vouches recorded for this trial. Wait for more vouches or select another completed pathway.", ephemeral=True)
                             return
                     verify = self.bot.get_cog("VerifyCog")
                     if verify is None or not hasattr(verify, "approve_member"):
-                        await interaction.followup.send("Approval service unavailable. No roles changed.", ephemeral=True)
+                        await notice(interaction, True, "Approval service unavailable. No roles changed.", ephemeral=True)
                         return
                     member, already, logged = await verify.approve_member(channel.guild, interaction.user, member, pathway=PATHWAYS[pathway])
                 save_final_approval(channel.id, message_id, interaction.user.id, pathway)
@@ -1012,12 +1013,12 @@ class ApplicationCog(commands.Cog):
                     logger.exception("Approval saved but final delivery pending channel=%s", channel.id)
                     welcome_status = "Approval saved. Welcome/report delivery will retry automatically; do not reapprove."
                 logger.info("Application final approval channel=%s applicant=%s actor=%s pathway=%s test=%s", channel.id, applicant_id, interaction.user.id, pathway, test)
-                await interaction.followup.send(("Test approval complete; no roles changed. " if test else "Applicant approved. ") + welcome_status + ("" if logged else " Staff approval log could not be sent."), ephemeral=True)
+                await notice(interaction, True, ("Test approval complete; no roles changed. " if test else "Applicant approved. ") + welcome_status + ("" if logged else " Staff approval log could not be sent."), ephemeral=True)
             except ValueError as exc:
-                await interaction.followup.send(str(exc), ephemeral=True)
+                await notice(interaction, True, str(exc), ephemeral=True)
             except Exception:
                 logger.exception("Application approval failed for channel %s", channel.id)
-                await interaction.followup.send("Approval could not finish. Check the applicant's roles and report before retrying.", ephemeral=True)
+                await notice(interaction, True, "Approval could not finish. Check the applicant's roles and report before retrying.", ephemeral=True)
 
     async def finish_approved_application(self, channel, report_id):
         row = get_report(channel.id)
@@ -1037,7 +1038,7 @@ class ApplicationCog(commands.Cog):
         if index is None:
             raise RuntimeError("Approved report status missing")
         kc_result = embed.fields[index].value.partition("\n")[0]
-        embed.set_field_at(index, name="Application Status", value=f"{kc_result}\n{gear_status(gear_reviewer(channel.id, report_id))}\n✅ **{'Test approval' if test else 'Staff approval'} complete** (by <@{reviewer_id}>)\n**Pathway:** {PATHWAYS[pathway]}", inline=False)
+        embed.set_field_at(index, name="Application Status", value=f"{kc_result}\n{gear_status(gear_reviewer(channel.id, report_id))}\n{check()} **{'Test approval' if test else 'Staff approval'} complete** (by <@{reviewer_id}>)\n**Pathway:** {PATHWAYS[pathway]}", inline=False)
         if not test:
             embed.color = discord.Color.green()
         embed.set_thumbnail(url=(channel.guild.icon or self.bot.user.display_avatar).url)
@@ -1096,18 +1097,18 @@ class ApplicationCog(commands.Cog):
     async def review_gear(self, interaction, verified):
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY:
-            await interaction.response.send_message("This action is only available in application tickets.", ephemeral=True)
+            await notice(interaction, False, "This action is only available in application tickets.", ephemeral=True)
             return
         if not is_staff(interaction.user):
-            await interaction.response.send_message("Only staff may verify gear.", ephemeral=True)
+            await notice(interaction, False, "Only staff may verify gear.", ephemeral=True)
             return
         row = get_report(channel.id)
         if not row or not interaction.message or interaction.message.id != row[2]:
-            await interaction.response.send_message("This report is no longer active.", ephemeral=True)
+            await notice(interaction, False, "This report is no longer active.", ephemeral=True)
             return
         applicant_id, rsn, message_id = row
         if applicant_id == interaction.user.id and channel.id != TEST_CHANNEL:
-            await interaction.response.send_message("Another staff member must verify your gear.", ephemeral=True)
+            await notice(interaction, False, "Another staff member must verify your gear.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         lock = self.locks.setdefault(channel.id, asyncio.Lock())
@@ -1115,20 +1116,20 @@ class ApplicationCog(commands.Cog):
             try:
                 message = await channel.fetch_message(message_id)
                 if message.author.id != self.bot.user.id or not message.embeds or message.embeds[0].title != REPORT_TITLE:
-                    await interaction.followup.send("This report is no longer active.", ephemeral=True)
+                    await notice(interaction, True, "This report is no longer active.", ephemeral=True)
                     return
                 embed = message.embeds[0].copy()
                 status_index = next((i for i, field in enumerate(embed.fields) if field.name == "Application Status"), None)
                 next_index = next((i for i, field in enumerate(embed.fields) if field.name == "Next Step"), None)
                 if status_index is None:
-                    await interaction.followup.send("Refresh the report before verifying gear.", ephemeral=True)
+                    await notice(interaction, True, "Refresh the report before verifying gear.", ephemeral=True)
                     return
                 if final_approval(channel.id, message_id):
-                    await interaction.followup.send("This application has already been approved.", ephemeral=True)
+                    await notice(interaction, True, "This application has already been approved.", ephemeral=True)
                     return
                 previous = gear_reviewer(channel.id, message_id)
                 if bool(previous) == verified:
-                    await interaction.followup.send("Gear is already verified." if verified else "Gear verification is already pending.", ephemeral=True)
+                    await notice(interaction, True, "Gear is already verified." if verified else "Gear verification is already pending.", ephemeral=True)
                     return
                 reviewer = interaction.user.id if verified else None
                 status = embed.fields[status_index].value
@@ -1143,42 +1144,42 @@ class ApplicationCog(commands.Cog):
                     set_gear_review(channel.id, message_id, previous)
                     raise
                 logger.info("Application gear review channel=%s staff=%s verified=%s", channel.id, interaction.user.id, verified)
-                await interaction.followup.send("Gear requirement marked as met." if verified else "Gear verification returned to pending.", ephemeral=True)
+                await notice(interaction, True, "Gear requirement marked as met." if verified else "Gear verification returned to pending.", ephemeral=True)
             except Exception:
                 logger.exception("Application gear review failed for %s", channel.id)
-                await interaction.followup.send("Unable to update the gear review. Please try again.", ephemeral=True)
+                await notice(interaction, True, "Unable to update the gear review. Please try again.", ephemeral=True)
 
     async def refresh(self, interaction):
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD or channel.category_id != CATEGORY:
-            await interaction.response.send_message("This report is only available inside an application ticket.", ephemeral=True)
+            await notice(interaction, False, "This report is only available inside an application ticket.", ephemeral=True)
             return
         row = get_report(channel.id)
         if not row or interaction.message.id != row[2]:
-            await interaction.response.send_message("This report is no longer active.", ephemeral=True)
+            await notice(interaction, False, "This report is no longer active.", ephemeral=True)
             return
         applicant_id, rsn, _ = row
         if interaction.user.id != applicant_id and not is_staff(interaction.user):
-            await interaction.response.send_message("Only the applicant or staff may refresh this report.", ephemeral=True)
+            await notice(interaction, False, "Only the applicant or staff may refresh this report.", ephemeral=True)
             return
         lock = self.locks.setdefault(channel.id, asyncio.Lock())
         await interaction.response.defer(ephemeral=True, thinking=True)
         async with lock:
             if time.monotonic() - self.cooldowns.get(channel.id, -1000) < 60:
-                await interaction.followup.send("Please wait a minute between refreshes.", ephemeral=True)
+                await notice(interaction, True, "Please wait a minute between refreshes.", ephemeral=True)
                 return
             if final_approval(channel.id, interaction.message.id):
-                await interaction.followup.send("This application has already been approved.", ephemeral=True)
+                await notice(interaction, True, "This application has already been approved.", ephemeral=True)
                 return
             self.cooldowns[channel.id] = time.monotonic()
             payload, note = await self.get_payload(rsn, applicant_id, update=True)
             if not payload:
-                await interaction.followup.send(note or "WOM unavailable. Existing report retained.", ephemeral=True)
+                await notice(interaction, True, note or "WOM unavailable. Existing report retained.", ephemeral=True)
                 return
             reviewer = gear_reviewer(channel.id, interaction.message.id)
             trial = await self.trial_context(channel, applicant_id)
             await interaction.message.edit(content=form_content(channel.id, interaction.message.id), embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer, trial=trial, logo_url=(channel.guild.icon or self.bot.user.display_avatar).url, applicant_id=applicant_id), view=ApplicationView(self, rsn, verified=bool(reviewer), submitted=bool(form_submission(channel.id, interaction.message.id)), separate_prompt=bool(get_form_prompt(channel.id)), trial=trial is not None), allowed_mentions=discord.AllowedMentions.none())
-            await interaction.followup.send("Eligibility report refreshed.", ephemeral=True)
+            await notice(interaction, True, "Eligibility report refreshed.", ephemeral=True)
 
 async def setup(bot):
     initialize()

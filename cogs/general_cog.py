@@ -1,4 +1,5 @@
 import discord
+from novus_logging import check, notice, bind_novus_ui
 from discord import app_commands
 from discord.ext import commands
 import sqlite3
@@ -123,7 +124,7 @@ class InfoView(discord.ui.View):
 
         if not config or not config[0]:
             conn.close()
-            await interaction.followup.send("No WOM Group ID configured for this server. Use `/groupid` to set it.", ephemeral=True)
+            await notice(interaction, True, "No WOM Group ID configured for this server. Use `/groupid` to set it.", ephemeral=True)
             return
 
         group_id = config[0]
@@ -139,7 +140,7 @@ class InfoView(discord.ui.View):
             interaction.client, group_id
         )
         if memberships is None:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "Could not verify current Novus membership with WOM. "
                 "No cached member list was shown.", ephemeral=True
             )
@@ -155,7 +156,7 @@ class InfoView(discord.ui.View):
         ]
 
         if not links:
-            await interaction.followup.send(
+            await notice(interaction, True, 
                 "No actively linked Novus clan members were found. "
                 "Members must appear in WOM and have the Discord Member role.",
                 ephemeral=True
@@ -165,7 +166,7 @@ class InfoView(discord.ui.View):
         view = PlayerListView(interaction, links, interaction.guild.name, group_id)
         embed = await view.get_embed()
         view.update_buttons()
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        await notice(interaction, True, embed=embed, view=view, ephemeral=True)
 
 
 class GeneralCog(commands.Cog):
@@ -192,20 +193,20 @@ class GeneralCog(commands.Cog):
                                                   "`/checkuser @user` - Check a user's linked RSN\n"
                                                   "`/info` - View configuration and sync status", inline=False)
         embed.add_field(name="Need further help?", value="[Join the support Discord](https://discord.gg/T6j59QC2kh)\n[List of WOM Group Roles](https://docs.wiseoldman.net/api/groups/group-type-definitions#object-membership)", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await notice(interaction, False, embed=embed, ephemeral=True)
 
     @app_commands.command(name="checkuser", description="Check the RSN linked to a Discord user")
     @app_commands.describe(user="The user to check")
     async def checkuser(self, interaction: discord.Interaction, user: discord.Member):
         if not has_novus_command_permission(interaction.user):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
             return
 
         if not has_novus_member_role(user):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"{user.mention} is not an active Novus member. "
                 "The Discord Member role is required.",
                 ephemeral=True
@@ -230,12 +231,12 @@ class GeneralCog(commands.Cog):
             conn.close()
 
         if not group_id:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "No WOM group is configured.", ephemeral=True
             )
             return
         if not link:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"{user.mention} does not have an active Novus account link.",
                 ephemeral=True
             )
@@ -245,20 +246,20 @@ class GeneralCog(commands.Cog):
             interaction.client, group_id
         )
         if memberships is None:
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "Could not verify the current Novus WOM roster.",
                 ephemeral=True
             )
             return
         if not is_active_novus_member_link(user, link[0], link[1], memberships):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 f"{user.mention} is not in the current Novus WOM group "
                 "and is excluded from Novus member reports.",
                 ephemeral=True
             )
             return
 
-        await interaction.response.send_message(
+        await notice(interaction, False, 
             f"{user.mention} is linked to the Novus RSN: **{link[0]}**",
             ephemeral=True
         )
@@ -266,7 +267,7 @@ class GeneralCog(commands.Cog):
     @app_commands.command(name="info", description="View configuration and sync status")
     async def info(self, interaction: discord.Interaction):
         if not has_novus_command_permission(interaction.user):
-            await interaction.response.send_message(
+            await notice(interaction, False, 
                 "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
@@ -300,7 +301,7 @@ class GeneralCog(commands.Cog):
         embed.add_field(name="Role Mappings", value=mapping_text, inline=False)
         
         view = InfoView(interaction)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await notice(interaction, False, embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(name="notifyme", description="Turn on/off personal DM notifications for role changes.")
     @app_commands.describe(state="Your preferred state for DM notifications")
@@ -323,7 +324,7 @@ class GeneralCog(commands.Cog):
         c.execute("SELECT 1 FROM links WHERE guild_id = ? AND discord_id = ?", (guild_id, user_id))
         if c.fetchone() is None:
             conn.close()
-            await interaction.response.send_message("You are not linked to an RSN in this server. An admin must link you with `/linkuser` first.", ephemeral=True)
+            await notice(interaction, False, "You are not linked to an RSN in this server. An admin must link you with `/linkuser` first.", ephemeral=True)
             return
 
         c.execute("UPDATE links SET dm_notifications_on = ? WHERE guild_id = ? AND discord_id = ?", (new_state, guild_id, user_id))
@@ -331,9 +332,9 @@ class GeneralCog(commands.Cog):
         conn.close()
 
         if new_state == 1:
-            await interaction.response.send_message("✅ You will now receive DMs when your roles change in this server.", ephemeral=True)
+            await notice(interaction, False, f"{check()} You will now receive DMs when your roles change in this server.", ephemeral=True)
         else:
-            await interaction.response.send_message("✅ You will no longer receive DMs about role changes in this server.", ephemeral=True)
+            await notice(interaction, False, f"{check()} You will no longer receive DMs about role changes in this server.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

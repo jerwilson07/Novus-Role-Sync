@@ -132,6 +132,8 @@ class VerifyCog(commands.Cog):
         try:
             async with self.lock(interaction.user):
                 member = await guild.fetch_member(interaction.user.id)
+                was_verified = verified in member.roles
+                role_names = {role.name.strip().casefold() for role in member.roles}
                 if member.nick != nickname:
                     await member.edit(nick=nickname, reason="Novus /rsn")
                 if verified not in member.roles:
@@ -142,7 +144,33 @@ class VerifyCog(commands.Cog):
             logger.exception("RSN verification failed for %s", interaction.user.id)
             await interaction.followup.send("Could not complete verification. Please contact staff or retry; some changes may already have applied.", ephemeral=True)
             return
-        await interaction.followup.send(f"Verified! Your server RSN is **{discord.utils.escape_markdown(nickname)}**.", ephemeral=True)
+        view = discord.ui.View()
+        rsn = discord.utils.escape_markdown(nickname)
+        if "member" in role_names:
+            title = "RSN Updated"
+            description = f"**RSN:** {rsn}\n\nYour nickname is synchronized and your existing clan roles and tenure are preserved."
+        elif "trial member" in role_names:
+            title = "RSN Updated"
+            description = f"**RSN:** {rsn}\n\nYour Trial Member status is unchanged. Visit the trial hub for your next steps."
+            view.add_item(discord.ui.Button(
+                label="Trial Member Hub",
+                url=f"https://discord.com/channels/{guild.id}/1544747251983843349",
+            ))
+        else:
+            title = "RSN Updated" if was_verified else "Verification Successful!"
+            description = (
+                f"**RSN:** {rsn}\n**Server access:** Verified\n\n"
+                "Ready to join Novus? Review our requirements and submit an application."
+            )
+            view.add_item(discord.ui.Button(
+                label="Info & Apply",
+                emoji="📋",
+                url=f"https://discord.com/channels/{guild.id}/1537889319220551753",
+            ))
+        embed = discord.Embed(title=title, description=description, color=discord.Color.green())
+        embed.set_footer(text="Novus • Account Verification")
+        kwargs = {"view": view} if view.children else {}
+        await interaction.followup.send(embed=embed, ephemeral=True, **kwargs)
 
     @commands.Cog.listener()
     async def on_ready(self):

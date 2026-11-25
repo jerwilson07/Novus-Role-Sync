@@ -45,7 +45,7 @@ NOVUS_COMMAND_ROLE_IDS = {
 
 def has_novus_command_permission(member: discord.Member) -> bool:
     return any(
-        role.id in NOVUS_COMMAND_ROLE_IDS
+        (role.id in NOVUS_COMMAND_ROLE_IDS or role.name.strip().casefold() == "founder")
         for role in member.roles
     )
 
@@ -199,7 +199,7 @@ class GeneralCog(commands.Cog):
     async def checkuser(self, interaction: discord.Interaction, user: discord.Member):
         if not has_novus_command_permission(interaction.user):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
             return
@@ -267,7 +267,7 @@ class GeneralCog(commands.Cog):
     async def info(self, interaction: discord.Interaction):
         if not has_novus_command_permission(interaction.user):
             await interaction.response.send_message(
-                "You must be a Trial Moderator, Moderator, or Council member to use this command.",
+                "You must be a Founder, Council member, Moderator, or Trial Moderator to use this command.",
                 ephemeral=True
             )
             return

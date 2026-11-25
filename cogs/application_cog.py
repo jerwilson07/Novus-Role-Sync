@@ -110,7 +110,7 @@ def report_embed(rsn, payload, test=False, note=None):
     embed.add_field(name="Raid KC", value=f"\x60\x60\x60\n{rows}\n\x60\x60\x60", inline=False)
     solo_rows = "\n".join(
         f"**{label}:** {fmt(key)}" + (" KC" if values.get(key) is not None else "")
-        for label, key in EXTRAS + TRIAL_REFERENCE
+        for label, key in EXTRAS
     )
     embed.add_field(name="\u200b", value=solo_rows + "\n\u200b", inline=False)
     embed.add_field(
@@ -120,6 +120,11 @@ def report_embed(rsn, payload, test=False, note=None):
     )
     if not qualified:
         embed.add_field(name="Alternative Pathways", value="Raids Prep Program or Raid Trial (staff discretion).\nRaid Trial: 3 member vouches within 1-2 weeks.", inline=False)
+        trial_rows = "\n".join(
+            f"**{label}:** {fmt(key)}" + (" KC" if values.get(key) is not None else "")
+            for label, key in TRIAL_REFERENCE
+        )
+        embed.add_field(name="Raid Trial Reference", value=trial_rows, inline=False)
     embed.add_field(
         name="Next Step",
         value="Upload a screenshot of your required gear for staff review.",

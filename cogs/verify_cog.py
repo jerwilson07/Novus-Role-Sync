@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import re
+import sqlite3
 
 import discord
 from discord import app_commands
@@ -38,10 +39,54 @@ def parse_rsn(value):
     return nickname
 
 
+class VerifyModal(discord.ui.Modal, title="Novus Account Verification"):
+    username = discord.ui.TextInput(
+        label="OSRS username(s) - primary first",
+        placeholder="Minor Mohi | Echo Mohi",
+        min_length=1,
+        max_length=32,
+        required=True,
+    )
+
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog.verify_rsn(interaction, str(self.username.value))
+
+
+class VerifyView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="Verify Your RSN",
+        style=discord.ButtonStyle.success,
+        custom_id="novus:verify:rsn:v1",
+    )
+    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != NOVUS_GUILD_ID:
+            await interaction.response.send_message("This button is only available in Novus.", ephemeral=True)
+            return
+        await interaction.response.send_modal(VerifyModal(self.cog))
+
+
+PANEL_TEXT = (
+    "## Verify Your RSN\n"
+    "Click below and enter your exact OSRS username(s). "
+    "Only list clan accounts, with your primary account first.\n"
+    "-# Alternatively, use </rsn:1575000836361162773>."
+)
+
+
 class VerifyCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.locks = {}
+        self.panel_lock = asyncio.Lock()
+        self.panel_checked = False
 
     def lock(self, member):
         return self.locks.setdefault(member.id, asyncio.Lock())
@@ -67,6 +112,9 @@ class VerifyCog(commands.Cog):
     @app_commands.describe(username="Your exact OSRS username; separate additional accounts with | or /")
     @app_commands.guild_only()
     async def rsn(self, interaction: discord.Interaction, username: str):
+        await self.verify_rsn(interaction, username)
+
+    async def verify_rsn(self, interaction: discord.Interaction, username: str):
         guild = interaction.guild
         if guild is None or guild.id != NOVUS_GUILD_ID:
             await interaction.response.send_message("This command is only available in Novus.", ephemeral=True)
@@ -95,6 +143,66 @@ class VerifyCog(commands.Cog):
             await interaction.followup.send("Could not complete verification. Please contact staff or retry; some changes may already have applied.", ephemeral=True)
             return
         await interaction.followup.send(f"Verified! Your server RSN is **{discord.utils.escape_markdown(nickname)}**.", ephemeral=True)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Reuse the same panel across restarts; never delete existing welcome embeds.
+        async with self.panel_lock:
+            if self.panel_checked:
+                return
+            guild = self.bot.get_guild(NOVUS_GUILD_ID)
+            if guild is None:
+                return
+            channels = [c for c in guild.text_channels if c.name == "welcome-and-verify"]
+            if len(channels) != 1:
+                logger.warning("Verification panel: expected one welcome-and-verify channel, found %s", len(channels))
+                return
+            channel = channels[0]
+            conn = sqlite3.connect("wom_multi.db")
+            try:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS verification_panels "
+                    "(guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL)"
+                )
+                row = conn.execute(
+                    "SELECT channel_id, message_id FROM verification_panels WHERE guild_id = ?",
+                    (guild.id,),
+                ).fetchone()
+                message = None
+                if row and row[0] == channel.id:
+                    try:
+                        message = await channel.fetch_message(row[1])
+                    except discord.NotFound:
+                        pass
+                if message is None:
+                    # Recover if the bot posted but restarted before the database commit.
+                    async for candidate in channel.history(limit=100):
+                        if candidate.author.id != self.bot.user.id:
+                            continue
+                        if any(
+                            getattr(component, "custom_id", None) == "novus:verify:rsn:v1"
+                            for action_row in candidate.components
+                            for component in action_row.children
+                        ):
+                            message = candidate
+                            break
+                if message is None:
+                    message = await channel.send(PANEL_TEXT, view=VerifyView(self))
+                elif message.author.id != self.bot.user.id:
+                    raise RuntimeError("Saved verification panel is not owned by Novus Sync")
+                else:
+                    await message.edit(content=PANEL_TEXT, view=VerifyView(self))
+                conn.execute(
+                    "INSERT OR REPLACE INTO verification_panels (guild_id, channel_id, message_id) VALUES (?, ?, ?)",
+                    (guild.id, channel.id, message.id),
+                )
+                conn.commit()
+                self.panel_checked = True
+                logger.info("Novus verification panel ready: %s/%s", channel.id, message.id)
+            except Exception:
+                logger.exception("Could not publish Novus verification panel")
+            finally:
+                conn.close()
 
     @app_commands.command(name="approve", description="Approve a member and update their server roles.")
     @app_commands.describe(member="The applicant to approve")
@@ -160,4 +268,6 @@ class VerifyCog(commands.Cog):
 
 
 async def setup(bot):
-    await bot.add_cog(VerifyCog(bot))
+    cog = VerifyCog(bot)
+    await bot.add_cog(cog)
+    bot.add_view(VerifyView(cog))

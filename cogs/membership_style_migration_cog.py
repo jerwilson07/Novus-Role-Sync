@@ -6,14 +6,14 @@ import re
 from contextlib import closing
 
 import discord
-from novus_logging import check, notice, bind_novus_ui
+from novus_logging import check, notice, bind_novus_ui, replace_status_marks
 from discord.ext import commands
 
 from cogs.application_cog import GUILD, CATEGORY, REPORT_TITLE, db, get_report
 from cogs.vouches_cog import VouchesCog, NOVUS_MOD_CHAT_CHANNEL_ID
 
 logger = logging.getLogger("WOMBot")
-VERSION = "membership-style-v3-check-20261125"
+VERSION = "membership-style-v4-neoncheck-20261125"
 
 def brand(embed, logo, footer=None):
     embed.set_thumbnail(url=logo)
@@ -57,7 +57,7 @@ def brand_checks(embed):
     revised=embed.to_dict()
     def convert(value):
         if isinstance(value,str):
-            return value.replace("✅",check())
+            return replace_status_marks(value)
         if isinstance(value,list):
             return [convert(v) for v in value]
         if isinstance(value,dict):
@@ -223,6 +223,7 @@ class MembershipStyleMigrationCog(commands.Cog):
                                 continue
                             result=(message.content or "",revised)
                         content,embed=result
+                        content=replace_status_marks(content)
                         embed=brand_checks(embed)
                         await message.edit(content=content,embed=embed,allowed_mentions=discord.AllowedMentions.none())
                         counts["staff"]+=1

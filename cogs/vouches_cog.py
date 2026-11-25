@@ -165,6 +165,23 @@ def formatted_vouches(rows: list[tuple], limit: int = 10) -> str:
     return "\n".join(lines) or "No vouches recorded yet."
 
 
+def add_vouch_feedback(embed, rows, limit=10):
+    # Preserve the existing review's 3900-character allowance while keeping
+    # individual Discord fields below their 1024-character limit.
+    feedback = formatted_vouches(rows, limit=limit)[:3900]
+    chunks = []
+    current = ""
+    for line in feedback.splitlines():
+        if len(current) + len(line) + 1 > 1024 and current:
+            chunks.append(current)
+            current = ""
+        current = (current + "\n" if current else "") + line
+    if current:
+        chunks.append(current)
+    for i, chunk in enumerate(chunks):
+        embed.add_field(name="Member Feedback" if i == 0 else "Member Feedback (continued)", value=chunk, inline=False)
+
+
 async def trial_member_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
@@ -415,7 +432,7 @@ class VouchesCog(commands.Cog):
             value=f"**{len(rows)}/{REQUIRED_VOUCHES}** unique vouches",
             inline=False,
         )
-        embed.add_field(name="Member Feedback", value=formatted_vouches(rows, limit=10)[:1024], inline=False)
+        add_vouch_feedback(embed, rows)
         embed.set_footer(text="Novus Membership • Private staff review")
         embed.set_thumbnail(url=(interaction.guild.icon or self.bot.user.display_avatar).url)
         if len(rows) >= REQUIRED_VOUCHES:

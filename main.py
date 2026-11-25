@@ -880,6 +880,8 @@ class WOMBot(
             "vouch",
             "vouches",
             "exportchat",
+            "rsn",
+            "approve",
         }
         registered_commands = self.tree.get_commands()
         registered_names = {command.name for command in registered_commands}

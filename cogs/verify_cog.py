@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from common import GUEST_ROLE_ID, CLAN_FRIEND_ROLE_ID
+from common import GUEST_ROLE_ID, CLAN_FRIEND_ROLE_ID, sanitize_rsn
 from cogs.tasks_cog import (
     NOVUS_GUILD_ID, NOVUS_COMMAND_ROLE_IDS, NOVUS_TENURE_ROLES,
     NOVUS_MOD_CHAT_CHANNEL_ID,
@@ -132,6 +132,24 @@ class VerifyCog(commands.Cog):
         try:
             async with self.lock(interaction.user):
                 member = await guild.fetch_member(interaction.user.id)
+                submitted = [sanitize_rsn(part).casefold() for part in re.split(r"[|/]", nickname)]
+                with sqlite3.connect("wom_multi.db") as conn:
+                    rows = conn.execute(
+                        "SELECT rsn FROM links WHERE guild_id=? AND discord_id!=? "
+                        "UNION ALL SELECT rsn FROM alt_links WHERE guild_id=? AND discord_id!=?",
+                        (guild.id, member.id, guild.id, member.id),
+                    ).fetchall()
+                    own = conn.execute(
+                        "SELECT rsn FROM links WHERE guild_id=? AND discord_id=?",
+                        (guild.id, member.id),
+                    ).fetchone()
+                claimed = {sanitize_rsn(row[0]).casefold() for row in rows if row[0]}
+                if claimed.intersection(submitted):
+                    await interaction.followup.send("An entered RSN is already linked to another Discord account. Please contact staff.", ephemeral=True)
+                    return
+                if own and own[0] and sanitize_rsn(own[0]).casefold() != submitted[0]:
+                    await interaction.followup.send("Your saved primary account differs from the submitted RSN. If you changed your in-game name, allow WOM to update your link first. To switch primary accounts, contact staff.", ephemeral=True)
+                    return
                 was_verified = verified in member.roles
                 role_names = {role.name.strip().casefold() for role in member.roles}
                 if member.nick != nickname:

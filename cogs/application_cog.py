@@ -1,6 +1,7 @@
 """Read-only Novus applicant KC screening, separate from approval and tenure."""
 import asyncio
 import datetime
+from zoneinfo import ZoneInfo
 import json
 import logging
 import re
@@ -94,37 +95,34 @@ def report_embed(rsn, payload, test=False, note=None):
     total_label = f"{'≥ ' if incomplete else ''}{total:,} / {target:,} KC"
     embed = discord.Embed(
         title=REPORT_TITLE,
-        description=f"**Applicant:** {name}\n\n**Total Raid KC**\n## {total_label}",
+        description=f"**Applicant:** {name}\n\n**Total Raid KC:** **{total_label}**",
         color=color,
     )
     # Monospace rows retain their alignment on both mobile and desktop.
     rows = "\n".join(f"{label:<11} {fmt(key):>7}" for label, key in RAIDS)
     embed.add_field(name="Raid KC", value=f"\x60\x60\x60\n{rows}\n\x60\x60\x60", inline=False)
-    embed.add_field(
-        name="Solo KC",
-        value=f"**Inferno:** {fmt(EXTRAS[0][1])}  •  **Colosseum:** {fmt(EXTRAS[1][1])}",
-        inline=False,
-    )
+    embed.add_field(name="Inferno", value=f"**{fmt(EXTRAS[0][1])} KC**" if values.get(EXTRAS[0][1]) is not None else "N/A", inline=True)
+    embed.add_field(name="Colosseum", value=f"**{fmt(EXTRAS[1][1])} KC**" if values.get(EXTRAS[1][1]) is not None else "N/A", inline=True)
     embed.add_field(
         name="Application Status",
-        value=f"{result}\nGear verification pending\nStaff approval pending",
+        value=f"{result}\nGear verification pending\nStaff approval pending\n\u200b",
         inline=False,
     )
     embed.add_field(
         name="Next Step",
-        value="Upload a screenshot showing that you meet the minimum gear requirements.",
+        value="Upload a screenshot of your required gear for staff review.",
         inline=False,
     )
     timestamp = payload.get("snapshot")
     if timestamp:
         try:
             timestamp = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            timestamp = timestamp.astimezone(datetime.timezone.utc).strftime("%b %d, %Y • %H:%M UTC")
+            timestamp = timestamp.astimezone(ZoneInfo("America/New_York")).strftime("%b %d, %I:%M %p ET").replace(", 0", ", ")
         except (ValueError, AttributeError):
             timestamp = "Unknown"
     else:
         timestamp = "Unavailable"
-    footer = f"Wise Old Man • {timestamp} • Primary account"
+    footer = f"Wise Old Man • Last updated: {timestamp}"
     if test:
         footer += " • Staff test"
     if incomplete or special_unknown:

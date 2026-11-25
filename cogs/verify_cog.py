@@ -104,12 +104,13 @@ class VerifyCog(commands.Cog):
                 color=discord.Color.blurple() if reviewed else discord.Color.green(),
                 timestamp=datetime.datetime.now(datetime.timezone.utc),
             )
-            embed.add_field(name="Member", value=member.mention, inline=False)
+            embed.add_field(name="Member", value=member.mention+"\n\u200b", inline=False)
             if not reviewed:
-                embed.add_field(name="Pathway", value=pathway or "Manual staff approval (/approve)", inline=False)
-            embed.add_field(name="Reviewed by" if reviewed else "Approved by", value=actor.mention, inline=False)
-            status = "Existing Member • No membership promotion required" if reviewed else ("Trial Member → Member" if was_trial else "Member access granted")
-            embed.set_footer(text=f"Novus Membership • {status}")
+                embed.add_field(name="Pathway", value=(pathway or "Manual staff approval (/approve)")+"\n\u200b", inline=False)
+            embed.add_field(name="Reviewed by" if reviewed else "Approved by", value=actor.mention+"\n\u200b", inline=False)
+            status = "Existing member • No promotion required" if reviewed else ("✅ Trial Member → Member" if was_trial else "✅ Member access granted")
+            embed.add_field(name="Status", value=status, inline=False)
+            embed.set_footer(text="Novus Membership")
             logo = guild.icon or self.bot.user.display_avatar
             embed.set_thumbnail(url=logo.url)
             await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())

@@ -75,17 +75,20 @@ def report_embed(rsn, payload, test=False, note=None):
     special_unknown = any(values.get(key) is None for _, key in EXTRAS)
     standard = total >= 200
     alternative = total >= 100 and special
-    target = 100 if alternative and not standard else 200
+    target = 100 if special and not standard else 200
+    qualified = standard or alternative
+    uncertain = not qualified and (incomplete or (total >= 100 and special_unknown))
+    total_indicator = "✅ " if qualified else ("" if uncertain else "❌ ")
     if standard or alternative:
         pathway = "200+ raid KC" if standard else "100+ raid KC + Inferno/Colosseum"
         result = f"✅ **KC requirement met** ({pathway})"
         color = discord.Color.green()
-    elif incomplete or (total >= 100 and special_unknown):
+    elif uncertain:
         result = "**KC assessment incomplete**"
         color = discord.Color.gold()
     else:
         result = "❌ **KC thresholds not met**\nRaids Prep Program may be an option."
-        color = discord.Color.gold()
+        color = discord.Color.red()
 
     def fmt(key):
         value = values.get(key)
@@ -95,7 +98,7 @@ def report_embed(rsn, payload, test=False, note=None):
     total_label = f"{'≥ ' if incomplete else ''}{total:,} / {target:,} KC"
     embed = discord.Embed(
         title=REPORT_TITLE,
-        description=f"**Applicant:** {name}\n\n**Total Raid KC:** **{total_label}**",
+        description=f"**Applicant:** {name}\n\n**Total Raid KC:** {total_indicator}**{total_label}**",
         color=color,
     )
     # Monospace rows retain their alignment on both mobile and desktop.

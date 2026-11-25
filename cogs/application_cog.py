@@ -29,6 +29,7 @@ RAIDS = (
     ("TFA", "the_fractured_archive"),
 )
 EXTRAS = (("Inferno", "tzkal_zuk"), ("Colosseum", "sol_heredit"))
+TRIAL_REFERENCE = (("Doom of Mokhaiotl", "doom_of_mokhaiotl"),)
 REPORT_TITLE = "Novus Applicant Eligibility"
 
 def db():
@@ -60,7 +61,7 @@ def extract(data):
     snapshot = data.get("latestSnapshot") or {}
     bosses = (snapshot.get("data") or {}).get("bosses") or {}
     values = {}
-    for _, key in RAIDS + EXTRAS:
+    for _, key in RAIDS + EXTRAS + TRIAL_REFERENCE:
         metric = bosses.get(key) or {}
         kc = metric.get("kills")
         values[key] = kc if type(kc) is int and kc >= 0 else None
@@ -87,7 +88,7 @@ def report_embed(rsn, payload, test=False, note=None):
         result = "**KC assessment incomplete**"
         color = discord.Color.gold()
     else:
-        result = "❌ **KC thresholds not met**\nRaids Prep Program may be an option."
+        result = "❌ **KC thresholds not met**"
         color = discord.Color.red()
 
     def fmt(key):
@@ -106,7 +107,7 @@ def report_embed(rsn, payload, test=False, note=None):
     embed.add_field(name="Raid KC", value=f"\x60\x60\x60\n{rows}\n\x60\x60\x60", inline=False)
     solo_rows = "\n".join(
         f"**{label}:** {fmt(key)}" + (" KC" if values.get(key) is not None else "")
-        for label, key in EXTRAS
+        for label, key in EXTRAS + TRIAL_REFERENCE
     )
     embed.add_field(name="\u200b", value=solo_rows + "\n\u200b", inline=False)
     embed.add_field(
@@ -114,6 +115,8 @@ def report_embed(rsn, payload, test=False, note=None):
         value=f"{result}\nGear verification pending\nStaff approval pending\n\u200b",
         inline=False,
     )
+    if not qualified:
+        embed.add_field(name="Alternative Pathways", value="Raids Prep Program or Raid Trial (staff discretion).\nRaid Trial: 3 member vouches within 1-2 weeks.", inline=False)
     embed.add_field(
         name="Next Step",
         value="Upload a screenshot of your required gear for staff review.",

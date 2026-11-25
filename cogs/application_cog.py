@@ -35,6 +35,19 @@ TRIAL_REFERENCE = (
 )
 REPORT_TITLE = "Novus Applicant Eligibility"
 
+APPLICATION_INTRO = """## Thanks for applying to Novus!
+
+Please provide the following if you haven't already:
+
+- **Account type:** Main or Ironman
+- **Gear screenshots**
+- **How you found us**
+
+If you're just short of our requirements or applying through Raids Prep or Raid Trial, let us know!
+
+-# Your PvM statistics and KC eligibility are automatically retrieved through Wise Old Man."""
+
+
 def db():
     return sqlite3.connect("wom_multi.db")
 
@@ -69,7 +82,7 @@ def gear_status(reviewer_id):
     return f"✅ **Gear requirement met** (verified by <@{reviewer_id}>)" if reviewer_id else "Gear verification pending"
 
 def gear_next_step(reviewer_id):
-    return "Await staff review and final approval." if reviewer_id else "Upload a screenshot of your required gear for staff review."
+    return "Await staff review and final approval." if reviewer_id else "Provide the application details requested above."
 
 PATHWAYS = {
     "standard": "200+ total raid KC",
@@ -381,7 +394,7 @@ class ApplicationCog(commands.Cog):
                 logger.warning("Application applicant not unambiguous in channel %s; skipping report", channel.id)
                 return
             payload, note = await self.get_payload(rsn, applicant_id, update=True)
-            message = await channel.send(embed=report_embed(rsn, payload, test, note), view=ApplicationView(self, rsn), allowed_mentions=discord.AllowedMentions.none())
+            message = await channel.send(content=APPLICATION_INTRO, embed=report_embed(rsn, payload, test, note), view=ApplicationView(self, rsn), allowed_mentions=discord.AllowedMentions.none())
             save_report(channel.id, applicant_id, rsn, message.id)
             logger.info("Application KC report published channel=%s message=%s rsn=%s total=%s", channel.id, message.id, rsn, sum((payload or {}).get("values", {}).get(k) or 0 for _,k in RAIDS))
 
@@ -407,7 +420,7 @@ class ApplicationCog(commands.Cog):
                         payload, note = await self.get_payload(rsn, applicant_id, update=False)
                         if payload:
                             reviewer = gear_reviewer(channel.id, message.id)
-                            await message.edit(embed=report_embed(rsn, payload, True, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer)), allowed_mentions=discord.AllowedMentions.none())
+                            await message.edit(content=APPLICATION_INTRO, embed=report_embed(rsn, payload, True, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer)), allowed_mentions=discord.AllowedMentions.none())
                             logger.info("Restyled existing application test report channel=%s message=%s", channel.id, message.id)
                 else:
                     await self.publish(channel)
@@ -580,7 +593,7 @@ class ApplicationCog(commands.Cog):
                 embed.set_field_at(next_index, name="Next Step", value=gear_next_step(reviewer), inline=False)
                 set_gear_review(channel.id, message_id, reviewer)
                 try:
-                    await message.edit(embed=embed, view=ApplicationView(self, rsn, verified=verified), allowed_mentions=discord.AllowedMentions.none())
+                    await message.edit(content=APPLICATION_INTRO, embed=embed, view=ApplicationView(self, rsn, verified=verified), allowed_mentions=discord.AllowedMentions.none())
                 except Exception:
                     set_gear_review(channel.id, message_id, previous)
                     raise
@@ -618,7 +631,7 @@ class ApplicationCog(commands.Cog):
                 await interaction.followup.send(note or "WOM unavailable. Existing report retained.", ephemeral=True)
                 return
             reviewer = gear_reviewer(channel.id, interaction.message.id)
-            await interaction.message.edit(embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer)), allowed_mentions=discord.AllowedMentions.none())
+            await interaction.message.edit(content=APPLICATION_INTRO, embed=report_embed(rsn, payload, channel.id == TEST_CHANNEL, note, reviewer), view=ApplicationView(self, rsn, verified=bool(reviewer)), allowed_mentions=discord.AllowedMentions.none())
             await interaction.followup.send("Eligibility report refreshed.", ephemeral=True)
 
 async def setup(bot):

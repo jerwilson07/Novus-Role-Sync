@@ -122,6 +122,9 @@ class VerifyCog(commands.Cog):
             trial = unique_role(guild, "Trial Member")
             verified = unique_role(guild, "Verified")
             friend = guild.get_role(CLAN_FRIEND_ROLE_ID)
+            guest = guild.get_role(GUEST_ROLE_ID)
+            if guest is None:
+                raise ValueError("Guest role is not configured.")
             if friend is None:
                 raise ValueError("Clan Friend role is not configured.")
         except ValueError as exc:
@@ -142,7 +145,7 @@ class VerifyCog(commands.Cog):
                     add.append(squire)
                 if add:
                     await member.add_roles(*add, reason=f"Novus /approve by {interaction.user.id}")
-                remove = [r for r in (friend, trial) if r in member.roles]
+                remove = [r for r in (friend, trial, guest) if r in member.roles]
                 if remove:
                     await member.remove_roles(*remove, reason=f"Novus /approve by {interaction.user.id}")
         except discord.HTTPException:

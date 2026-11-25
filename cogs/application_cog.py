@@ -750,26 +750,54 @@ class ApplicationCog(commands.Cog):
                     await interaction.followup.send("The application report is no longer available.", ephemeral=True)
                     return
                 # Recover a submission whose Discord send succeeded before the database commit.
-                async for candidate in channel.history(limit=100, after=report):
-                    if candidate.author.id == self.bot.user.id and candidate.reference and candidate.reference.message_id == report_id and candidate.embeds and candidate.embeds[0].title == "Application Details" and candidate.attachments:
+                # The new attachment filenames carry the report ID, replacing
+                # the visible reply reference while retaining restart recovery.
+                marker = f"gear-{report_id}-"
+                async for candidate in channel.history(limit=100, after=report, oldest_first=False):
+                    if candidate.author.id != self.bot.user.id or not candidate.embeds or not candidate.attachments:
+                        continue
+                    legacy = candidate.embeds[0].title == "Application Details" and candidate.reference and candidate.reference.message_id == report_id
+                    current = candidate.embeds[0].title == "Novus Application Details" and any(a.filename.startswith(marker) for a in candidate.attachments)
+                    if legacy or current:
                         save_form_submission(channel.id, report_id, interaction.user.id, candidate.id)
-                        await self.update_form_prompt(channel, APPLICATION_SUBMITTED)
+                        try:
+                            await self.update_form_prompt(channel, APPLICATION_SUBMITTED)
+                            prompt_id = get_form_prompt(channel.id)
+                            await report.edit(content=None if prompt_id else APPLICATION_SUBMITTED, view=ApplicationView(self, get_report(channel.id)[1], submitted=True, separate_prompt=bool(prompt_id)), allowed_mentions=discord.AllowedMentions.none())
+                        except discord.HTTPException:
+                            logger.exception("Recovered submission saved but application UI update failed")
                         await interaction.followup.send("Your existing application was recovered. Staff can review it now.", ephemeral=True)
                         return
                 row = get_report(channel.id)
                 rsn = row[1]
                 escape = discord.utils.escape_markdown
-                response = discord.Embed(title="Application Details", color=discord.Color.blurple())
-                response.description = f"**Applicant:** {escape(rsn)}\n**Account type:** {account_type}\n**Membership option:** {APPLICATION_OPTIONS[pathway]}\n**How you found us:** {escape(referral)}"
+                response = discord.Embed(title="Novus Application Details", color=discord.Color.blurple())
+                response.description = f"**Applicant:** {escape(rsn)}"
+                logo = channel.guild.icon or self.bot.user.display_avatar
+                response.set_thumbnail(url=logo.url)
+                response.add_field(name="Account Type", value=account_type, inline=False)
+                response.add_field(name="Membership Pathway", value=APPLICATION_OPTIONS[pathway], inline=False)
+                response.add_field(name="How They Found Us", value=escape(referral), inline=False)
                 if details:
                     response.add_field(name="Additional Information", value=escape(details), inline=False)
-                response.set_footer(text="Gear screenshots attached • Staff review pending")
+                count = len(attachments)
+                response.add_field(name="Gear Screenshots", value=f"{count} screenshot{'s' if count != 1 else ''} attached", inline=False)
+                response.add_field(name="Application Status", value="✅ **Application submitted**\nGear verification pending", inline=False)
+                response.set_footer(text="Novus Membership • Staff review pending")
                 for i, attachment in enumerate(attachments, 1):
                     suffix = attachment.filename.rsplit(".", 1)[-1].lower()
                     if not re.fullmatch(r"[a-z0-9]{1,5}", suffix):
                         suffix = "img"
-                    files.append(await asyncio.wait_for(attachment.to_file(filename=f"gear-{i}.{suffix}"), timeout=30))
-                submitted = await channel.send(embed=response, files=files, reference=report.to_reference(fail_if_not_exists=False), mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                    files.append(await asyncio.wait_for(attachment.to_file(filename=f"{marker}{i}.{suffix}"), timeout=30))
+                # Reference every upload in an embed so Discord displays the
+                # first within the details card and extras as separate images below.
+                response.set_image(url=f"attachment://{files[0].filename}")
+                embeds = [response]
+                for i, file in enumerate(files[1:], 2):
+                    extra = discord.Embed(title=f"Gear Screenshot {i} of {count}", color=discord.Color.blurple())
+                    extra.set_image(url=f"attachment://{file.filename}")
+                    embeds.append(extra)
+                submitted = await channel.send(embeds=embeds, files=files, allowed_mentions=discord.AllowedMentions.none())
                 save_form_submission(channel.id, report_id, interaction.user.id, submitted.id)
                 try:
                     prompt_id = get_form_prompt(channel.id)

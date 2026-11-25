@@ -89,6 +89,7 @@ class TrialAnalyticsCog(commands.Cog):
     def __init__(self, bot):
         self.bot=bot
         self.locks={}
+        self.last_summary = None
         self.reconcile.start()
 
     def cog_unload(self):
@@ -121,16 +122,23 @@ class TrialAnalyticsCog(commands.Cog):
         if WOM_API_KEY:
             headers["x-api-key"]=WOM_API_KEY
         url="https://api.wiseoldman.net/v2/players/"+quote(rsn,safe="")
-        # Update once at observation, then fall back to the latest available snapshot.
+        # For a live entry, attempt a fresh WOM update. Existing trials use the
+        # latest saved snapshot and remain marked as late observations.
         data=None
-        try:
-            async with self.bot.http_session.get(url,headers=headers,timeout=15) as response:
-                if response.status==200:
-                    data=await response.json()
-            if not data or not data.get("latestSnapshot"):
+        if row["entry_source"] == "role_event":
+            try:
                 async with self.bot.http_session.post(url,headers=headers,timeout=20) as response:
                     if response.status in (200,201):
                         data=await response.json()
+            except Exception:
+                logger.warning("Trial baseline fresh update unavailable episode=%s",row["episode_id"])
+        try:
+            if not data or not data.get("latestSnapshot"):
+                async with self.bot.http_session.get(url,headers=headers,timeout=15) as response:
+                    if response.status==200:
+                        data=await response.json()
+            if not data or not data.get("latestSnapshot"):
+                return
         except Exception:
             logger.exception("Trial baseline lookup failed episode=%s",row["episode_id"])
             return
@@ -221,6 +229,15 @@ class TrialAnalyticsCog(commands.Cog):
                 await self.observe(member,"reconcile")
             except Exception:
                 logger.exception("Trial analytics outcome reconcile failed discord=%s",member_id)
+
+        with closing(db()) as conn:
+            counts=tuple(conn.execute("""SELECT COUNT(*), COALESCE(SUM(baseline_json IS NOT NULL),0),
+                COALESCE(SUM(ended_at IS NULL),0), COALESCE(SUM(outcome='passed'),0),
+                COALESCE(SUM(entry_source='late_observation'),0)
+                FROM trial_analytics_episodes WHERE guild_id=?""",(GUILD,)).fetchone())
+        if counts != self.last_summary:
+            self.last_summary=counts
+            logger.info("Trial analytics totals episodes=%s baselines=%s active=%s passed=%s late=%s",*counts)
 
     @reconcile.before_loop
     async def before_reconcile(self):

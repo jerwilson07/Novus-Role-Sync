@@ -1,6 +1,6 @@
 import json
 import unittest
-from cogs.council_analytics_cog import monthly_series, observed_rate, render_dashboards
+from cogs.council_analytics_cog import monthly_series, observed_rate, render_dashboards, raid_family_gains
 
 class CouncilTrendTests(unittest.TestCase):
     def test_calendar_gaps_and_lifetime_exclusion(self):
@@ -12,6 +12,15 @@ class CouncilTrendTests(unittest.TestCase):
         self.assertEqual(result[1][1],{})
         self.assertEqual(result[-1][1]["full"],130)
         self.assertIsNone(result[0][1]["approval_hours"])
+
+    def test_raid_families_include_hard_variants(self):
+        values={"chambers_of_xeric":10,"chambers_of_xeric_challenge_mode":3,
+                "theatre_of_blood":8,"theatre_of_blood_hard_mode":2,
+                "tombs_of_amascut":5,"tombs_of_amascut_expert":7,
+                "the_fractured_archive":0}
+        self.assertEqual(raid_family_gains(values,set(values)),{"CoX":13,"TFA":0,"ToB":10,"ToA":12})
+        self.assertEqual(raid_family_gains(values,{"theatre_of_blood_hard_mode"}),
+                         {"CoX":None,"TFA":None,"ToB":2,"ToA":None})
 
     def test_zero_is_not_missing(self):
         self.assertEqual(observed_rate(0,10),0)

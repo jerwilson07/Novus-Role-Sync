@@ -1,6 +1,6 @@
 """Private, read-only WOM verification handoff for Novus Apex.
 
-Only Discord IDs, current WOM join dates and tenure dates are exported.
+Only Discord IDs, current WOM join dates and effective tenure dates are exported.
 No usernames, credentials, or raw database records leave Sync.
 """
 import asyncio
@@ -137,7 +137,7 @@ class DiaryVerificationCog(commands.Cog):
                     # The underlying tenure engine handles resets and prior service.
                     # Use the same calendar-date rule as Sync's promotion checks.
                     eligible=add_calendar_months(effective,3).date().isoformat() if effective else None
-                    result[str(discord_id)]={"joined":joined.date().isoformat(),"tenure_eligible":eligible}
+                    result[str(discord_id)]={"joined":joined.date().isoformat(),"tenure_eligible":eligible,"effective_joined":effective.date().isoformat() if effective else None}
             if not result:
                 logger.warning("Apex verification snapshot skipped: no verified members")
                 return

@@ -122,6 +122,19 @@ class DailyReportIntegrationTests(unittest.IsolatedAsyncioTestCase):
         next_report = await self.run_sync()
         self.assertEqual([f.name for f in next_report.fields], ["No Action Needed"])
 
+    async def test_ca_candidates_append_to_existing_report_and_remain_actionable(self):
+        rp = SimpleNamespace(promotion_report=lambda *_: (
+            ["<@42> • **Grandmaster CA** • 2,100 pts"],
+            "1 members with verified CA data; staff review required."
+        ))
+        self.cog.bot.get_cog=lambda name: rp if name=="RuneProfileCog" else None
+        report=await self.run_sync()
+        self.assertEqual(report.fields[0].name,"Member Role Without Tenure (2)")
+        self.assertEqual(report.fields[-1].name,"Combat Achievement Promotions (1)")
+        self.assertIn("Grandmaster CA",report.fields[-1].value)
+        next_report=await self.run_sync()
+        self.assertEqual([f.name for f in next_report.fields],["Combat Achievement Promotions (1)"])
+
     async def test_failed_discord_delivery_does_not_start_cooldown(self):
         response = SimpleNamespace(status=403, reason="Forbidden")
         self.channel.send.side_effect = discord.Forbidden(response, "Forbidden")

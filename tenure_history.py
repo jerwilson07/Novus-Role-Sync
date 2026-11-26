@@ -307,7 +307,7 @@ def write_tenure_reset(cursor, guild_id, group_id, player_id, joined_at):
 
 # Individually approved legacy exceptions; never reset based on name alone
 # after the request has been bound to a verified WOM player ID.
-STAFF_EXCEPTION_NAMES = ("One Wise Nut", "NoRain", "8t pen rip")
+STAFF_EXCEPTION_NAMES = ("One Wise Nut", "NoRain", "8t pen rip", "LtxGhost")
 
 
 def apply_staff_tenure_exceptions(cursor, guild_id, group_id, memberships, now=None):

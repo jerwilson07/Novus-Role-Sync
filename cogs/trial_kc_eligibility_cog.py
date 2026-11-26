@@ -40,6 +40,14 @@ def initialize():
             message_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL,
             discord_id INTEGER NOT NULL, staff_id INTEGER NOT NULL,
             sent_at TEXT NOT NULL, episode_id INTEGER)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS trial_rpp_notices (
+            episode_id INTEGER NOT NULL, event_key TEXT NOT NULL, message_id INTEGER NOT NULL,
+            PRIMARY KEY(episode_id,event_key))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS trial_rpp_daily_checks (
+            episode_id INTEGER NOT NULL, day TEXT NOT NULL,
+            PRIMARY KEY(episode_id,day))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS trial_rpp_snapshots (
+            episode_id INTEGER PRIMARY KEY, checked_at TEXT NOT NULL, payload TEXT NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS trial_kc_weeks (
             week TEXT PRIMARY KEY, checked_at TEXT NOT NULL)""")
 
@@ -85,9 +93,11 @@ class TrialKCEligibilityCog(commands.Cog):
         self._audit_cache = None
         self._preview_done = False
         self.weekly.start()
+        self.rpp_daily.start()
 
     def cog_unload(self):
         self.weekly.cancel()
+        self.rpp_daily.cancel()
 
     @app_commands.command(name="trialpathway", description="Classify a current Trial Member for KC eligibility notifications")
     @app_commands.choices(pathway=[
@@ -367,6 +377,95 @@ class TrialKCEligibilityCog(commands.Cog):
         name = payload.get("name")
         tasks = await rp.task_data(name) if rp and name else None
         return rpp_progress(payload.get("values"), tasks)
+
+    @tasks.loop(minutes=30)
+    async def rpp_daily(self):
+        """One daily RPP lookup per active episode, milestone-only notices."""
+        guild = self.bot.get_guild(GUILD)
+        rp = self.bot.get_cog("RuneProfileCog")
+        if not guild or not rp or not guild.me:
+            return
+        hub = guild.get_channel(HUB)
+        if not isinstance(hub,discord.TextChannel) or hub.name != "trial-member-hub":
+            return
+        perms = hub.permissions_for(guild.me)
+        if not (perms.view_channel and perms.send_messages and perms.embed_links and perms.read_message_history):
+            return
+        roles = [r for r in guild.roles if r.name.strip().casefold()=="trial member"]
+        if len(roles)!=1:
+            return
+        day=dt.datetime.now(ET).date().isoformat()
+        for member in list(roles[0].members):
+            if member.bot or not is_trial(member):
+                continue
+            try:
+                row=episode(member.id)
+                if not row or await self.pathway(guild,member,row)!="rpp":
+                    continue
+                eid=row["episode_id"]
+                with closing(db()) as conn:
+                    if conn.execute("SELECT 1 FROM trial_rpp_daily_checks WHERE episode_id=? AND day=?",(eid,day)).fetchone():
+                        continue
+                    seen={r[0] for r in conn.execute("SELECT event_key FROM trial_rpp_notices WHERE episode_id=?",(eid,))}
+                # Recover a prior send if Discord accepted it before the DB write.
+                prefix=f"Novus RPP • episode {eid} • "
+                async for msg in hub.history(limit=100):
+                    if msg.author.id!=self.bot.user.id or not msg.embeds:
+                        continue
+                    footer=msg.embeds[0].footer.text or ""
+                    if not footer.startswith(prefix):
+                        continue
+                    keys=footer[len(prefix):].split(",")
+                    with closing(db()) as conn,conn:
+                        conn.executemany("INSERT OR IGNORE INTO trial_rpp_notices VALUES (?,?,?)",[(eid,k,msg.id) for k in keys if k])
+                    seen.update(keys)
+                payload=await self.wom_payload(member)
+                if not payload or not payload.get("name"):
+                    continue
+                progress=await self.rpp_member_progress(payload)
+                with closing(db()) as conn,conn:
+                    conn.execute("INSERT OR REPLACE INTO trial_rpp_snapshots VALUES (?,?,?)",
+                        (eid,dt.datetime.now(dt.timezone.utc).isoformat(),json.dumps(progress)))
+                completed=[t for t in progress["ca"] if t["status"]=="complete"]
+                milestones=[("ca"+str(t["id"]),t["name"]) for t in completed]
+                all_ca=len(completed)==progress["ca_total"]
+                all_kc=all(t["status"]=="baseline_met" for t in progress["kc"])
+                if all_ca:
+                    milestones.append(("allca","All required Combat Achievements complete"))
+                if all_ca and all_kc:
+                    milestones.append(("review","Automated CA and KC benchmarks met"))
+                new=[(k,n) for k,n in milestones if k not in seen]
+                if new:
+                    live=await guild.fetch_member(member.id)
+                    current=episode(member.id)
+                    if not is_trial(live) or not current or current["episode_id"]!=eid or await self.pathway(guild,live,current)!="rpp":
+                        continue
+                    pathway,start,deadline=await self.trial_timing(guild,live)
+                    if pathway!="rpp":
+                        continue
+                    lines=[f"{check()} {name}" for _,name in new]
+                    if deadline:
+                        lines.append(f"Trial deadline: <t:{int(deadline.timestamp())}:D>")
+                    lines.append("Submit any remaining recorded proof in your Raid Prep Word document. Mentor verification and staff approval are still required.")
+                    title="✦ Novus RPP • Progress Update"
+                    if any(k=="review" for k,_ in new):
+                        title="✦ Novus RPP • Ready for Mentor Review"
+                    embed=discord.Embed(title=title,description=f"{live.mention} • **{len(completed)}/{progress['ca_total']} required CAs**\n\n"+"\n".join(lines),color=discord.Color.green())
+                    embed.set_footer(text=prefix+",".join(k for k,_ in new))
+                    msg=await hub.send(content=live.mention,embed=embed,allowed_mentions=discord.AllowedMentions(users=[live],roles=False,everyone=False,replied_user=False))
+                    with closing(db()) as conn,conn:
+                        conn.executemany("INSERT OR IGNORE INTO trial_rpp_notices VALUES (?,?,?)",[(eid,k,msg.id) for k,_ in new])
+                    logger.info("RPP progress notice episode=%s milestones=%s",eid,[k for k,_ in new])
+                # Missing CA sync is not a failed requirement; recheck tomorrow.
+                with closing(db()) as conn,conn:
+                    conn.execute("INSERT OR IGNORE INTO trial_rpp_daily_checks VALUES (?,?)",(eid,day))
+            except Exception:
+                logger.exception("RPP progress check failed discord=%s",member.id)
+
+    @rpp_daily.before_loop
+    async def before_rpp_daily(self):
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(75)
 
     async def preview_progress(self, guild):
         """Read-only staff-requested preview. No Discord messages or role changes."""

@@ -6251,7 +6251,7 @@ class TasksCog(commands.Cog):
                 if rp:
                     ca_lines, ca_status = rp.promotion_report(guild, group_data.get("memberships", []))
                 else:
-                    ca_status = "RuneProfile audit module unavailable."
+                    logger.warning("RuneProfile audit module unavailable for staff report")
             except Exception:
                 logger.exception("RuneProfile noon promotion section failed")
                 ca_status = "RuneProfile promotion data unavailable."
@@ -6498,7 +6498,7 @@ class TasksCog(commands.Cog):
                 embed.add_field(
                     name="No Action Needed",
                     value=(
-                        "No verified promotions, linking issues, trial deadlines, "
+                        "No promotions, linking issues, trial deadlines, "
                         "role mismatches, or sync failures need staff attention today."
                     ),
                     inline=False
@@ -6513,7 +6513,12 @@ class TasksCog(commands.Cog):
                 if len(lines)<len(ca_lines):
                     lines.append(f"… {len(ca_lines)-len(lines)} more candidates")
                 if not lines:
-                    lines.append("No verified pending CA promotions." if ca_status.startswith("0 members") is False and "staff review required" in ca_status else "No complete CA eligibility assessment available." if "staff review required" not in ca_status else "No synced CA profiles verified.")
+                    if "staff review required" not in ca_status:
+                        lines.append("No complete CA eligibility assessment available.")
+                    elif ca_status.startswith("0 members"):
+                        lines.append("No synced CA profiles verified.")
+                    else:
+                        lines.append("No verified pending CA promotions.")
                 lines.append(ca_status)
                 embed.add_field(name=f"Combat Achievement Promotions ({len(ca_lines)})",
                                 value="\n".join(lines)[:1024],inline=False)

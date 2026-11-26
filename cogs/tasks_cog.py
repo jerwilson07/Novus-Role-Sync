@@ -80,9 +80,11 @@ NOVUS_TRIAL_DISCORD_ROLE_NAME = "trial member"
 PROTECTED_NON_TENURE_ROLE_NAMES = frozenset({
     "member", "trial member", "moderator", "trial moderator", "council",
     "founder", "verified", "guest", "clan friend",
+    "master", "grandmaster", "master ca", "grandmaster ca",
 })
 PROTECTED_NON_TENURE_ROLE_IDS = frozenset({
     COUNCIL_ROLE_ID, MODERATOR_ROLE_ID, TRIAL_MOD_ROLE_ID, 1532829195657285843,
+    1537939642366828574, 1537939595977695315,
 })
 
 

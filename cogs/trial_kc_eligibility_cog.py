@@ -1,6 +1,8 @@
 """Weekly, read-only WOM KC eligibility notices for non-Raid-Trial members."""
 import asyncio
 import datetime as dt
+import calendar
+import time
 import logging
 import sqlite3
 from contextlib import closing
@@ -11,7 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from common import WOM_API_KEY
+from common import WOM_API_KEY, sanitize_rsn
 from novus_logging import check, notice
 from cogs.application_cog import GUILD, CATEGORY, TEST_CHANNEL, RAIDS, EXTRAS, APPLICATION_OPTIONS, DETAILS_TITLES, extract, primary_name, is_staff, trial_vouch_records
 from cogs.vouches_cog import is_trial
@@ -30,6 +32,8 @@ def initialize():
             episode_id INTEGER PRIMARY KEY, pathway TEXT NOT NULL, staff_id INTEGER NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS trial_kc_notifications (
             episode_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS trial_kc_start_dates (
+            episode_id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, staff_id INTEGER NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS trial_kc_weeks (
             week TEXT PRIMARY KEY, checked_at TEXT NOT NULL)""")
 
@@ -38,6 +42,17 @@ def kc_qualification(values):
     special = any(type(v := values.get(key)) is int and v >= 1 for _, key in EXTRAS)
     return total, ("200+ total raid KC" if total >= 200 else
                    "100+ raid KC + Inferno/Colosseum" if total >= 100 and special else None)
+
+def trial_deadline(started, pathway):
+    if started is None or pathway not in ("kc", "rpp", "raidtrial"):
+        return None
+    local = started.astimezone(ET)
+    if pathway == "raidtrial":
+        return local + dt.timedelta(days=14)
+    month = local.month % 12 + 1
+    year = local.year + (local.month == 12)
+    return local.replace(year=year, month=month,
+                         day=min(local.day, calendar.monthrange(year, month)[1]))
 
 def week_key(now):
     local = now.astimezone(ET)
@@ -61,6 +76,7 @@ class TrialKCEligibilityCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         initialize()
+        self._audit_cache = None
         self.weekly.start()
 
     def cog_unload(self):
@@ -69,9 +85,11 @@ class TrialKCEligibilityCog(commands.Cog):
     @app_commands.command(name="trialpathway", description="Classify a current Trial Member for KC eligibility notifications")
     @app_commands.choices(pathway=[
         app_commands.Choice(name="KC requirements", value="kc"),
+        app_commands.Choice(name="Raids Prep Program", value="rpp"),
         app_commands.Choice(name="Raid Trial (vouches)", value="raidtrial"),
     ])
-    async def trialpathway(self, interaction: discord.Interaction, member: discord.Member, pathway: app_commands.Choice[str]):
+    @app_commands.describe(start_date="Optional verified Trial Member role assignment date (YYYY-MM-DD, Eastern)")
+    async def trialpathway(self, interaction: discord.Interaction, member: discord.Member, pathway: app_commands.Choice[str], start_date: str = ""):
         if interaction.guild_id != GUILD or not is_staff(interaction.user) or not is_trial(member):
             await notice(interaction, False, "Staff only: select a current Trial Member.", ephemeral=True)
             return
@@ -79,7 +97,19 @@ class TrialKCEligibilityCog(commands.Cog):
         if row is None:
             await notice(interaction, False, "Trial tracking has not initialized for this member yet. Try again shortly.", ephemeral=True)
             return
+        started = None
+        if start_date:
+            try:
+                started = dt.datetime.combine(dt.date.fromisoformat(start_date), dt.time(), tzinfo=ET)
+                if started > dt.datetime.now(ET) or started < member.joined_at.astimezone(ET).replace(hour=0,minute=0,second=0,microsecond=0):
+                    raise ValueError
+            except (TypeError, ValueError, AttributeError):
+                await notice(interaction, False, "Use a verified role assignment date (YYYY-MM-DD) within this member's server membership.", ephemeral=True)
+                return
         with closing(db()) as conn, conn:
+            if started:
+                conn.execute("INSERT OR REPLACE INTO trial_kc_start_dates VALUES (?,?,?)",
+                             (row["episode_id"], started.isoformat(), interaction.user.id))
             conn.execute("INSERT OR REPLACE INTO trial_kc_pathways VALUES (?,?,?)",
                          (row["episode_id"], pathway.value, interaction.user.id))
         await notice(interaction, False, f"{check()} {member.display_name}: {pathway.name}. No roles changed.", ephemeral=True)
@@ -119,8 +149,67 @@ class TrialKCEligibilityCog(commands.Cog):
             # Existing current-trial vouches are a reason to withhold an
             # automatic KC notice unless staff explicitly classifies the trial.
             vouches, _ = trial_vouch_records(member.id)
-            return "kc" if not vouches else None
+            return ("rpp" if selected == APPLICATION_OPTIONS["rpp"] else "kc") if not vouches else None
         return None
+
+    async def classify_known_raid_trial(self, guild):
+        # Staff identified this current trial by RSN. Bind only once to a
+        # unique verified link and active episode, never to future trials.
+        with closing(db()) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS trial_kc_seeded (key TEXT PRIMARY KEY)")
+            if conn.execute("SELECT 1 FROM trial_kc_seeded WHERE key='drysimulatr-20261126'").fetchone():
+                return
+            links = conn.execute("SELECT discord_id,rsn,wom_id FROM links WHERE guild_id=?", (GUILD,)).fetchall()
+        matches = [(did,wid) for did,rsn,wid in links if wid and primary_name(rsn) and sanitize_rsn(primary_name(rsn)).casefold()=="drysimulatr"]
+        if len(matches)!=1:
+            logger.info("Drysimulatr Raid Trial classification pending unique linked RSN")
+            return
+        member = guild.get_member(matches[0][0])
+        row = episode(member.id) if member and is_trial(member) else None
+        if not row:
+            return
+        with closing(db()) as conn, conn:
+            conn.execute("INSERT OR IGNORE INTO trial_kc_pathways VALUES (?,?,?)",(row["episode_id"],"raidtrial",0))
+            conn.execute("INSERT OR IGNORE INTO trial_kc_seeded VALUES ('drysimulatr-20261126')")
+        logger.info("Drysimulatr Raid Trial classified discord=%s episode=%s",member.id,row["episode_id"])
+
+    async def verified_start(self, guild, member, row):
+        with closing(db()) as conn:
+            saved = conn.execute("SELECT started_at FROM trial_kc_start_dates WHERE episode_id=?", (row["episode_id"],)).fetchone()
+        if saved:
+            return dt.datetime.fromisoformat(saved[0])
+        if row["entry_source"] == "role_event":
+            return dt.datetime.fromisoformat(row["started_at"])
+        # Existing trials may have been discovered late. A real Discord
+        # role-add audit entry is required; observation is not assignment.
+        if guild.me is None or not guild.me.guild_permissions.view_audit_log:
+            return None
+        if self._audit_cache is None or time.monotonic()-self._audit_cache[0]>300:
+            grants = {}
+            try:
+                async for event in guild.audit_logs(limit=500, action=discord.AuditLogAction.member_role_update,
+                        after=dt.datetime.now(dt.timezone.utc)-dt.timedelta(days=45)):
+                    target = getattr(event.target,"id",None)
+                    added = getattr(event.after,"roles",())
+                    if target and any(r.name.strip().casefold()=="trial member" for r in added):
+                        grants.setdefault(target,event.created_at)
+            except discord.HTTPException:
+                return None
+            self._audit_cache = (time.monotonic(),grants)
+        started = self._audit_cache[1].get(member.id)
+        if started and member.joined_at and started >= member.joined_at:
+            return started
+        return None
+
+    async def trial_timing(self, guild, member):
+        if member is None or not is_trial(member):
+            return None, None, None
+        row = episode(member.id)
+        if not row:
+            return None, None, None
+        pathway = await self.pathway(guild,member,row)
+        start = await self.verified_start(guild,member,row)
+        return pathway, start, trial_deadline(start,pathway)
 
     async def wom_payload(self, member):
         with closing(db()) as conn:
@@ -156,6 +245,7 @@ class TrialKCEligibilityCog(commands.Cog):
         if not (permissions.view_channel and permissions.send_messages and permissions.embed_links and permissions.read_message_history):
             logger.warning("Trial KC eligibility: missing hub permissions")
             return
+        await self.classify_known_raid_trial(guild)
         now = dt.datetime.now(dt.timezone.utc)
         week = week_key(now)
         with closing(db()) as conn:
@@ -195,7 +285,7 @@ class TrialKCEligibilityCog(commands.Cog):
                 if pathway == "raidtrial":
                     excluded.append(member.display_name)
                     continue
-                if pathway != "kc":
+                if pathway not in ("kc","rpp"):
                     unknown.append(member.display_name)
                     continue
                 payload = await self.wom_payload(member)
@@ -215,7 +305,7 @@ class TrialKCEligibilityCog(commands.Cog):
             try:
                 live = await guild.fetch_member(member.id)
                 current = episode(member.id)
-                if is_trial(live) and current and current["episode_id"] == eid and await self.pathway(guild,live,current) == "kc":
+                if is_trial(live) and current and current["episode_id"] == eid and await self.pathway(guild,live,current) in ("kc","rpp"):
                     ready.append((live,eid,total,qualified))
             except discord.HTTPException:
                 unavailable.append(member.display_name)

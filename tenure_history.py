@@ -17,7 +17,7 @@ log = logging.getLogger("WOMBot")
 UTC = datetime.timezone.utc
 NOVUS_GUILD_ID = 1532817291048124466
 EASTERN = ZoneInfo("America/New_York")
-RESET_POLICY_START = datetime.datetime(2026, 11, 15, tzinfo=EASTERN)
+RESET_POLICY_START = datetime.datetime(2026, 11, 16, tzinfo=EASTERN)
 REQUESTED_REJOIN_RESETS = ("Loves Rain", "LietGhost", "Wise Old Nut", "Coxy Snurmus")
 
 
@@ -271,7 +271,8 @@ def get_tenure_reset(cursor, guild_id, group_id, player_id):
         WHERE guild_id = ? AND group_id = ? AND player_id = ?
     """, (guild_id, group_id, player_id))
     row = cursor.fetchone()
-    return parse_timestamp(row[0]) if row else None
+    reset = parse_timestamp(row[0]) if row else None
+    return reset if reset and reset >= RESET_POLICY_START else None
 
 
 def write_tenure_reset(cursor, guild_id, group_id, player_id, joined_at):

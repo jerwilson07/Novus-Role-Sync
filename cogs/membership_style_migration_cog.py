@@ -9,7 +9,7 @@ import discord
 from novus_logging import check, notice, bind_novus_ui, replace_status_marks
 from discord.ext import commands
 
-from cogs.application_cog import GUILD, CATEGORY, REPORT_TITLE, db, get_report
+from cogs.application_cog import GUILD, CATEGORY, REPORT_TITLE, REPORT_TITLES, DETAILS_TITLE, DETAILS_TITLES, db, get_report
 from cogs.vouches_cog import VouchesCog, NOVUS_MOD_CHAT_CHANNEL_ID
 
 logger = logging.getLogger("WOMBot")
@@ -23,8 +23,9 @@ def brand(embed, logo, footer=None):
 
 def migrate_details(message, logo):
     old = message.embeds[0]
-    if old.title == "Novus Application Details":
+    if old.title in DETAILS_TITLES:
         revised = old.copy()
+        revised.title = DETAILS_TITLE
         brand(revised, logo)
         # Rebind images to retained attachment names, not expired CDN URLs.
         images = [a for a in message.attachments if (a.content_type or "").startswith("image/") or re.search(r"\.(png|jpe?g|gif|webp|bmp|avif)$", a.filename, re.I)]
@@ -55,7 +56,7 @@ def migrate_details(message, logo):
     applicant, account, pathway, referral = match.groups()
     if len(referral) > 1024 or any(len(x)>1024 for x in (account,pathway)):
         return None
-    revised = discord.Embed(title="Novus Application Details", description=f"**Applicant:** {applicant}", color=discord.Color.blurple())
+    revised = discord.Embed(title=DETAILS_TITLE, description=f"**Applicant:** {applicant}", color=discord.Color.blurple())
     brand(revised, logo, "Novus Membership • Staff review pending")
     for name, value in (("Account Type",account),("Membership Pathway",pathway),("How They Found Us",referral)):
         revised.add_field(name=name,value=value,inline=False)
@@ -146,6 +147,41 @@ class MembershipStyleMigrationCog(commands.Cog):
         self.bot=bot
         self.running=False
 
+    async def refresh_branded_titles(self, guild, application, reports, forms):
+        key="membership-title-star-v1"
+        with closing(db()) as conn:
+            if conn.execute("SELECT 1 FROM membership_style_migrations WHERE version=?", (key,)).fetchone():
+                return
+        changed=errors=skipped=0
+        for rows, old_title, new_title in ((reports, "Novus Applicant Eligibility", REPORT_TITLE),
+                                           (forms, "Novus Application Details", DETAILS_TITLE)):
+            for channel_id,message_id in rows:
+                try:
+                    channel=guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+                    if not isinstance(channel,discord.TextChannel) or channel.guild.id!=GUILD:
+                        continue
+                    async with application.locks.setdefault(channel_id,asyncio.Lock()):
+                        msg=await channel.fetch_message(message_id)
+                        if msg.author.id!=self.bot.user.id or not msg.embeds or msg.embeds[0].title!=old_title:
+                            continue
+                        # Never edit evidence cards when Discord has not returned their attachments.
+                        if new_title==DETAILS_TITLE and any(e.image.url for e in msg.embeds) and not msg.attachments:
+                            skipped+=1
+                            continue
+                        embeds=[e.copy() for e in msg.embeds]
+                        embeds[0].title=new_title
+                        await msg.edit(embeds=embeds, attachments=msg.attachments, allowed_mentions=discord.AllowedMentions.none())
+                        changed+=1
+                except discord.NotFound:
+                    continue
+                except Exception:
+                    errors+=1
+                    logger.exception("Membership title refresh failed channel=%s message=%s",channel_id,message_id)
+        logger.info("Membership title refresh changed=%s skipped_evidence=%s errors=%s",changed,skipped,errors)
+        if not errors:
+            with closing(db()) as conn, conn:
+                conn.execute("INSERT OR IGNORE INTO membership_style_migrations VALUES (?,?)",(key,datetime.datetime.now(datetime.timezone.utc).isoformat()))
+
     @commands.Cog.listener()
     async def on_ready(self):
         if self.running:
@@ -155,8 +191,7 @@ class MembershipStyleMigrationCog(commands.Cog):
             await asyncio.sleep(15)
             with closing(db()) as conn, conn:
                 conn.execute("CREATE TABLE IF NOT EXISTS membership_style_migrations (version TEXT PRIMARY KEY, finished_at TEXT NOT NULL)")
-                if conn.execute("SELECT 1 FROM membership_style_migrations WHERE version=?",(VERSION,)).fetchone():
-                    return
+                style_done=bool(conn.execute("SELECT 1 FROM membership_style_migrations WHERE version=?",(VERSION,)).fetchone())
                 reports=conn.execute("SELECT channel_id, message_id FROM application_kc_reports").fetchall()
                 forms=conn.execute("SELECT channel_id, response_id FROM application_form_submissions").fetchall()
             guild=self.bot.get_guild(GUILD)
@@ -164,6 +199,9 @@ class MembershipStyleMigrationCog(commands.Cog):
                 return
             application=self.bot.get_cog("ApplicationCog")
             if application is None:
+                return
+            if style_done:
+                await self.refresh_branded_titles(guild, application, reports, forms)
                 return
             logo=(guild.icon or self.bot.user.display_avatar).url
             counts={"reports":0,"submissions":0,"staff":0,"missing":0,"skipped":0,"errors":0}
@@ -181,10 +219,11 @@ class MembershipStyleMigrationCog(commands.Cog):
                                 counts["skipped"]+=1
                                 continue
                             if kind=="reports":
-                                if message.embeds[0].title!=REPORT_TITLE:
+                                if message.embeds[0].title not in REPORT_TITLES:
                                     counts["skipped"]+=1
                                     continue
                                 embed=message.embeds[0].copy()
+                                embed.title=REPORT_TITLE
                                 footer=embed.footer.text or ""
                                 if footer.startswith("Wise Old Man • Last updated: "):
                                     footer=footer.replace("Wise Old Man • Last updated: ","Novus Membership • WOM: ",1)

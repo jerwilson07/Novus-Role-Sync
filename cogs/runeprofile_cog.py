@@ -413,7 +413,7 @@ class RuneProfileCog(commands.Cog):
         trial=self.bot.get_cog("TrialKCEligibilityCog")
         if not sync or not trial:
             return
-        key=f"novus_ca_staff_report_corrections_complete_20261126:{GUILD}"
+        key=f"novus_ca_staff_report_clean_20261126:{GUILD}"
         with closing(db()) as conn:
             if sync._one_time_delivery_sent(conn.cursor(),key):
                 return
@@ -495,8 +495,7 @@ class RuneProfileCog(commands.Cog):
             embed.add_field(name=name,value=value,inline=field.inline)
         for heading,items in (("Active Trial Members",[line for _,line in sorted(trial_lines)]),
                               ("Automatic Discord CA Promotions",granted),
-                              ("In-Game CA Promotions Needed",ingame),
-                              ("CA Tenure Corrections Completed",corrections)):
+                              ("In-Game CA Promotions Needed",ingame)):
             if not items:
                 continue
             chunk=[]
@@ -507,13 +506,13 @@ class RuneProfileCog(commands.Cog):
                 chunk.append(line)
             if chunk:
                 embed.add_field(name=f"{heading} ({len(items)})" if not any(f.name.startswith(heading) for f in embed.fields) else heading+" (continued)",value="\n".join(chunk),inline=False)
-        embed.set_footer(text="✦ Novus Noon Staff Sync • CA Update • Corrections Verified")
+        embed.set_footer(text="✦ Novus Noon Staff Sync • CA Update")
         if len(embed)>6000 or len(embed.fields)>25:
             logger.warning("CA report revision exceeds Discord embed limits")
             return
         await msg.edit(embed=embed,allowed_mentions=discord.AllowedMentions.none())
         sync._mark_one_time_delivery(key,msg.id)
-        logger.info("Novus final CA staff report revised message=%s eligible=%s under_minimum=%s trials=%s ingame=%s",msg.id,len(granted),len(corrections),len(trial_lines),len(ingame))
+        logger.info("Novus clean CA staff report revised message=%s eligible=%s under_minimum=%s trials=%s ingame=%s",msg.id,len(granted),len(corrections),len(trial_lines),len(ingame))
 
     async def requested_staff_report(self,guild,day):
         # One explicitly requested replacement report today, after fresh CA data.

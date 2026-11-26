@@ -62,11 +62,10 @@ class VerifyView(discord.ui.View):
     def __init__(self, cog):
         super().__init__(timeout=None)
         self.cog = cog
-        self.verify_button.emoji = check()
 
     @discord.ui.button(
         label="Click Here to Verify Your RSN",
-        emoji="✅",
+        emoji=check(),
         style=discord.ButtonStyle.success,
         custom_id="novus:verify:rsn:v1",
     )

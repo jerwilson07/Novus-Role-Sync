@@ -6167,12 +6167,14 @@ class TasksCog(commands.Cog):
                     logger.exception("Staff report trial deadline lookup failed discord=%s",member.id)
                     entries.append((9999,f"- {member.mention}: deadline temporarily unavailable"))
             trial_lines=[line for _,line in sorted(entries)]
-        ca_lines, ca_status = [], None
+        ca_lines, ca_status, ca_ingame = [], None, []
         if guild.id == NOVUS_GUILD_ID and log_channel_id == NOVUS_MOD_CHAT_CHANNEL_ID:
             rp = self.bot.get_cog("RuneProfileCog")
             try:
                 if rp:
-                    ca_lines, ca_status = rp.promotion_report(guild, group_data.get("memberships", []))
+                    ca_result = rp.promotion_report(guild, group_data.get("memberships", []))
+                    ca_lines, ca_status = ca_result[:2]
+                    ca_ingame = ca_result[2] if len(ca_result)>2 else []
                 else:
                     logger.warning("RuneProfile audit module unavailable for staff report")
             except Exception:
@@ -6181,6 +6183,7 @@ class TasksCog(commands.Cog):
 
         actionable_items = any((
             ca_lines,
+            ca_ingame,
             automatic_promotions,
             reset_rank_updates,
             reset_names,
@@ -6428,23 +6431,26 @@ class TasksCog(commands.Cog):
                 )
 
             if ca_status is not None:
-                lines = []
-                for line in ca_lines:
-                    if len("\n".join(lines+[line])) > 820:
-                        break
-                    lines.append(line)
-                if len(lines)<len(ca_lines):
-                    lines.append(f"… {len(ca_lines)-len(lines)} more candidates")
-                if not lines:
-                    if "staff review required" not in ca_status:
-                        lines.append("No complete CA eligibility assessment available.")
-                    elif ca_status.startswith("0 members"):
-                        lines.append("No synced CA profiles verified.")
-                    else:
-                        lines.append("No verified pending CA promotions.")
-                lines.append(ca_status)
-                embed.add_field(name=f"Combat Achievement Promotions ({len(ca_lines)})",
-                                value="\n".join(lines)[:1024],inline=False)
+                # Keep CA grants and in-game actions distinct; do not silently
+                # truncate the original 13 grants at nine members.
+                for heading,items in (("Automatic Discord CA Promotions",ca_lines),
+                                      ("In-Game CA Promotions Needed",ca_ingame)):
+                    if not items:
+                        continue
+                    chunks=[]
+                    current=[]
+                    for line in items:
+                        if len("\n".join(current+[line]))>1000 and current:
+                            chunks.append("\n".join(current))
+                            current=[]
+                        current.append(line)
+                    if current:
+                        chunks.append("\n".join(current))
+                    for index,value in enumerate(chunks):
+                        name=f"{heading} ({len(items)})" if index==0 else f"{heading} (continued)"
+                        embed.add_field(name=name,value=value,inline=False)
+                if not ca_lines and not ca_ingame and "tenure minimum applied" not in ca_status:
+                    embed.add_field(name="Combat Achievement Audit",value=ca_status,inline=False)
 
             # Discord caps the sum of embed text at 6,000 characters.
             # Preserve all headings/counts and keep each visible excerpt whole.
@@ -6467,12 +6473,11 @@ class TasksCog(commands.Cog):
                 )
                 if ca_status is not None and rp and hasattr(rp,"mark_reported_awards"):
                     for field in embed.fields:
-                        if field.name.startswith("Combat Achievement Promotions ("):
+                        if field.name.startswith("Automatic Discord CA Promotions ("):
                             try:
                                 rp.mark_reported_awards(field.value)
                             except Exception:
                                 logger.exception("Could not save CA award report acknowledgement")
-                            break
                 if missing_tenure_field_index is not None:
                     # Only start the cooldown for mentions actually shown.
                     value = embed.fields[missing_tenure_field_index].value

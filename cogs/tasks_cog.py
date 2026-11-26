@@ -6349,20 +6349,6 @@ class TasksCog(commands.Cog):
                     inline=False
                 )
 
-            if ca_status is not None:
-                lines = []
-                for line in ca_lines:
-                    if len("\n".join(lines+[line])) > 820:
-                        break
-                    lines.append(line)
-                if len(lines)<len(ca_lines):
-                    lines.append(f"… {len(ca_lines)-len(lines)} more candidates")
-                if not lines:
-                    lines.append("No verified pending CA promotions." if ca_status.startswith("0 members") is False and "staff review required" in ca_status else "No complete CA eligibility assessment available." if "staff review required" not in ca_status else "No synced CA profiles verified.")
-                lines.append(ca_status)
-                embed.add_field(name=f"Combat Achievement Promotions ({len(ca_lines)})",
-                                value="\n".join(lines)[:1024],inline=False)
-
             if due_today_promotions:
                 embed.add_field(
                     name=(
@@ -6517,6 +6503,20 @@ class TasksCog(commands.Cog):
                     ),
                     inline=False
                 )
+
+            if ca_status is not None:
+                lines = []
+                for line in ca_lines:
+                    if len("\n".join(lines+[line])) > 820:
+                        break
+                    lines.append(line)
+                if len(lines)<len(ca_lines):
+                    lines.append(f"… {len(ca_lines)-len(lines)} more candidates")
+                if not lines:
+                    lines.append("No verified pending CA promotions." if ca_status.startswith("0 members") is False and "staff review required" in ca_status else "No complete CA eligibility assessment available." if "staff review required" not in ca_status else "No synced CA profiles verified.")
+                lines.append(ca_status)
+                embed.add_field(name=f"Combat Achievement Promotions ({len(ca_lines)})",
+                                value="\n".join(lines)[:1024],inline=False)
 
             # Discord caps the sum of embed text at 6,000 characters.
             # Preserve all headings/counts and keep each visible excerpt whole.

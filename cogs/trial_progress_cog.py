@@ -127,6 +127,54 @@ class TrialProgressCog(commands.Cog):
             detail="⚠️ Pathway pending staff confirmation"
         return pathway or "unknown",f"**{member.mention}**\n{detail}\n{end}",eid,current_ca
 
+    async def revise_sirgrotesque(self,guild,tc,hub,now):
+        """One-time requested edit of the existing Nov 26 trial report."""
+        if now.astimezone(ET).date()!=dt.date(2026,11,26):
+            return
+        sync=self.bot.get_cog("TasksCog")
+        if not sync:
+            return
+        key=f"novus_sirgrotesque_trial_revision_20261126:{GUILD}"
+        with closing(db()) as conn:
+            if sync._one_time_delivery_sent(conn.cursor(),key):
+                return
+        matches=[m for m in guild.members if m.display_name.casefold()=="sirgrotesque" and is_trial(m)]
+        if len(matches)!=1:
+            return
+        member=await guild.fetch_member(matches[0].id)
+        if not is_trial(member):
+            return
+        group,status=await sync.get_wom_group(25802)
+        if status!=200 or group.get("id")!=25802:
+            return
+        roster=[m for m in group.get("memberships",[]) if any(isinstance(n,str) and n.strip().casefold()=="sirgrotesque" for n in (m.get("player",{}).get("username"),m.get("player",{}).get("displayName")))]
+        if len(roster)!=1:
+            logger.info("SirGrotesque trial revision: WOM clan roster not yet updated")
+            return
+        payload=await tc.wom_payload(member)
+        if not payload or not fresh(payload,now):
+            logger.info("SirGrotesque trial revision: WOM KC snapshot not yet fresh")
+            return
+        vals=payload["values"]
+        if not any(type(vals.get(key)) is int for _,key in RAIDS):
+            logger.info("SirGrotesque trial revision: raid KC still unverified")
+            return
+        pathway,line,eid,_=await self.entry(tc,guild,member,now)
+        if pathway!="kc" or "profile update required" in line or "KC unverified" in line:
+            return
+        msg=await hub.fetch_message(1575570534094213215)
+        if msg.author.id!=self.bot.user.id or TITLE not in msg.content:
+            return
+        import re
+        pattern=r"(?m)^\*\*<@!?"+str(member.id)+r">\*\*\n[^\n]*(?:\n[^\n]+)*?(?=\n\n|\Z)"
+        content,count=re.subn(pattern,lambda _:line,msg.content)
+        if count!=1 or len(content)>2000:
+            logger.warning("SirGrotesque trial revision could not identify unique message entry")
+            return
+        await msg.edit(content=content,allowed_mentions=discord.AllowedMentions.none())
+        sync._mark_one_time_delivery(key,msg.id)
+        logger.info("SirGrotesque trial progress revised message=%s kc=%s snapshot=%s",msg.id,kc_qualification(vals)[0],payload.get("snapshot"))
+
     @tasks.loop(minutes=10)
     async def run(self):
         now=dt.datetime.now(dt.timezone.utc)
@@ -135,8 +183,7 @@ class TrialProgressCog(commands.Cog):
         day=now.astimezone(ET).date().isoformat()
         try:
             with closing(db()) as c:
-                if c.execute("SELECT 1 FROM trial_progress_deliveries WHERE day=?",(day,)).fetchone():
-                    return
+                delivered=c.execute("SELECT 1 FROM trial_progress_deliveries WHERE day=?",(day,)).fetchone()
             guild=self.bot.get_guild(GUILD)
             tc=self.bot.get_cog("TrialKCEligibilityCog")
             if not guild or not tc or not guild.me:
@@ -146,6 +193,12 @@ class TrialProgressCog(commands.Cog):
                 return
             perms=hub.permissions_for(guild.me)
             if not (perms.send_messages and perms.read_message_history):
+                return
+            if delivered:
+                if not guild.chunked:
+                    await guild.chunk(cache=True)
+                if guild.chunked:
+                    await self.revise_sirgrotesque(guild,tc,hub,now)
                 return
             roles=[guild.get_role(r) for r in (COUNCIL_ROLE_ID,MODERATOR_ROLE_ID,TRIAL_MOD_ROLE_ID)]
             if any(r is None for r in roles):

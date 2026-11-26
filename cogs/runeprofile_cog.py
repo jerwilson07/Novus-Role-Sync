@@ -106,10 +106,12 @@ class RuneProfileCog(commands.Cog):
         perms=channel.permissions_for(guild.me)
         if not (perms.send_messages and perms.embed_links and perms.read_message_history):
             return
+        # Collection and CA tracking should continue even before promotion
+        # role mapping or announcement design has been approved.
         master_role, gm_role = guild.get_role(MASTER), guild.get_role(GRANDMASTER)
-        if not master_role or not gm_role or master_role.name.casefold() != "master ca" or gm_role.name.casefold() != "grandmaster ca":
-            logger.warning("RuneProfile audit skipped: configured CA roles not found")
-            return
+        logger.info("RuneProfile CA role mapping review configured=%s candidates=%s",
+                    [(r.id,r.name) for r in (master_role,gm_role) if r],
+                    [(r.id,r.name) for r in guild.roles if "master" in r.name.casefold()])
         group,status=await sync.get_wom_group(25802)
         if status!=200 or not has_verifiable_wom_roster(group) or group.get("id")!=25802:
             return
@@ -181,6 +183,8 @@ class RuneProfileCog(commands.Cog):
         """Pending promotions from today's completed audit, rechecked against live roles.
         No role mutations or standalone posts; candidates remain actionable until granted.
         """
+        if os.getenv("NOVUS_RUNEPROFILE_NOTICES_ENABLED","").lower()!="true":
+            return [],None
         day=dt.datetime.now(ET).date().isoformat()
         master_role,gm_role=guild.get_role(MASTER),guild.get_role(GRANDMASTER)
         if not master_role or not gm_role or master_role.name.casefold()!="master ca" or gm_role.name.casefold()!="grandmaster ca":

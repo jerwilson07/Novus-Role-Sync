@@ -2,7 +2,7 @@ import datetime as dt
 import unittest
 from zoneinfo import ZoneInfo
 
-from cogs.trial_kc_eligibility_cog import kc_qualification, week_key
+from cogs.trial_kc_eligibility_cog import kc_qualification, week_key, trial_deadline
 
 class TrialKCEligibilityTests(unittest.TestCase):
     def test_standard_total_includes_supported_raid_modes_only(self):
@@ -23,6 +23,15 @@ class TrialKCEligibilityTests(unittest.TestCase):
     def test_unknown_or_negative_values_never_create_false_qualification(self):
         self.assertEqual(kc_qualification({"chambers_of_xeric":-1,"theatre_of_blood":None,
                                            "the_fractured_archive":True}),(0,None))
+
+    def test_trial_deadline_depends_on_pathway_and_verified_start(self):
+        et=ZoneInfo("America/New_York")
+        started=dt.datetime(2026,1,31,12,tzinfo=et)
+        self.assertEqual(trial_deadline(started,"raidtrial"),dt.datetime(2026,2,14,12,tzinfo=et))
+        for path in ("kc","rpp"):
+            self.assertEqual(trial_deadline(started,path),dt.datetime(2026,2,28,12,tzinfo=et))
+        self.assertIsNone(trial_deadline(started,None))
+        self.assertIsNone(trial_deadline(None,"raidtrial"))
 
     def test_week_boundary_is_monday_five_pm_eastern(self):
         et=ZoneInfo("America/New_York")

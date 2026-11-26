@@ -5,6 +5,7 @@ import calendar
 import json
 import time
 import logging
+import os
 import sqlite3
 from contextlib import closing
 from urllib.parse import quote
@@ -435,7 +436,7 @@ class TrialKCEligibilityCog(commands.Cog):
                 if all_ca and all_kc:
                     milestones.append(("review","Automated CA and KC benchmarks met"))
                 new=[(k,n) for k,n in milestones if k not in seen]
-                if new:
+                if new and os.getenv("NOVUS_RUNEPROFILE_NOTICES_ENABLED","").lower()=="true":
                     live=await guild.fetch_member(member.id)
                     current=episode(member.id)
                     if not is_trial(live) or not current or current["episode_id"]!=eid or await self.pathway(guild,live,current)!="rpp":

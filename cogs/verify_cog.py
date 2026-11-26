@@ -41,7 +41,7 @@ def parse_rsn(value):
     return nickname
 
 
-class VerifyModal(discord.ui.Modal, title="Novus Account Verification"):
+class VerifyModal(discord.ui.Modal, title="✦ Novus Account Verification"):
     username = discord.ui.TextInput(
         label="OSRS username(s) - primary first",
         placeholder="Minor Mohi | Echo Mohi",

@@ -15,6 +15,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from common import WOM_API_KEY, sanitize_rsn
+from rpp_progress import RPP_KC, rpp_progress
 from novus_logging import check, notice
 from cogs.application_cog import GUILD, CATEGORY, TEST_CHANNEL, RAIDS, EXTRAS, APPLICATION_OPTIONS, DETAILS_TITLES, extract, primary_name, is_staff, trial_vouch_records
 from cogs.vouches_cog import is_trial
@@ -352,7 +353,20 @@ class TrialKCEligibilityCog(commands.Cog):
             return None
         if not data.get("latestSnapshot"):
             return None
-        return extract(data)
+        result = extract(data)
+        bosses = (data['latestSnapshot'].get('data') or {}).get('bosses') or {}
+        for _,key,_,_ in RPP_KC:
+            kc = (bosses.get(key) or {}).get('kills')
+            result['values'][key] = kc if type(kc) is int and kc >= 0 else None
+        return result
+
+    async def rpp_member_progress(self, payload):
+        """Use the WOM-verified account name and shared rate-limited API client."""
+        payload = payload or {}
+        rp = self.bot.get_cog("RuneProfileCog")
+        name = payload.get("name")
+        tasks = await rp.task_data(name) if rp and name else None
+        return rpp_progress(payload.get("values"), tasks)
 
     async def preview_progress(self, guild):
         """Read-only staff-requested preview. No Discord messages or role changes."""
@@ -392,7 +406,7 @@ class TrialKCEligibilityCog(commands.Cog):
                     else:
                         entry["wom_unavailable"] = True
                 if pathway=="rpp":
-                    entry["rpp_progress"]="staff confirmation required"
+                    entry["rpp_progress"]=await self.rpp_member_progress(payload)
             except Exception:
                 logger.exception("Trial progress preview failed member=%s",member.id)
                 entry["error"] = True

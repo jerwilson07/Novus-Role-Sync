@@ -79,6 +79,35 @@ def coverage_ok(start,end):
     if not times or (times[0]-start).total_seconds()>7200 or (end-times[-1]).total_seconds()>7200:
         return False
     return all((b-a).total_seconds()<=7200 for a,b in zip(times,times[1:]))
+def monthly_series(rows, key, metrics, limit=12):
+    """Calendar-aligned history; missing periods and missing coverage stay null."""
+    history={}
+    for month,raw in rows:
+        try:
+            dt.datetime.strptime(month,"%Y-%m")
+            value=json.loads(raw)
+            if isinstance(value,dict):
+                history[month]=value
+        except (ValueError,TypeError):
+            continue
+    history[key]=metrics
+    try:
+        cursor=dt.datetime.strptime(key,"%Y-%m").replace(tzinfo=ET)
+    except ValueError:
+        return []
+    result=[]
+    for _ in range(limit):
+        month=cursor.strftime("%Y-%m")
+        result.append((month,history.get(month,{})))
+        cursor=previous_month(cursor)
+    result.reverse()
+    while result and not result[0][1]:
+        result.pop(0)
+    return result
+
+def observed_rate(n,d):
+    return 100*n/d if d else None
+
 def record(member,event,detail=None):
     with closing(db()) as conn,conn:
         conn.execute("INSERT INTO council_member_events(member_id,occurred_at,event,detail) VALUES (?,?,?,?)",(member,stamp(now()),event,detail))
@@ -208,6 +237,46 @@ class CouncilAnalyticsCog(commands.Cog):
                 approved+=1
                 pathways[pathway]+=1
         return opened,approved,converted,pathways,unknown
+    def recruitment_detail(self,start,end):
+        rows=query("""SELECT r.applicant_id,r.message_id,o.origin,a.pathway,a.approved_at
+            FROM application_kc_reports r
+            JOIN council_application_origins o ON o.channel_id=r.channel_id AND o.applicant_id=r.applicant_id
+            LEFT JOIN application_final_approvals a ON a.channel_id=r.channel_id AND a.message_id=r.message_id
+            WHERE r.channel_id!=? AND r.applicant_id IS NOT NULL AND o.origin IN ('new','trial')""",(TEST_CHANNEL,))
+        durations=[]
+        # One earliest recorded approval per person, never count repeat applications twice.
+        first={}
+        for member,message,origin,pathway,approved_at in rows:
+            when=parse(approved_at)
+            if not when or when>=end:
+                continue
+            opened=discord.utils.snowflake_time(message)
+            if start<=when<end and when>=opened:
+                durations.append((when-opened).total_seconds()/3600)
+            if member not in first or when<first[member][0]:
+                first[member]=(when,pathway)
+        # Point-in-time roster retention for first recorded approvals whose horizon
+        # matured this period. No inference for missing snapshots or pretracking approvals.
+        outcomes={}
+        path_outcomes={}
+        for days in (30,60,90):
+            n=d=0
+            by_path=defaultdict(lambda:[0,0])
+            for member,(when,pathway) in first.items():
+                horizon=when+dt.timedelta(days=days)
+                if when<started() or not start<=horizon<end:
+                    continue
+                roster=snapshot_near(horizon)
+                if roster is None:
+                    continue
+                retained=int(member in roster)
+                n+=retained;d+=1
+                if pathway in PATHWAYS:
+                    by_path[pathway][0]+=retained;by_path[pathway][1]+=1
+            outcomes[str(days)]={"retained":n,"measured":d,"rate":observed_rate(n,d)}
+            path_outcomes[str(days)]={p:{"retained":v[0],"measured":v[1],"rate":observed_rate(*v)} for p,v in by_path.items()}
+        return {"approval_hours":statistics.median(durations) if durations else None,
+                "approval_sample":len(durations),"cohort_retention":outcomes,"pathway_retention":path_outcomes}
     def trial_stats(self,start,end):
         rows=query("SELECT discord_id,started_at,entry_source,ended_at,outcome FROM trial_analytics_episodes WHERE guild_id=?",(GUILD,))
         approvals=query("""SELECT r.applicant_id,a.pathway,a.approved_at FROM application_final_approvals a
@@ -305,6 +374,7 @@ class CouncilAnalyticsCog(commands.Cog):
         active_players=set()
         covered_accounts=set()
         first=Counter()
+        member_gains=Counter()
         if isinstance(gains,list):
             seen=set()
             for entry in gains:
@@ -329,6 +399,7 @@ class CouncilAnalyticsCog(commands.Cog):
                     kc[name]+=g
                     if g>0:
                         active_players.add(owners[pid])
+                        member_gains[owners[pid]]+=g
                     if name in ("tzkal_zuk","sol_heredit") and x==0 and y>=1:
                         first[name]+=1
         measured_members={owners[p] for p in covered_accounts}
@@ -381,6 +452,19 @@ class CouncilAnalyticsCog(commands.Cog):
         engagement=(f"**Members with positive boss/raid gains:** {pct(len(active_players),len(measured_members))}\n**No positive observed gains:** {len(measured_members-active_players)}\n**No comparable data:** {len(set(members)-measured_members)}\n**Account coverage:** {len(covered_accounts)}/{len(owners)} linked accounts" if covered_accounts else "WOM gain coverage unavailable.")
         field("Member Engagement",engagement)
         metrics={"full":len(end_set) if end_set is not None else None,"raid_kc":raid_total if covered_accounts else None,"activity_members":len(active_players) if covered_accounts else None,"measured":len(measured_members),"coverage_accounts":len(covered_accounts),"owners":len(owners),"joins":kinds["joined"] if complete else None,"departures":kinds["departed"] if complete else None,"approved":approved if complete else None,"trial_passed":passed if complete and not unknown else None}
+        detail=self.recruitment_detail(start,end) if not lifetime else {}
+        metrics.update({"recruitment_approval_rate":observed_rate(converted,opened) if complete else None,
+                        "approval_hours":detail.get("approval_hours") if complete else None,
+                        "approval_sample":detail.get("approval_sample",0),
+                        "pvm_engagement_rate":observed_rate(len(active_players),len(measured_members)) if covered_accounts else None,
+                        "pvm_top10_share":observed_rate(sum(v for _,v in member_gains.most_common(10)),sum(member_gains.values())) if covered_accounts else None,
+                        "roster_retention_rate":observed_rate(len(start_set&end_set),len(start_set)) if complete else None,
+                        "cohort_retention":detail.get("cohort_retention",{}),
+                        "pathway_retention":detail.get("pathway_retention",{})})
+        for horizon,outcome in detail.get("cohort_retention",{}).items():
+            metrics["new_retention_"+horizon]=outcome["rate"]
+        # Only comparable calendar months, never the lifetime aggregate.
+        trend=monthly_series(query("SELECT report_key,metrics_json FROM council_monthly_reports WHERE report_key LIKE '____-__' AND report_key<? ORDER BY report_key",(key,)),key,metrics) if not lifetime else []
         previous_key=previous_month(start).strftime("%Y-%m") if not lifetime else None
         prior=query("SELECT metrics_json FROM council_monthly_reports WHERE report_key=?",(previous_key,)) if previous_key else []
         if prior:
@@ -412,32 +496,14 @@ class CouncilAnalyticsCog(commands.Cog):
             "first":dict(first),"diary":sum(diary.values()),"promotions":dict(promo),
             "ranks":dict(rank_counts),"engaged":len(active_players),"measured":len(measured_members),
             "unmeasured":len(set(members)-measured_members),"covered":len(covered_accounts),"owners":len(owners),
-            "prior":json.loads(prior[0][0]) if prior else None,"metrics":metrics
+            "prior":json.loads(prior[0][0]) if prior else None,"metrics":metrics,"trend":trend
         }
         return embed,metrics,chart_data
 
     async def deliver(self,guild,channel,start,end,key,lifetime=False):
         saved=query("SELECT message_id,sent_at FROM council_monthly_reports WHERE report_key=?",(key,))
         if saved:
-            # Restyle the first text-only lifetime report in place, once.
-            if not lifetime:
-                return
-            try:
-                existing=await channel.fetch_message(saved[0][0])
-            except discord.NotFound:
-                return
-            if existing.author.id!=self.bot.user.id or not existing.embeds or (any(a.filename=="novus-roster-v2.png" for a in existing.attachments)):
-                return
-            cutoff=parse(saved[0][1]) or end
-            embed,metrics,chart_data=await self.build(guild,start,cutoff,key,lifetime)
-            images=await asyncio.to_thread(render_dashboards,chart_data)
-            embed,chart_embeds,files=dashboard_message(embed,images,chart_data)
-            if self.council_channel(guild)!=channel:
-                return
-            await existing.edit(embeds=[embed]+chart_embeds,attachments=files,allowed_mentions=discord.AllowedMentions.none())
-            with closing(db()) as conn,conn:
-                conn.execute("UPDATE council_monthly_reports SET metrics_json=? WHERE report_key=?",(json.dumps(metrics),key))
-            logger.info("Council lifetime report updated with charts message=%s",existing.id)
+            # Persisted reports are fixed historical baselines; do not rewrite every cycle.
             return
         # Durable recovery: a successful Discord send before a DB commit is
         # recognized by the exact bot-owned footer, never sent twice.
@@ -526,6 +592,29 @@ def render_dashboards(d):
         ax.set_xlim(0,maximum*1.32)
         for i,v in enumerate(values):
             ax.text((v or 0)+maximum*.025,i,"N/A" if v is None else f"{v:,.0f}",color=MUTED if v is None else FG,va="center",fontsize=14,weight="bold")
+    def lines(ax,title,series,percent=False):
+        history=d.get("trend",[])
+        if not history or not any(row.get(k) is not None for _,row in history for k,_,_ in series):
+            return empty(ax,title,"Comparable monthly data pending")
+        prepare(ax,title)
+        import math
+        xs=list(range(len(history)))
+        for k,label,color in series:
+            ys=[row.get(k) if row.get(k) is not None else math.nan for _,row in history]
+            if any(math.isfinite(v) for v in ys):
+                ax.plot(xs,ys,color=color,marker="o",markersize=5,linewidth=2,label=label)
+        ax.set_xticks(xs,[dt.datetime.strptime(m,"%Y-%m").strftime("%b %y") for m,_ in history],rotation=35,ha="right",fontsize=10)
+        ax.grid(axis="y",alpha=.15,color=MUTED)
+        if percent:
+            ax.set_ylim(0,105)
+            from matplotlib.ticker import PercentFormatter
+            ax.yaxis.set_major_formatter(PercentFormatter(xmax=100))
+        else:
+            ax.set_ylim(bottom=0)
+        if len(series)>1:
+            ax.legend(loc="best",facecolor=PANEL,labelcolor=FG,fontsize=9,framealpha=.85)
+        if len(history)==1:
+            ax.set_xlim(-.5,.5)
     def save(fig,footer):
         fig.text(.045,.027,footer,color=MUTED,fontsize=10,va="bottom",linespacing=1.5)
         buf=io.BytesIO()
@@ -537,7 +626,9 @@ def render_dashboards(d):
     if d["wom_complete"] or d["wom_joins"] or d["wom_leaves"]:
         bars(a[1],"WOM account movements"+("" if d["wom_complete"] else " (partial)"),[("Joined",d["wom_joins"]),("Left",d["wom_leaves"])],[GREEN,RED])
     else:empty(a[1],"WOM account movements","History unavailable")
-    if d["retention"] is not None:
+    if not d["lifetime"]:
+        lines(a[2],"New member retention",[("new_retention_30","30-day",GREEN),("new_retention_60","60-day",BLUE),("new_retention_90","90-day",GOLD)],percent=True)
+    elif d["retention"] is not None:
         bars(a[2],"Roster retention",[("Retained (%)",d["retention"])],GREEN)
         a[2].set_xlim(0,132)
     elif d["tenures"]:
@@ -580,7 +671,19 @@ def render_dashboards(d):
         else:empty(a[2],"Month-over-month","No comparable prior period")
     else:empty(a[2],"Month-over-month","Baseline edition\nComparable monthly data pending")
     four=save(f,"First KC counts are lower bounds, not a complete achievement history.\nUnverified historical completions are not included.")
-    return [one,two,three,four]
+    if d["lifetime"]:
+        return [one,two,three,four]
+    f,a=board("Recruitment trends","Monthly outcomes and responsiveness",[2.5,2.5,2.5])
+    lines(a[0],"Full-member roster",[("full","Full members",GREEN)])
+    lines(a[1],"Application approval rate",[("recruitment_approval_rate","Approved by cutoff",BLUE)],percent=True)
+    lines(a[2],"Median time to approval (hours)",[("approval_hours","Hours",GOLD)])
+    five=save(f,"Approval rates use classified applications opened in the month.\nPending applications are not classified as rejections; gaps remain missing.")
+    f,a=board("Engagement trends","Participation and concentration",[2.5,2.5,2.5])
+    lines(a[0],"Members with observed PvM gains",[("pvm_engagement_rate","Measured members",GREEN)],percent=True)
+    lines(a[1],"Share of gains by top 10 members",[("pvm_top10_share","Top 10 share",GOLD)],percent=True)
+    lines(a[2],"Observed raid KC gained",[("raid_kc","Raid KC",BLUE)])
+    six=save(f,"WOM coverage varies by month; these are observed gains, not time online.\nActivity concentration uses boss and raid gains across measured accounts.")
+    return [one,two,three,four,five,six]
 
 def dashboard_message(embed,images,d):
     # A short header, charts immediately below, then only supplemental notes.
@@ -603,6 +706,18 @@ def dashboard_message(embed,images,d):
         +(f'{d["duration"]:.1f} days' if d["duration"] is not None else "Not measurable")
         +f'\nHistorical unclassified applications: {d["unknown_apps"]}'
     ),inline=False)
+    if not d["lifetime"]:
+        m=d["metrics"]
+        cohort=m.get("cohort_retention",{})
+        detail=[]
+        for days in ("30","60","90"):
+            v=cohort.get(days,{})
+            detail.append(f'{days}-day new-member retention: {pct(v.get("retained",0),v.get("measured",0))}')
+        detail.append("Cohorts use first recorded approvals with horizons maturing this month; missing roster snapshots excluded.")
+        notes.add_field(name="New member cohorts",value="\n".join(detail),inline=False)
+        pathways=m.get("pathway_retention",{}).get("30",{})
+        if pathways:
+            notes.add_field(name="30-day retention by pathway",value="\n".join(f'{PATHWAYS[p]}: {pct(v["retained"],v["measured"])}' for p,v in pathways.items()),inline=False)
     notes.add_field(name="Achievements",value=(f'Observed PvM Diary awards: {d["diary"]}' if d["diary"] or d["complete"] else "PvM Diary awards: not yet tracked")+" • Approved PBs: not integrated",inline=False)
     notes.description="Historical gaps are not zero activity. Roster and event tracking began in late November 2026. Full-period metrics depend on actual data coverage."
     comparison=next((f.value for f in embed.fields if f.name=="Month-over-Month Comparison"),"")
@@ -613,7 +728,7 @@ def dashboard_message(embed,images,d):
     if not d["lifetime"]:
         period_end=d["metrics"].get("full")
         embed.description+=f'\nPeriod-end full members: **{period_end}**' if period_end is not None else "\nPeriod-end full members: unavailable"
-    names=["novus-roster-v2.png","novus-recruitment-v2.png","novus-pvm-v2.png","novus-progression-v2.png"]
+    names=["novus-roster-v2.png","novus-recruitment-v2.png","novus-pvm-v2.png","novus-progression-v2.png","novus-recruitment-trends-v1.png","novus-engagement-trends-v1.png"]
     charts=[]
     files=[]
     for name,image in zip(names,images):

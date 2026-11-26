@@ -6101,13 +6101,6 @@ class TasksCog(commands.Cog):
             ]
         ))
 
-        # ----------------------------------------------------
-        # TRIAL MEMBERS ENDING SOON
-        # ----------------------------------------------------
-
-        # Trial deadlines are read after closing the sync write transaction.
-        trial_lines = []
-
         now = datetime.datetime.now().isoformat()
 
         c.execute(
@@ -6147,26 +6140,6 @@ class TasksCog(commands.Cog):
         conn.commit()
         conn.close()
 
-        trial_cog = self.bot.get_cog("TrialKCEligibilityCog")
-        if guild.id == NOVUS_GUILD_ID and trial_cog:
-            from cogs.vouches_cog import is_trial
-            now_local = datetime.datetime.now(ZoneInfo("America/New_York"))
-            entries = []
-            for member in guild.members:
-                if not is_trial(member):
-                    continue
-                try:
-                    pathway, started, deadline = await trial_cog.trial_timing(guild,member)
-                    if deadline:
-                        days = (deadline.astimezone(ZoneInfo("America/New_York")).date()-now_local.date()).days
-                        status = f"{days}d left" if days>0 else "ends today" if days==0 else f"{abs(days)}d overdue"
-                        entries.append((days,f"- {member.mention}: {status} • <t:{int(deadline.timestamp())}:D>"))
-                    else:
-                        entries.append((9999,f"- {member.mention}: trial deadline unverified"))
-                except Exception:
-                    logger.exception("Staff report trial deadline lookup failed discord=%s",member.id)
-                    entries.append((9999,f"- {member.mention}: deadline temporarily unavailable"))
-            trial_lines=[line for _,line in sorted(entries)]
         ca_lines, ca_status, ca_ingame = [], None, []
         if guild.id == NOVUS_GUILD_ID and log_channel_id == NOVUS_MOD_CHAT_CHANNEL_ID:
             rp = self.bot.get_cog("RuneProfileCog")
@@ -6196,7 +6169,6 @@ class TasksCog(commands.Cog):
             duplicate_cleanups,
             missing_join_dates,
             tenure_mapping_issues,
-            trial_lines,
             skipped_members,
             failed_members,
             unlinked_full_wom_accounts,
@@ -6319,13 +6291,6 @@ class TasksCog(commands.Cog):
                     inline=False,
                 )
 
-            if trial_lines:
-                embed.add_field(
-                    name=f"Active Trial Members ({len(trial_lines)})",
-                    value="\n".join(trial_lines)[:1024],
-                    inline=False
-                )
-
             if unlinked_full_wom_accounts:
                 embed.add_field(
                     name=(
@@ -6424,7 +6389,7 @@ class TasksCog(commands.Cog):
                 embed.add_field(
                     name="No Action Needed",
                     value=(
-                        "No promotions, linking issues, trial deadlines, "
+                        "No promotions, linking issues, "
                         "role mismatches, or sync failures need staff attention today."
                     ),
                     inline=False

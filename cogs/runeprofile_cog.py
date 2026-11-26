@@ -339,6 +339,72 @@ class RuneProfileCog(commands.Cog):
                 with closing(db()) as conn,conn:
                     conn.execute("INSERT OR REPLACE INTO runeprofile_initial_award_review VALUES (?,?,?,?)",(wid,tier,result,str(eligible)))
 
+    async def correct_initial_awards(self,guild,day):
+        """Council-approved one-time removal of the ten premature Nov 26 CA grants."""
+        if day!="2026-11-26" or guild.id!=GUILD or not guild.me or not guild.me.guild_permissions.manage_roles:
+            return
+        sync=self.bot.get_cog("TasksCog")
+        if not sync:
+            return
+        targets={
+            142698336367935488:"Master",
+            212609474240708608:"Grandmaster",
+            217694498493300736:"Grandmaster",
+            268399408066854912:"Master",
+            328017688611782656:"Master",
+            403449073203412999:"Master",
+            412240476855468053:"Master",
+            534181731826139146:"Master",
+            733128568451760198:"Grandmaster",
+            957934784661815336:"Master",
+        }
+        with closing(db()) as conn,conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS runeprofile_initial_corrections (discord_id INTEGER PRIMARY KEY,tier TEXT NOT NULL,result TEXT NOT NULL,corrected_at TEXT NOT NULL)")
+            completed={r[0] for r in conn.execute("SELECT discord_id FROM runeprofile_initial_corrections")}
+            rows=conn.execute("""SELECT a.wom_id,a.discord_id,a.tier,a.awarded_at
+                FROM runeprofile_ca_awards a JOIN runeprofile_initial_award_review r
+                ON a.wom_id=r.wom_id AND a.tier=r.tier WHERE r.result='under_minimum'""").fetchall()
+        if set(targets)<=completed:
+            return
+        group,status=await sync.get_wom_group(25802)
+        if status!=200 or not has_verifiable_wom_roster(group) or group.get("id")!=25802:
+            return
+        for wid,did,tier,awarded_at in rows:
+            if did in completed or targets.get(did)!=tier:
+                continue
+            try:
+                if dt.datetime.fromisoformat(awarded_at).astimezone(ET).date().isoformat()!=day:
+                    continue
+                with closing(db()) as conn:
+                    qualified,eligible=tenure_gate(sync,conn.cursor(),did,group["memberships"],dt.datetime.now(ET))
+                if qualified is not False:
+                    logger.warning("CA correction skipped: tenure no longer verified below minimum discord=%s",did)
+                    continue
+                role=guild.get_role(GRANDMASTER if tier=="Grandmaster" else MASTER)
+                if not role or role.name.casefold()!=tier.casefold() or role.managed or role>=guild.me.top_role:
+                    continue
+                member=await guild.fetch_member(did)
+                if member.bot or not has_novus_member_role(member) or member.id==guild.owner_id:
+                    continue
+                if role.id in {r.id for r in member.roles}:
+                    if member.top_role>=guild.me.top_role:
+                        continue
+                    await member.remove_roles(role,reason="Novus Council: correct premature CA grant; three-month minimum not met",atomic=True)
+                    live=await guild.fetch_member(did)
+                    if role.id in {r.id for r in live.roles}:
+                        continue
+                    result="removed"
+                else:
+                    result="already_absent"
+                with closing(db()) as conn,conn:
+                    conn.execute("INSERT OR IGNORE INTO runeprofile_initial_corrections VALUES (?,?,?,?)",(did,tier,result,dt.datetime.now(dt.timezone.utc).isoformat()))
+                    conn.execute("UPDATE runeprofile_ca_awards SET reported=1 WHERE wom_id=? AND tier=?",(wid,tier))
+                completed.add(did)
+                logger.info("Novus CA correction verified discord=%s tier=%s result=%s eligible=%s",did,tier,result,eligible)
+            except Exception:
+                logger.exception("Novus CA correction failed discord=%s tier=%s",did,tier)
+        logger.info("Novus original CA corrections verified %s/%s",len(set(targets)&completed),len(targets))
+
     async def revise_staff_report(self,guild,day):
         """Edit only the explicitly requested original CA update message."""
         if day!="2026-11-26":
@@ -494,6 +560,7 @@ class RuneProfileCog(commands.Cog):
                 done=conn.execute("SELECT 1 FROM runeprofile_audit_days WHERE day=?",(day,)).fetchone()
             if done:
                 await self.audit_initial_awards(guild,day)
+                await self.correct_initial_awards(guild,day)
                 await self.award_verified_roles(guild,day)
                 await self.requested_staff_report(guild,day)
                 await self.revise_staff_report(guild,day)

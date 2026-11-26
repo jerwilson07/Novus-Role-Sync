@@ -23,7 +23,7 @@ from tenure_history import (
     cumulative_effective_join, record_roster, refresh_activity_history,
     set_manual_previous_tenure, prior_tenure, get_tenure_diagnostics,
     apply_tenure_resets, get_tenure_reset, write_tenure_reset,
-    RESET_POLICY_START,
+    RESET_POLICY_START, apply_staff_tenure_exceptions,
 )
 
 
@@ -1237,7 +1237,60 @@ class TasksCog(commands.Cog):
         guild = self.bot.get_guild(NOVUS_GUILD_ID)
         if guild is None or datetime.datetime.now(datetime.timezone.utc) < RESET_POLICY_START:
             return
+        await self._run_staff_tenure_exceptions(guild)
         await self._run_nov19_rejoin_correction(guild)
+
+    async def _run_staff_tenure_exceptions(self, guild):
+        """Persist explicitly approved exceptions and synchronize only affected members."""
+        group_id = 25802
+        conn = sqlite3.connect("wom_multi.db")
+        try:
+            cursor = conn.cursor()
+            config = cursor.execute("SELECT group_id FROM guild_configs WHERE guild_id=?", (guild.id,)).fetchone()
+            if config != (group_id,):
+                return
+            data, status = await self.get_wom_group(group_id)
+            if not has_verifiable_wom_roster(data) or data.get("id") != group_id:
+                logger.warning("Staff tenure exceptions: verified WOM roster unavailable (%s)", status)
+                return
+            applied, pending = apply_staff_tenure_exceptions(cursor, guild.id, group_id, data["memberships"])
+            conn.commit()
+            if pending:
+                logger.warning("Staff tenure exceptions unresolved: %s", pending)
+            for name, player_id, joined in applied:
+                logger.info("Staff tenure exception saved: %s player=%s reset_at=%s", name, player_id, joined.isoformat())
+            rows = cursor.execute("""
+                SELECT player_id, reset_at FROM tenure_staff_exceptions
+                WHERE guild_id=? AND group_id=? AND request_key LIKE '20261126:%'
+            """, (guild.id, group_id)).fetchall()
+            for player_id, reset_at in rows:
+                key = f"novus_staff_tenure_exception_20261126:{guild.id}:{player_id}"
+                if self._one_time_delivery_sent(cursor, key):
+                    continue
+                links = cursor.execute("""
+                    SELECT discord_id FROM links WHERE guild_id=? AND wom_id=?
+                    UNION SELECT discord_id FROM alt_links WHERE guild_id=? AND wom_id=?
+                """, (guild.id, player_id, guild.id, player_id)).fetchall()
+                if len(links) != 1:
+                    logger.warning("Staff tenure exception: Discord link not unique player=%s", player_id)
+                    continue
+                try:
+                    member = await guild.fetch_member(links[0][0])
+                    result = await self.sync_one_member(guild, member, data, cursor, tenure_only=True)
+                    conn.commit()
+                    role = result.get("expected_tenure_role")
+                    if result["status"] == "success" and role is not None:
+                        verified = await guild.fetch_member(member.id)
+                        if role in verified.roles and not any(r in verified.roles for r in result["tenure_roles_removed"]):
+                            self._mark_one_time_delivery(key, role.id)
+                            logger.info("Staff tenure exception role verified: player=%s date=%s role=%s", player_id, reset_at, role.name)
+                except (sqlite3.Error, discord.HTTPException):
+                    logger.exception("Staff tenure exception sync failed for player=%s", player_id)
+        except (sqlite3.Error, discord.HTTPException):
+            logger.exception("Staff tenure exceptions could not be applied")
+        finally:
+            conn.close()
+
 
     async def _run_nov19_rejoin_correction(self, guild):
         """Apply the staff-confirmed rejoin to one WOM account and sync its tenure only."""
@@ -1647,6 +1700,7 @@ class TasksCog(commands.Cog):
             cursor, guild.id, group_id
         )
         apply_tenure_resets(cursor, guild.id, group_id, memberships)
+        apply_staff_tenure_exceptions(cursor, guild.id, group_id, memberships)
         record_roster(cursor, guild.id, group_id, memberships)
 
     # ========================================================

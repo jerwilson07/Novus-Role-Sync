@@ -106,7 +106,8 @@ class RuneProfileCog(commands.Cog):
         perms=channel.permissions_for(guild.me)
         if not (perms.send_messages and perms.embed_links and perms.read_message_history):
             return
-        if not guild.get_role(MASTER) or not guild.get_role(GRANDMASTER):
+        master_role, gm_role = guild.get_role(MASTER), guild.get_role(GRANDMASTER)
+        if not master_role or not gm_role or master_role.name.casefold() != "master ca" or gm_role.name.casefold() != "grandmaster ca":
             logger.warning("RuneProfile audit skipped: configured CA roles not found")
             return
         group,status=await sync.get_wom_group(25802)
@@ -186,7 +187,6 @@ class RuneProfileCog(commands.Cog):
             lines=[]
             for member,wid,name,tier,points,updated in batch:
                 role=GRANDMASTER if tier=="Grandmaster" else MASTER
-                profile="https://runeprofile.com/"+quote(name,safe="")
                 lines.append(f"{check()} {member.mention} • <@&{role}> • {points:,} pts")
             embed=discord.Embed(title=TITLE,description="\n".join(lines)+"\n\nRuneProfile indicates eligibility. Verify the account and award the rank after staff review.",color=discord.Color.green())
             embed.set_footer(text="Novus Membership • RuneProfile • Staff review")

@@ -251,11 +251,11 @@ class RuneProfileCog(commands.Cog):
         day=dt.datetime.now(ET).date().isoformat()
         master_role,gm_role=guild.get_role(MASTER),guild.get_role(GRANDMASTER)
         if not master_role or not gm_role or master_role.name.casefold()!="master" or gm_role.name.casefold()!="grandmaster":
-            return [],"CA role configuration unverified."
+            return [],"CA role configuration unverified.",[]
         with closing(db()) as conn:
             done=conn.execute("SELECT finished_at FROM runeprofile_audit_days WHERE day=?",(day,)).fetchone()
             if not done:
-                return [],"Today's RuneProfile audit has not completed."
+                return [],"Today's RuneProfile audit has not completed.",[]
             rows=conn.execute("""SELECT l.discord_id,l.rsn,l.wom_id,s.rsn,s.tier,s.points,s.checked_at
                 FROM links l JOIN runeprofile_snapshots s ON l.wom_id=s.wom_id
                 WHERE l.guild_id=? AND s.status='tracked'""",(GUILD,)).fetchall()
@@ -278,18 +278,36 @@ class RuneProfileCog(commands.Cog):
                 continue
             tracked+=1
             target=candidate_tier(tier,{r.id for r in member.roles})
-            if target and type(points) is int and points>0:
-                candidates.append((member.id,target,points))
+            if tier in ("Master","Grandmaster") and type(points) is int and points>0:
+                sync=self.bot.get_cog("TasksCog")
+                with closing(db()) as conn:
+                    qualified,_=tenure_gate(sync,conn.cursor(),did,memberships,dt.datetime.now(ET)) if sync else (None,None)
+                if qualified is True:
+                    current=primary.get("role","").strip().casefold()
+                    candidates.append((member.id,tier,points,current,target))
         candidates.sort(key=lambda item:(item[1]!="Grandmaster", -item[2],item[0]))
         with closing(db()) as conn:
             awards=conn.execute("SELECT discord_id,tier FROM runeprofile_ca_awards WHERE reported=0 ORDER BY awarded_at").fetchall()
+        qualified_ids={did for did,_,_,_,_ in candidates}
         lines=[]
         for did,tier in dict.fromkeys(awards):
             member=guild.get_member(did)
-            if member and (GRANDMASTER if tier=="Grandmaster" else MASTER) in {r.id for r in member.roles}:
+            if did in qualified_ids and member and (GRANDMASTER if tier=="Grandmaster" else MASTER) in {r.id for r in member.roles}:
                 lines.append(f"{check()} <@{did}> → **{tier} CA** (awarded)")
-        lines.extend(f"⚠️ <@{did}> → **{tier} CA** (pending)" for did,tier,points in candidates)
-        return lines,f"{tracked} members with verified CA data; staff review required for pending grants."
+        lines.extend(f"⚠️ <@{did}> → **{target} CA** (Discord pending)" for did,tier,points,current,target in candidates if target)
+        ingame=[]
+        for did,tier,points,current,target in candidates:
+            member=guild.get_member(did)
+            if not member or current in ("owner","deputy_owner","quester","explorer","gamer"):
+                continue
+            if current in ({"master","grandmaster"} if tier=="Master" else {"grandmaster"}):
+                continue
+            # Never ask staff to lower a special/staff rank or promote an
+            # unknown WOM rank. Only ordinary tenure and lower CA ranks.
+            if current not in ("squire","duellist","inquisitor","expert","knight","paladin","master"):
+                continue
+            ingame.append(f"- <@{did}>: {current} → **{tier}**")
+        return lines,f"{tracked} members with verified CA data; 3-month tenure minimum applied.",ingame
 
     def mark_reported_awards(self,value):
         # Mark only award entries actually visible in a delivered report.

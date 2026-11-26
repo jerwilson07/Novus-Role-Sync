@@ -1,4 +1,4 @@
-"""Read-only RuneProfile audit for active Novus members; never grants CA roles."""
+"""RuneProfile audit and additive CA rank awards for verified active Novus members."""
 import asyncio
 import datetime as dt
 import json
@@ -38,6 +38,10 @@ def init():
         conn.execute("""CREATE TABLE IF NOT EXISTS runeprofile_ca_notices (
             wom_id INTEGER NOT NULL, tier TEXT NOT NULL, message_id INTEGER NOT NULL,
             PRIMARY KEY(wom_id,tier))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS runeprofile_ca_awards (
+            wom_id INTEGER NOT NULL, discord_id INTEGER NOT NULL, tier TEXT NOT NULL,
+            awarded_at TEXT NOT NULL, reported INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(wom_id,tier,awarded_at))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS runeprofile_audit_days (
             day TEXT PRIMARY KEY, finished_at TEXT NOT NULL)""")
 
@@ -179,6 +183,53 @@ class RuneProfileCog(commands.Cog):
             conn.execute("INSERT OR REPLACE INTO runeprofile_audit_days VALUES (?,?)",(day,dt.datetime.now(dt.timezone.utc).isoformat()))
         logger.info("RuneProfile daily audit day=%s coverage=%s candidates=%s",day,coverage,len(candidates))
 
+    async def award_verified_roles(self,guild,day):
+        """Grant only the highest newly verified CA role. Never remove any role."""
+        sync=self.bot.get_cog("TasksCog")
+        if not sync or not guild.me or not guild.me.guild_permissions.manage_roles:
+            return
+        master,gm=guild.get_role(MASTER),guild.get_role(GRANDMASTER)
+        if not master or not gm or master.name.casefold()!="master" or gm.name.casefold()!="grandmaster":
+            return
+        group,status=await sync.get_wom_group(25802)
+        if status!=200 or not has_verifiable_wom_roster(group) or group.get("id")!=25802:
+            return
+        with closing(db()) as conn:
+            rows=conn.execute("""SELECT l.discord_id,l.rsn,l.wom_id,s.rsn,s.tier,s.points,s.checked_at
+                FROM links l JOIN runeprofile_snapshots s ON l.wom_id=s.wom_id
+                WHERE l.guild_id=? AND s.status='tracked' AND s.tier IN ('Master','Grandmaster')""",(GUILD,)).fetchall()
+        for did,rsn,wid,snapshot_rsn,tier,points,checked in rows:
+            try:
+                if dt.datetime.fromisoformat(checked).astimezone(ET).date().isoformat()!=day or type(points) is not int or points<=0:
+                    continue
+                primary=find_primary_wom_membership(rsn,wid,group["memberships"])
+                if not primary or primary.get("role","").casefold() in NOVUS_TRIAL_WOM_RANKS:
+                    continue
+                name=primary_name(primary["player"].get("displayName") or primary["player"].get("username"))
+                if not name or sanitize_rsn(name).casefold()!=sanitize_rsn(snapshot_rsn).casefold():
+                    continue
+                member=await guild.fetch_member(did)
+                if member.bot or not has_novus_member_role(member):
+                    continue
+                target=candidate_tier(tier,{r.id for r in member.roles})
+                if not target:
+                    continue
+                role=gm if target=="Grandmaster" else master
+                if role.managed or role>=guild.me.top_role or member.id==guild.owner_id or member.top_role>=guild.me.top_role:
+                    continue
+                # No role list replacement, tenure changes, nicknames, or removal.
+                await member.add_roles(role,reason="Novus: verified RuneProfile CA points threshold",atomic=True)
+                live=await guild.fetch_member(did)
+                if role.id not in {r.id for r in live.roles}:
+                    logger.warning("CA role grant not confirmed discord=%s tier=%s",did,target)
+                    continue
+                with closing(db()) as conn,conn:
+                    conn.execute("INSERT INTO runeprofile_ca_awards (wom_id,discord_id,tier,awarded_at) VALUES (?,?,?,?)",
+                        (wid,did,target,dt.datetime.now(dt.timezone.utc).isoformat()))
+                logger.info("RuneProfile CA role granted discord=%s tier=%s tenure preserved",did,target)
+            except Exception:
+                logger.exception("RuneProfile CA role grant failed discord=%s",did)
+
     def promotion_report(self,guild,memberships):
         """Pending promotions from today's completed audit, rechecked against live roles.
         No role mutations or standalone posts; candidates remain actionable until granted.
@@ -216,8 +267,22 @@ class RuneProfileCog(commands.Cog):
             if target and type(points) is int and points>0:
                 candidates.append((member.id,target,points))
         candidates.sort(key=lambda item:(item[1]!="Grandmaster", -item[2],item[0]))
-        lines=[f"{check()} <@{did}> → **{tier} CA**" for did,tier,points in candidates]
-        return lines,f"{tracked} members with verified CA data; staff review required."
+        with closing(db()) as conn:
+            awards=conn.execute("SELECT discord_id,tier FROM runeprofile_ca_awards WHERE reported=0 ORDER BY awarded_at").fetchall()
+        lines=[]
+        for did,tier in dict.fromkeys(awards):
+            member=guild.get_member(did)
+            if member and (GRANDMASTER if tier=="Grandmaster" else MASTER) in {r.id for r in member.roles}:
+                lines.append(f"{check()} <@{did}> → **{tier} CA** (awarded)")
+        lines.extend(f"⚠️ <@{did}> → **{tier} CA** (pending)" for did,tier,points in candidates)
+        return lines,f"{tracked} members with verified CA data; staff review required for pending grants."
+
+    def mark_reported_awards(self,value):
+        # Mark only award entries actually visible in a delivered report.
+        with closing(db()) as conn,conn:
+            for did,tier in conn.execute("SELECT discord_id,tier FROM runeprofile_ca_awards WHERE reported=0").fetchall():
+                if f"<@{did}> → **{tier} CA** (awarded)" in value:
+                    conn.execute("UPDATE runeprofile_ca_awards SET reported=1 WHERE discord_id=? AND tier=?",(did,tier))
 
     async def requested_staff_report(self,guild,day):
         # One explicitly requested replacement report today, after fresh CA data.
@@ -272,6 +337,7 @@ class RuneProfileCog(commands.Cog):
             with closing(db()) as conn:
                 done=conn.execute("SELECT 1 FROM runeprofile_audit_days WHERE day=?",(day,)).fetchone()
             if done:
+                await self.award_verified_roles(guild,day)
                 await self.requested_staff_report(guild,day)
         except Exception:
             logger.exception("RuneProfile daily audit failed")

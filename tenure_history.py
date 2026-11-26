@@ -390,7 +390,9 @@ def cumulative_effective_join(cursor, guild_id, group_id, player_id, joined_at):
     recorded = prior_tenure(cursor, guild_id, group_id, player_id, joined_at)
     manual = get_manual_previous_tenure(cursor, guild_id, group_id, player_id)
     past = max(recorded, manual)
-    return joined_at - past, past
+    # Subtract elapsed service in UTC, not local wall-clock time across DST.
+    effective = (joined_at.astimezone(UTC) - past).astimezone(joined_at.tzinfo)
+    return effective, past
 
 
 async def refresh_activity_history(session, headers, cursor, guild_id, group_id):

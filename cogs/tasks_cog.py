@@ -112,7 +112,6 @@ TENURE_RANK_ORDER = {
     "paladin": 5,
 }
 
-TRIAL_PERIOD_DAYS = 30
 TRIAL_ENDING_SOON_DAYS = 7
 
 
@@ -5500,23 +5499,18 @@ class TasksCog(commands.Cog):
             if member is not None and has_non_clan_role(member):
                 continue
 
-            trial_end = None
-            days_remaining = None
-
-            if joined_at:
-                trial_end = joined_at + datetime.timedelta(
-                    days=TRIAL_PERIOD_DAYS
-                )
-                days_remaining = (
-                    trial_end.date()
-                    - now.date()
-                ).days
+            trial_cog = self.bot.get_cog("TrialKCEligibilityCog")
+            pathway, started, trial_end = (await trial_cog.trial_timing(guild, member)
+                if trial_cog and member else (None, None, None))
+            days_remaining = ((trial_end.date() - now.astimezone(ZoneInfo("America/New_York")).date()).days
+                              if trial_end else None)
 
             trials.append(
                 {
                     "member": member,
                     "rsn": rsn,
-                    "joined": joined_at,
+                    "joined": started,
+                    "pathway": pathway,
                     "ends": trial_end,
                     "days_remaining": days_remaining,
                 }
@@ -5577,9 +5571,9 @@ class TasksCog(commands.Cog):
                 else f"`{entry['rsn']}`"
             )
 
-            if entry["joined"] is None:
+            if entry["ends"] is None:
                 lines.append(
-                    f"{identity}\nWOM join date unavailable - trial timing cannot be calculated."
+                    f"{identity}\nTrial pathway or role assignment date unverified - staff review needed."
                 )
                 continue
 
@@ -5598,7 +5592,7 @@ class TasksCog(commands.Cog):
 
             lines.append(
                 f"{identity}\n"
-                f"Joined: `{entry['joined'].date()}` | "
+                f"Pathway: {entry['pathway']} | Started: `{entry['joined'].astimezone(ZoneInfo('America/New_York')).date()}` | "
                 f"Ends: `{entry['ends'].date()}` | {status_text}"
             )
 
@@ -6154,20 +6148,6 @@ class TasksCog(commands.Cog):
                 membership
             )
 
-            if joined_at is None:
-                continue
-
-            trial_end = joined_at + datetime.timedelta(
-                days=TRIAL_PERIOD_DAYS
-            )
-            days_remaining = (
-                trial_end.date()
-                - now_local.date()
-            ).days
-
-            if days_remaining > TRIAL_ENDING_SOON_DAYS:
-                continue
-
             discord_id = discord_by_wom_id.get(
                 wom_id
             )
@@ -6189,6 +6169,16 @@ class TasksCog(commands.Cog):
                 else f"`{rsn}`"
             )
 
+            trial_cog = self.bot.get_cog("TrialKCEligibilityCog")
+            pathway, started, trial_end = (await trial_cog.trial_timing(guild, member)
+                if trial_cog and member else (None, None, None))
+            if trial_end is None:
+                trials_ending_soon.append((9999, f"- {identity}: trial pathway or role start unverified"))
+                continue
+            days_remaining = (trial_end.date() - now_local.date()).days
+            if days_remaining > TRIAL_ENDING_SOON_DAYS:
+                continue
+
             if days_remaining > 0:
                 status_text = (
                     f"{days_remaining} day(s) remaining"
@@ -6203,7 +6193,7 @@ class TasksCog(commands.Cog):
             trials_ending_soon.append(
                 (
                     days_remaining,
-                    f"- {identity}: {status_text} - ends `{trial_end.date()}`"
+                    f"- {identity}: {status_text} ({pathway}) - ends `{trial_end.date()}`"
                 )
             )
 

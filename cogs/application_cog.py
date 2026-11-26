@@ -35,7 +35,10 @@ TRIAL_REFERENCE = (
     ("Doom of Mokhaiotl", "doom_of_mokhaiotl"),
     ("Phosani's Nightmare", "phosanis_nightmare"),
 )
-REPORT_TITLE = "Novus Applicant Eligibility"
+REPORT_TITLE = "✦ Novus Applicant Eligibility"
+REPORT_TITLES = (REPORT_TITLE, "Novus Applicant Eligibility")
+DETAILS_TITLE = "✦ Novus Application Details"
+DETAILS_TITLES = (DETAILS_TITLE, "Novus Application Details")
 
 APPLICATION_INTRO = """## Thanks for applying to Novus!
 
@@ -339,7 +342,7 @@ APPLICATION_OPTIONS = {
     "unsure": "Unsure / just short of requirements",
 }
 
-class ApplicationModal(discord.ui.Modal, title="Novus Membership Application"):
+class ApplicationModal(discord.ui.Modal, title="✦ Novus Membership Application"):
     def __init__(self, cog, report_id, actor_id):
         super().__init__(timeout=900)
         self.cog = cog
@@ -572,7 +575,7 @@ class ApplicationCog(commands.Cog):
                 await notice(interaction, True, "This applicant is not a current Trial Member.", ephemeral=True)
                 return
             rows, legacy = trial_vouch_records(member.id)
-            embed = discord.Embed(title="Novus Trial Vouches", description=f"**Trial Member:** {member.mention}", color=discord.Color.green() if len(rows)>=REQUIRED_VOUCHES else discord.Color.blurple())
+            embed = discord.Embed(title="✦ Novus Trial Vouches", description=f"**Trial Member:** {member.mention}", color=discord.Color.green() if len(rows)>=REQUIRED_VOUCHES else discord.Color.blurple())
             embed.add_field(name="Vouch Progress", value=f"**{len(rows)}/{REQUIRED_VOUCHES}** unique vouches", inline=False)
             add_vouch_feedback(embed, rows)
             embed.set_footer(text="Novus Membership • Private staff review")
@@ -644,7 +647,7 @@ class ApplicationCog(commands.Cog):
             return
         applicant_id, rsn, old_id = row
         old = await channel.fetch_message(old_id)
-        if old.author.id != self.bot.user.id or not old.embeds or old.embeds[0].title != REPORT_TITLE:
+        if old.author.id != self.bot.user.id or not old.embeds or old.embeds[0].title not in REPORT_TITLES:
             return
         prompt_id = get_form_prompt(channel.id)
         if prompt_id and prompt_id < old_id and not old.content:
@@ -685,7 +688,7 @@ class ApplicationCog(commands.Cog):
                 return
             # Recover a bot-owned report if posting succeeded before the database write.
             async for msg in channel.history(limit=100):
-                if msg.author.id != self.bot.user.id or not msg.embeds or msg.embeds[0].title != REPORT_TITLE:
+                if msg.author.id != self.bot.user.id or not msg.embeds or msg.embeds[0].title not in REPORT_TITLES:
                     continue
                 description = msg.embeds[0].description or ""
                 expected = "**Applicant:** " + discord.utils.escape_markdown(rsn)
@@ -733,7 +736,7 @@ class ApplicationCog(commands.Cog):
                     row = get_report(channel.id)
                     applicant_id, rsn, message_id = row
                     message = await channel.fetch_message(message_id)
-                    if message.author.id == self.bot.user.id and any(e.title == REPORT_TITLE for e in message.embeds) and not final_approval(channel.id, message.id):
+                    if message.author.id == self.bot.user.id and any(e.title in REPORT_TITLES for e in message.embeds) and not final_approval(channel.id, message.id):
                         payload, note = await self.get_payload(rsn, applicant_id, update=False)
                         if payload:
                             reviewer = gear_reviewer(channel.id, message.id)
@@ -759,7 +762,7 @@ class ApplicationCog(commands.Cog):
         if not row:
             raise RuntimeError("Test report not found")
         report = await channel.fetch_message(row[2])
-        if report.author.id != self.bot.user.id or not any(e.title == REPORT_TITLE for e in report.embeds):
+        if report.author.id != self.bot.user.id or not any(e.title in REPORT_TITLES for e in report.embeds):
             raise RuntimeError("Test report ownership or title mismatch")
         if report.content != APPLICATION_INTRO:
             if final_approval(channel.id, report.id):
@@ -883,9 +886,10 @@ class ApplicationCog(commands.Cog):
             try:
                 original = await channel.fetch_message(submission[1])
                 report = await channel.fetch_message(report_id)
-                if original.author.id != self.bot.user.id or not original.embeds or original.embeds[0].title != "Novus Application Details" or report.author.id != self.bot.user.id or not report.embeds or report.embeds[0].title != REPORT_TITLE:
+                if original.author.id != self.bot.user.id or not original.embeds or original.embeds[0].title not in DETAILS_TITLES or report.author.id != self.bot.user.id or not report.embeds or report.embeds[0].title not in REPORT_TITLES:
                     return await notice(interaction, True, "Original application unavailable. Contact staff.", ephemeral=True)
                 embed = original.embeds[0].copy()
+                embed.title = DETAILS_TITLE
                 values = {f.name: f.value for f in embed.fields}
                 updates = {}
                 if account_type: updates["Account Type"] = account_type
@@ -923,6 +927,7 @@ class ApplicationCog(commands.Cog):
                 # Clear approval eligibility before editing evidence, so failures fail closed.
                 set_gear_review(channel.id, report_id, None)
                 report_card = report.embeds[0].copy()
+                report_card.title = REPORT_TITLE
                 for i, field in enumerate(report_card.fields):
                     if field.name == "Application Status":
                         kc = field.value.replace("\\n", "\n").partition("\n")[0]
@@ -970,7 +975,7 @@ class ApplicationCog(commands.Cog):
             files = []
             try:
                 report = await channel.fetch_message(report_id)
-                if report.author.id != self.bot.user.id or not any(e.title == REPORT_TITLE for e in report.embeds):
+                if report.author.id != self.bot.user.id or not any(e.title in REPORT_TITLES for e in report.embeds):
                     await notice(interaction, True, "The application report is no longer available.", ephemeral=True)
                     return
                 # Recover a submission whose Discord send succeeded before the database commit.
@@ -981,7 +986,7 @@ class ApplicationCog(commands.Cog):
                     if candidate.author.id != self.bot.user.id or not candidate.embeds or not candidate.attachments:
                         continue
                     legacy = candidate.embeds[0].title == "Application Details" and candidate.reference and candidate.reference.message_id == report_id
-                    current = candidate.embeds[0].title == "Novus Application Details" and any(a.filename.startswith(marker) for a in candidate.attachments)
+                    current = candidate.embeds[0].title in DETAILS_TITLES and any(a.filename.startswith(marker) for a in candidate.attachments)
                     if legacy or current:
                         save_form_submission(channel.id, report_id, interaction.user.id, candidate.id)
                         try:
@@ -995,7 +1000,7 @@ class ApplicationCog(commands.Cog):
                 row = get_report(channel.id)
                 rsn = row[1]
                 escape = discord.utils.escape_markdown
-                response = discord.Embed(title="Novus Application Details", color=discord.Color.blurple())
+                response = discord.Embed(title=DETAILS_TITLE, color=discord.Color.blurple())
                 response.description = f"**Applicant:** {escape(rsn)}"
                 logo = channel.guild.icon or self.bot.user.display_avatar
                 response.set_thumbnail(url=logo.url)
@@ -1078,7 +1083,7 @@ class ApplicationCog(commands.Cog):
                 return
             try:
                 message = await channel.fetch_message(message_id)
-                if message.author.id != self.bot.user.id or not message.embeds or message.embeds[0].title != REPORT_TITLE:
+                if message.author.id != self.bot.user.id or not message.embeds or message.embeds[0].title not in REPORT_TITLES:
                     await notice(interaction, True, "This report is no longer active.", ephemeral=True)
                     return
                 embed = message.embeds[0].copy()
@@ -1143,7 +1148,7 @@ class ApplicationCog(commands.Cog):
         reviewer_id, pathway = approval
         test = channel.id == TEST_CHANNEL
         report = await channel.fetch_message(report_id)
-        if report.author.id != self.bot.user.id or not report.embeds or report.embeds[0].title != REPORT_TITLE:
+        if report.author.id != self.bot.user.id or not report.embeds or report.embeds[0].title not in REPORT_TITLES:
             raise RuntimeError("Approved report ownership mismatch")
         embed = report.embeds[0].copy()
         index = next((i for i, field in enumerate(embed.fields) if field.name == "Application Status"), None)
@@ -1227,7 +1232,7 @@ class ApplicationCog(commands.Cog):
         async with lock:
             try:
                 message = await channel.fetch_message(message_id)
-                if message.author.id != self.bot.user.id or not message.embeds or message.embeds[0].title != REPORT_TITLE:
+                if message.author.id != self.bot.user.id or not message.embeds or message.embeds[0].title not in REPORT_TITLES:
                     await notice(interaction, True, "This report is no longer active.", ephemeral=True)
                     return
                 embed = message.embeds[0].copy()

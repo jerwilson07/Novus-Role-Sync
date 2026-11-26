@@ -34,6 +34,10 @@ def initialize():
             episode_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS trial_kc_start_dates (
             episode_id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, staff_id INTEGER NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS trial_raid_command_events (
+            message_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL,
+            discord_id INTEGER NOT NULL, staff_id INTEGER NOT NULL,
+            sent_at TEXT NOT NULL, episode_id INTEGER)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS trial_kc_weeks (
             week TEXT PRIMARY KEY, checked_at TEXT NOT NULL)""")
 
@@ -114,10 +118,71 @@ class TrialKCEligibilityCog(commands.Cog):
                          (row["episode_id"], pathway.value, interaction.user.id))
         await notice(interaction, False, f"{check()} {member.display_name}: {pathway.name}. No roles changed.", ephemeral=True)
 
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        # A staff-issued command inside a real application ticket is a
+        # pathway decision, not a generic mention of the command elsewhere.
+        channel = message.channel
+        if (not isinstance(channel, discord.TextChannel) or channel.guild.id != GUILD
+                or channel.category_id != CATEGORY or channel.id == TEST_CHANNEL
+                or message.author.bot or not is_staff(message.author)
+                or message.content.strip().casefold() != "!raidtrial"):
+            return
+        application = self.bot.get_cog("ApplicationCog")
+        if application is None:
+            return
+        try:
+            applicant_id, _ = await application.resolve_applicant(channel)
+            if not applicant_id:
+                logger.warning("Raid Trial command not classified: applicant unverified channel=%s", channel.id)
+                return
+            with closing(db()) as conn, conn:
+                conn.execute("""INSERT OR IGNORE INTO trial_raid_command_events
+                    (message_id,channel_id,discord_id,staff_id,sent_at)
+                    VALUES (?,?,?,?,?)""",
+                    (message.id,channel.id,applicant_id,message.author.id,message.created_at.isoformat()))
+            member = channel.guild.get_member(applicant_id)
+            row = episode(applicant_id) if member and is_trial(member) else None
+            if row:
+                await self.command_pathway(channel.guild, member, row)
+            logger.info("Raid Trial command recorded applicant=%s ticket=%s message=%s", applicant_id,channel.id,message.id)
+        except Exception:
+            logger.exception("Raid Trial command tracking failed channel=%s",channel.id)
+
+    async def command_pathway(self, guild, member, row):
+        started = await self.verified_start(guild,member,row)
+        if started is None:
+            return None
+        with closing(db()) as conn:
+            events = conn.execute("""SELECT message_id, staff_id, sent_at
+                FROM trial_raid_command_events
+                WHERE discord_id=? AND (episode_id IS NULL OR episode_id=?)
+                ORDER BY sent_at DESC""",(member.id,row["episode_id"])).fetchall()
+            previous = conn.execute("""SELECT MAX(ended_at) FROM trial_analytics_episodes
+                WHERE guild_id=? AND discord_id=? AND episode_id<?""",
+                (GUILD,member.id,row["episode_id"])).fetchone()[0]
+        cutoff = started - dt.timedelta(days=14)
+        if previous:
+            cutoff = max(cutoff,dt.datetime.fromisoformat(previous))
+        for mid, staff_id, sent_at in events:
+            stamp = dt.datetime.fromisoformat(sent_at)
+            if stamp < cutoff or stamp > dt.datetime.now(dt.timezone.utc):
+                continue
+            with closing(db()) as conn, conn:
+                conn.execute("UPDATE trial_raid_command_events SET episode_id=? WHERE message_id=? AND (episode_id IS NULL OR episode_id=?)",
+                             (row["episode_id"],mid,row["episode_id"]))
+                conn.execute("INSERT OR IGNORE INTO trial_kc_pathways VALUES (?,?,?)",
+                             (row["episode_id"],"raidtrial",staff_id))
+            return saved_pathway(row["episode_id"])
+        return None
+
     async def pathway(self, guild, member, row):
         override = saved_pathway(row["episode_id"])
         if override:
             return override
+        command = await self.command_pathway(guild,member,row)
+        if command:
+            return command
         # Only use a current, submitted application or explicit staff classification.
         # Never treat the shared Trial Member role as proof of the pathway.
         with closing(db()) as conn:

@@ -55,6 +55,16 @@ def initialize_tenure_tables(cursor):
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tenure_staff_exceptions (
+            guild_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            request_key TEXT NOT NULL,
+            player_id INTEGER NOT NULL,
+            reset_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, group_id, request_key)
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS tenure_observed (
             guild_id INTEGER NOT NULL,
             group_id INTEGER NOT NULL,
@@ -272,7 +282,14 @@ def get_tenure_reset(cursor, guild_id, group_id, player_id):
     """, (guild_id, group_id, player_id))
     row = cursor.fetchone()
     reset = parse_timestamp(row[0]) if row else None
-    return reset if reset and reset >= RESET_POLICY_START else None
+    automatic = reset if reset and reset >= RESET_POLICY_START else None
+    cursor.execute("""
+        SELECT reset_at FROM tenure_staff_exceptions
+        WHERE guild_id=? AND group_id=? AND player_id=?
+    """, (guild_id, group_id, player_id))
+    exceptions = [parse_timestamp(row[0]) for row in cursor.fetchall()]
+    candidates = [value for value in [automatic, *exceptions] if value is not None]
+    return max(candidates) if candidates else None
 
 
 def write_tenure_reset(cursor, guild_id, group_id, player_id, joined_at):
@@ -286,6 +303,50 @@ def write_tenure_reset(cursor, guild_id, group_id, player_id, joined_at):
         SET reset_at = excluded.reset_at
         WHERE excluded.reset_at > tenure_resets.reset_at
     """, (guild_id, group_id, player_id, iso(joined_at)))
+
+
+# Individually approved legacy exceptions; never reset based on name alone
+# after the request has been bound to a verified WOM player ID.
+STAFF_EXCEPTION_NAMES = ("One Wise Nut", "NoRain")
+
+
+def apply_staff_tenure_exceptions(cursor, guild_id, group_id, memberships, now=None):
+    """Bind each staff-approved exception once to its current verified clan join."""
+    if guild_id != NOVUS_GUILD_ID or group_id != 25802:
+        return [], []
+    now = now or datetime.datetime.now(UTC)
+    if not isinstance(memberships, list):
+        return [], list(STAFF_EXCEPTION_NAMES)
+    applied, pending = [], []
+    for name in STAFF_EXCEPTION_NAMES:
+        key = "20261126:" + name.casefold()
+        existing = cursor.execute("""
+            SELECT player_id, reset_at FROM tenure_staff_exceptions
+            WHERE guild_id=? AND group_id=? AND request_key=?
+        """, (guild_id, group_id, key)).fetchone()
+        if existing:
+            continue
+        wanted = sanitize_rsn(name).casefold()
+        matches = []
+        for membership in memberships:
+            player = membership.get("player") or {}
+            names = {sanitize_rsn(n).casefold() for n in (player.get("username"), player.get("displayName")) if isinstance(n, str) and n}
+            if wanted in names and isinstance(player.get("id"), int):
+                matches.append(membership)
+        if len(matches) != 1:
+            pending.append(name)
+            continue
+        membership = matches[0]
+        player = membership["player"]
+        joined = parse_timestamp(membership.get("clientSyncJoinedAt") or player.get("clientSyncJoinedAt"))
+        if not joined or joined > now:
+            pending.append(name)
+            continue
+        cursor.execute("""
+            INSERT INTO tenure_staff_exceptions VALUES (?, ?, ?, ?, ?)
+        """, (guild_id, group_id, key, player["id"], iso(joined)))
+        applied.append((name, player["id"], joined))
+    return applied, pending
 
 
 def apply_tenure_resets(cursor, guild_id, group_id, memberships, now=None):

@@ -157,6 +157,36 @@ async def notice(interaction, followup, *args, **kwargs):
     return await interaction.response.send_message(*args, **kwargs)
 
 
+def branded_title(value):
+    """Normalize only recognized Novus headings, never body text or identifiers."""
+    if not isinstance(value, str):
+        return value
+    replacements = {
+        "NOVUS TOP 10 OVERALL": "NOVUS OVERALL TOP 10",
+        "NOVUS TOP 10 RAIDS": "NOVUS RAIDS TOP 10",
+        "Novus Top 10 Overall": "NOVUS OVERALL TOP 10",
+        "Novus Top 10 Raids": "NOVUS RAIDS TOP 10",
+    }
+    known = (
+        "Novus Apex", "Novus Sync", "Novus Raider", "Novus PvM Diary",
+        "Novus Applicant Eligibility", "Novus Application Details",
+        "Novus Trial Vouches", "Novus Membership Application",
+        "Novus Account Verification", "NOVUS OVERALL TOP 10",
+        "NOVUS RAIDS TOP 10", "NOVUS STAFF APPLICATIONS OPEN",
+        "NOVUS PB BOARD IS LIVE",
+    )
+    base = value.removeprefix("✦ ").removeprefix("⚔️ ")
+    base = replacements.get(base, base)
+    if base in known or base.startswith(("Monthly Novus Report | ", "NOVUS | ")):
+        return "✦ " + base
+    return value
+
+
+def branded_headings(content):
+    return re.sub(r"(?m)^(#{1,6} )([^\\n]+)$",
+                  lambda m: m.group(1) + branded_title(m.group(2)), content)
+
+
 async def migrate_existing_checks(client):
     """Update owned, visible, non-ephemeral message text/embeds, in place."""
     await asyncio.sleep(60)  # Let normal startup card refreshes finish first.
@@ -167,7 +197,7 @@ async def migrate_existing_checks(client):
     # Use the exact usable server emoji; never create a replacement emoji.
     import sqlite3
     state_path = os.path.join(os.getenv("NOVUS_DATA_DIR") or ("/data" if os.path.isdir("/data") and os.access("/data", os.W_OK) else "."), "novus-ui-migrations.sqlite3")
-    key = f"status-history-v4-neoncheck:{client.user.id}:{guild.id}"
+    key = f"status-history-v5-star:{client.user.id}:{guild.id}"
     with sqlite3.connect(state_path) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS migrations (key TEXT PRIMARY KEY)")
         if conn.execute("SELECT 1 FROM migrations WHERE key=?", (key,)).fetchone():
@@ -206,11 +236,19 @@ async def migrate_existing_checks(client):
                 counts["messages"] += 1
                 content = message.content
                 edits = {}
-                revised_content = replace_status_marks(content)
+                revised_content = branded_headings(replace_status_marks(content))
                 if revised_content != content:
                     edits["content"] = revised_content
                 old = [e.to_dict() for e in message.embeds]
                 new = replace_fields(old)
+                for embed in new:
+                    if "title" in embed:
+                        embed["title"] = branded_title(embed["title"])
+                # Preserve evidence when Discord returns an embed image but
+                # omits its attachment metadata. Do not risk an image loss.
+                if new != old and any(e.get("image", {}).get("url") for e in old) and not message.attachments:
+                    counts["component_only"] += 1
+                    new = old
                 if new != old:
                     edits["embeds"] = [discord.Embed.from_dict(e) for e in new]
                 if contains_component_check(message):

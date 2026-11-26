@@ -1018,7 +1018,7 @@ class TasksCog(commands.Cog):
                             if permissions.send_messages:
                                 try:
                                     embed = discord.Embed(
-                                        title="⚔️ NOVUS STAFF APPLICATIONS OPEN",
+                                        title="✦ NOVUS STAFF APPLICATIONS OPEN",
                                         description=(
                                             "Want to take a bigger role in Novus?\n\n"
                                             "We’re accepting **Moderator applications** from active, "

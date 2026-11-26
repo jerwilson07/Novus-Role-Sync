@@ -53,5 +53,18 @@ class LoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("RuntimeError: task stopped", captured.output[0])
 
 
+class BrandingTests(unittest.TestCase):
+    def test_title_migration_is_idempotent_and_preserves_body_text(self):
+        from novus_logging import branded_title, branded_headings
+        self.assertEqual(branded_title("Novus PvM Diary"), "✦ Novus PvM Diary")
+        self.assertEqual(branded_title("✦ Novus PvM Diary"), "✦ Novus PvM Diary")
+        self.assertEqual(branded_title("✦ NOVUS TOP 10 OVERALL"), "✦ NOVUS OVERALL TOP 10")
+        self.assertEqual(branded_title("Novus Trial Vouches"), "✦ Novus Trial Vouches")
+        self.assertEqual(branded_headings("## Novus Raider\nJoin Novus Raider today."),
+                         "## ✦ Novus Raider\nJoin Novus Raider today.")
+        self.assertEqual(branded_title("Novus Membership • Account Verification"),
+                         "Novus Membership • Account Verification")
+
+
 if __name__ == "__main__":
     unittest.main()

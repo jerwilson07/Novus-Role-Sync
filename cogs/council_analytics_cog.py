@@ -336,7 +336,7 @@ class CouncilAnalyticsCog(commands.Cog):
         label=lambda t:t.astimezone(ET).strftime("%b %d, %Y")
         # End is exclusive for the calendar report.
         period=f"{label(start)} to {label(end if lifetime else end-dt.timedelta(seconds=1))}"
-        embed=discord.Embed(title="Monthly Novus Report | Lifetime Edition" if lifetime else f"Monthly Novus Report | {start.astimezone(ET):%B %Y}",description=f"**{period}**\n{'Earliest verified WOM/clan records to date.' if lifetime else 'Previous calendar month.'}\nCouncil only • Aggregate metrics",color=discord.Color.blurple(),timestamp=now())
+        embed=discord.Embed(title="✦ Monthly Novus Report | Lifetime Edition" if lifetime else f"✦ Monthly Novus Report | {start.astimezone(ET):%B %Y}",description=f"**{period}**\n{'Earliest verified WOM/clan records to date.' if lifetime else 'Previous calendar month.'}\nCouncil only • Aggregate metrics",color=discord.Color.blurple(),timestamp=now())
         embed.set_thumbnail(url=(guild.icon or self.bot.user.display_avatar).url)
         def field(name,value):
             embed.add_field(name=name,value=value[:1024],inline=False)

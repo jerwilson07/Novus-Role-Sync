@@ -1,5 +1,5 @@
 import unittest
-from cogs.application_cog import applicant_ca_context, report_embed, RAIDS, EXTRAS
+from cogs.application_cog import applicant_ca_context, application_research_baseline, report_embed, RAIDS, EXTRAS
 from rpp_progress import RPP_CA, RPP_KC
 
 class ApplicantCAContextTests(unittest.TestCase):
@@ -34,6 +34,17 @@ class ApplicantCAContextTests(unittest.TestCase):
         self.assertIn("8/8 complete",ca)
         self.assertIn("Suggested: RPP",guide)
         self.assertIn("staff approval",guide)
+    def test_research_baseline_preserves_unknowns(self):
+        row=application_research_baseline(None)
+        self.assertIsNone(row["ca_points"])
+        self.assertIsNone(row["metrics"]["raid_total_observed"])
+        self.assertIsNone(row["metrics"]["rpp_ca_completed"])
+        self.assertFalse(row["metrics"]["raid_total_complete"])
+        row=application_research_baseline({"values":{"chambers_of_xeric":7},"runeprofile":{"status":"not_found"}})
+        self.assertEqual(row["metrics"]["raid_total_observed"],7)
+        self.assertIsNone(row["metrics"]["raid_kc"]["theatre_of_blood"])
+        self.assertEqual(row["ca_status"],"not_found")
+
     def test_full_kc_report_unchanged(self):
         values={k:0 for _,k in RAIDS+EXTRAS}
         values["tombs_of_amascut_expert"]=200

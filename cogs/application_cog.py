@@ -57,6 +57,7 @@ def initialize():
         conn.execute("CREATE TABLE IF NOT EXISTS application_kc_reports (channel_id INTEGER PRIMARY KEY, applicant_id INTEGER, rsn TEXT NOT NULL, message_id INTEGER NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS application_gear_reviews (channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reviewer_id INTEGER NOT NULL, verified_at TEXT NOT NULL, PRIMARY KEY(channel_id, message_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS application_final_approvals (channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reviewer_id INTEGER NOT NULL, pathway TEXT NOT NULL, approved_at TEXT NOT NULL, PRIMARY KEY(channel_id, message_id))")
+        conn.execute("CREATE TABLE IF NOT EXISTS application_trial_graduations (episode_id INTEGER PRIMARY KEY, applicant_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, report_id INTEGER NOT NULL, pathway TEXT NOT NULL, approved_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS application_message_tests (test_key TEXT PRIMARY KEY, message_id INTEGER NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS application_form_submissions (channel_id INTEGER NOT NULL, report_id INTEGER NOT NULL, applicant_id INTEGER NOT NULL, response_id INTEGER NOT NULL, submitted_at TEXT NOT NULL, PRIMARY KEY(channel_id, report_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS application_form_prompts (channel_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL)")
@@ -118,10 +119,13 @@ def final_approval(channel_id, message_id):
     with closing(db()) as conn:
         return conn.execute("SELECT reviewer_id, pathway FROM application_final_approvals WHERE channel_id=? AND message_id=?", (channel_id, message_id)).fetchone()
 
-def save_final_approval(channel_id, message_id, reviewer_id, pathway):
+def save_final_approval(channel_id, message_id, reviewer_id, pathway, *, trial_episode_id=None, applicant_id=None):
     with closing(db()) as conn, conn:
         conn.execute("INSERT INTO application_final_approvals VALUES (?, ?, ?, ?, ?)", (channel_id, message_id, reviewer_id, pathway, datetime.datetime.now(datetime.timezone.utc).isoformat()))
         conn.execute("INSERT OR IGNORE INTO application_welcome_delivery VALUES (?, ?, NULL)", (channel_id, message_id))
+        if trial_episode_id is not None and applicant_id is not None:
+            conn.execute("INSERT OR IGNORE INTO application_trial_graduations VALUES (?, ?, ?, ?, ?, ?)",
+                         (trial_episode_id, applicant_id, channel_id, message_id, pathway, datetime.datetime.now(datetime.timezone.utc).isoformat()))
 
 def pending_deliveries():
     with closing(db()) as conn:
@@ -1103,6 +1107,7 @@ class ApplicationCog(commands.Cog):
                         return
                 member = None
                 logged = True
+                trial_episode_id = None
                 if not test:
                     member = await channel.guild.fetch_member(applicant_id)
                     current_id, current_rsn = await self.resolve_applicant(await self.bot.fetch_channel(channel.id))
@@ -1121,8 +1126,16 @@ class ApplicationCog(commands.Cog):
                     if verify is None or not hasattr(verify, "approve_member"):
                         await notice(interaction, True, "Approval service unavailable. No roles changed.", ephemeral=True)
                         return
+                    if is_trial(member):
+                        # Capture the episode before the approval removes the
+                        # trial role and the analytics listener closes it.
+                        with closing(db()) as conn:
+                            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trial_analytics_episodes'").fetchone():
+                                current = conn.execute("SELECT episode_id FROM trial_analytics_episodes WHERE guild_id=? AND discord_id=? AND ended_at IS NULL", (GUILD, applicant_id)).fetchone()
+                                trial_episode_id = current[0] if current else None
                     member, already, logged = await verify.approve_member(channel.guild, interaction.user, member, pathway=PATHWAYS[pathway])
-                save_final_approval(channel.id, message_id, interaction.user.id, pathway)
+                save_final_approval(channel.id, message_id, interaction.user.id, pathway,
+                                    trial_episode_id=trial_episode_id, applicant_id=applicant_id)
                 try:
                     await self.finish_approved_application(channel, message_id)
                     welcome_status = "Welcome message posted."

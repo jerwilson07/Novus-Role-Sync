@@ -15,6 +15,7 @@ from novus_logging import check, notice, bind_novus_ui
 from discord.ext import commands, tasks
 
 from common import WOM_API_KEY, sanitize_rsn
+from rpp_progress import RPP_KC, rpp_progress
 from cogs.vouches_cog import get_vouches, add_vouch_feedback, REQUIRED_VOUCHES, is_trial
 
 logger = logging.getLogger("WOMBot")
@@ -211,6 +212,9 @@ def extract(data):
         metric = bosses.get(key) or {}
         kc = metric.get("kills")
         values[key] = kc if type(kc) is int and kc >= 0 else None
+    for _, key, _, _ in RPP_KC:
+        kc = (bosses.get(key) or {}).get("kills")
+        values[key] = kc if type(kc) is int and kc >= 0 else None
     return {"values": values, "snapshot": snapshot.get("createdAt"), "name": data.get("displayName") or data.get("username")}
 
 def trial_vouch_records(applicant_id):
@@ -240,6 +244,40 @@ def trial_vouch_records(applicant_id):
             continue
     return current, False
 
+
+def applicant_ca_context(values, evidence):
+    """Advisory only. CA points do not satisfy Novus membership thresholds."""
+    evidence=evidence or {}
+    status=evidence.get("status")
+    progress=rpp_progress(values,evidence.get("tasks") if status=="verified" else None)
+    met=sum(stage["status"]=="baseline_met" for stage in progress["kc"])
+    ranges=sum(stage["status"]=="baseline_range_review" for stage in progress["kc"])
+    known=sum(stage["status"]!="unverified" for stage in progress["kc"])
+    if status=="verified":
+        tier=evidence.get("tier") or "Below Easy"
+        count=evidence["completed_tasks"]
+        ca=f"**{tier} CA** • {evidence['points']:,} points • {count} tasks"
+        ca+=f"\n**RPP CAs:** {progress['ca_completed']}/{progress['ca_total']} complete"
+        unknown=sum(t["status"] not in ("complete","incomplete") for t in progress["ca"])
+        if unknown:
+            ca+=f" • {unknown} unverified"
+        if evidence.get("updated"):
+            ca+=f"\n-# RuneProfile last update: {evidence['updated']}"
+    else:
+        ca="▫️ RuneProfile profile not found" if status=="not_found" else "▫️ RuneProfile CA data unverified"
+        ca+="\n**RPP CAs:** Not verified"
+    ca+=f"\n**RPP KC:** {met}/{len(progress['kc'])} baselines met"
+    if ranges:
+        ca+=f" • {ranges} range review"
+    if known<len(progress["kc"]):
+        ca+=f" • {len(progress['kc'])-known} unverified"
+    if progress["ca_completed"]==progress["ca_total"] and met+ranges==len(progress["kc"]):
+        guide="RPP: review remaining mechanical proof and staff approval."
+    elif status=="verified" and evidence.get("tier") in ("Elite","Master","Grandmaster"):
+        guide="Strong CA evidence may support staff consideration for Raid Trial; RPP remains an option."
+    else:
+        guide="Compare remaining KC with RPP objectives; Raid Trial remains at staff discretion."
+    return ca,guide
 
 def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=None, logo_url=None, applicant_id=None):
     payload = payload or {}
@@ -312,6 +350,10 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=No
         if trial["legacy"]:
             graduation += "\n-# Existing vouch records: staff must confirm they apply to this trial."
         embed.add_field(name="Trial Member Graduation", value=graduation, inline=False)
+    if not qualified:
+        ca_text,guide=applicant_ca_context(values,payload.get("runeprofile"))
+        embed.add_field(name="Combat Achievements & RPP",value=ca_text,inline=False)
+        embed.add_field(name="Pathway Guidance",value=guide+"\n-# CA data is supporting evidence only; no automatic approval or CA-based exemption.",inline=False)
     if not qualified and trial is None:
         embed.add_field(name="Alternative Pathways", value="Raids Prep Program or Raid Trial (staff discretion).\nKC / Raids Prep Program trials: 1 month.\nRaid Trial: 3 member vouches within 2 weeks.\nBoth start when the Trial Member role is assigned.\n\u200b", inline=False)
         trial_rows = "\n".join(
@@ -591,7 +633,51 @@ class ApplicationCog(commands.Cog):
             logger.exception("Application vouch review failed")
             await notice(interaction, True, "Vouches could not be retrieved. Try /vouches or refresh later.", ephemeral=True)
 
-    async def get_payload(self, rsn, applicant_id, update=False):
+    async def application_ca_evidence(self,rsn,payload):
+        """Use the shared rate-limited client, never delay approval on missing CA data."""
+        result=dict(payload)
+        values=result.get("values",{})
+        total=sum(values.get(k) or 0 for _,k in RAIDS)
+        if total>=200 or (total>=100 and any((values.get(k) or 0)>0 for _,k in EXTRAS)):
+            return result
+        rp=self.bot.get_cog("RuneProfileCog")
+        name=primary_name(result.get("name"))
+        if not rp or not name or sanitize_rsn(name).casefold()!=sanitize_rsn(rsn).casefold():
+            result["runeprofile"]={"status":"unverified"}
+            return result
+        async def lookup():
+            profile,status=await rp.request(name)
+            if status==404:
+                return {"status":"not_found"}
+            if status!=200 or not isinstance(profile,dict) or sanitize_rsn(str(profile.get("username",""))).casefold()!=sanitize_rsn(name).casefold():
+                return {"status":"unverified"}
+            raw=await rp.task_data(name)
+            if not raw:
+                return {"status":"unverified"}
+            from cogs.runeprofile_cog import parse_tasks
+            parsed=parse_tasks(raw)
+            if not parsed:
+                return {"status":"unverified"}
+            tier,points=parsed
+            updated=profile.get("updatedAt")
+            if isinstance(updated,str):
+                try:
+                    updated=datetime.datetime.fromisoformat(updated.replace("Z","+00:00")).date().isoformat()
+                except ValueError:
+                    updated=None
+            else:
+                updated=None
+            return {"status":"verified","tier":tier,"points":points,"updated":updated,
+                    "completed_tasks":sum(1 for t in raw["data"] if isinstance(t,dict) and t.get("completed") is True and t.get("exempt") is False),
+                    "tasks":raw}
+        try:
+            result["runeprofile"]=await asyncio.wait_for(lookup(),timeout=20)
+        except Exception:
+            logger.info("Application RuneProfile lookup unavailable for rsn=%s",name)
+            result["runeprofile"]={"status":"unverified"}
+        return result
+
+    async def get_payload(self, rsn, applicant_id, update=False, include_ca=True):
         try:
             payload, note = await self.fetch_stats(rsn, update=update)
         except Exception:
@@ -601,12 +687,13 @@ class ApplicationCog(commands.Cog):
             if applicant_id:
                 with closing(db()) as conn, conn:
                     conn.execute("INSERT OR REPLACE INTO application_kc_cache VALUES (?, ?, ?, ?)", (GUILD, applicant_id, rsn, json.dumps(payload)))
-            return payload, note
+            return (await self.application_ca_evidence(rsn,payload) if include_ca else payload), note
         if applicant_id:
             with closing(db()) as conn:
                 cached = conn.execute("SELECT rsn, payload FROM application_kc_cache WHERE guild_id=? AND discord_id=?", (GUILD, applicant_id)).fetchone()
             if cached and cached[1] and sanitize_rsn(cached[0]).casefold() == sanitize_rsn(rsn).casefold():
-                return json.loads(cached[1]), "WOM lookup failed; showing previously saved snapshot. Staff should refresh before approval."
+                payload=json.loads(cached[1])
+                return (await self.application_ca_evidence(rsn,payload) if include_ca else payload), "WOM lookup failed; showing previously saved snapshot. Staff should refresh before approval."
         return None, note
 
     async def ensure_form_prompt(self, channel, submitted=False):
@@ -1097,7 +1184,7 @@ class ApplicationCog(commands.Cog):
                     await notice(interaction, True, "Refresh the report before approval.", ephemeral=True)
                     return
                 if pathway in ("standard", "alternative"):
-                    payload, note = await self.get_payload(rsn, applicant_id, update=False)
+                    payload, note = await self.get_payload(rsn, applicant_id, update=False, include_ca=False)
                     values = (payload or {}).get("values", {})
                     total = sum(values.get(key) or 0 for _, key in RAIDS)
                     special = any((values.get(key) or 0) >= 1 for _, key in EXTRAS)

@@ -67,16 +67,17 @@ class TenureResetTests(unittest.TestCase):
 
     def test_named_staff_exceptions_use_actual_join_and_do_not_affect_others(self):
         joined = START - dt.timedelta(days=3)
-        for pid in (1, 2, 3):
+        for pid in (1, 2, 3, 5):
             set_manual_previous_tenure(self.c, G, GROUP, pid, 150)
         roster = [member(1, "One Wise Nut", joined), member(2, "NoRain", joined),
-                  member(3, "Other Member", joined)]
+                  member(3, "Other Member", joined), member(5, "8t pen rip", joined)]
         applied, pending = apply_staff_tenure_exceptions(self.c, G, GROUP, roster, now=START)
-        self.assertEqual([x[1] for x in applied], [1, 2])
+        self.assertEqual([x[1] for x in applied], [1, 2, 5])
         self.assertEqual(pending, [])
         self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 1, joined), (joined, ZERO))
         self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 2, joined), (joined, ZERO))
         self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 3, joined)[1].days, 150)
+        self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 5, joined), (joined, ZERO))
         self.assertEqual(apply_staff_tenure_exceptions(self.c, G, GROUP,
                          [member(4, "One Wise Nut", START)], now=START), ([], []))
         self.assertIsNone(self.reset(4))
@@ -85,7 +86,7 @@ class TenureResetTests(unittest.TestCase):
         roster = [member(1, "One Wise Nut"), member(2, "One Wise Nut"), member(3, "NoRain", None)]
         applied, pending = apply_staff_tenure_exceptions(self.c, G, GROUP, roster, now=START)
         self.assertEqual(applied, [])
-        self.assertEqual(pending, ["One Wise Nut", "NoRain"])
+        self.assertEqual(pending, ["One Wise Nut", "NoRain", "8t pen rip"])
         self.assertIsNone(self.reset(1))
         self.assertIsNone(self.reset(3))
 

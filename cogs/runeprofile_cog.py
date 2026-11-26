@@ -172,30 +172,50 @@ class RuneProfileCog(commands.Cog):
             except Exception:
                 coverage["failed"]+=1
                 logger.exception("RuneProfile audit lookup failed wom_id=%s",wid)
-        # Only notify newly found candidates; staff must verify before granting.
-        # Recheck actual Discord roles before posting; no mentions or auto edits.
-        ready=[]
-        for did,wid,name,tier,points,updated in candidates:
-            try:
-                member=await guild.fetch_member(did)
-                if has_novus_member_role(member) and candidate_tier(tier,{r.id for r in member.roles})==tier:
-                    ready.append((member,wid,name,tier,points,updated))
-            except discord.HTTPException:
-                coverage["failed"]+=1
-        for offset in range(0,len(ready),15):
-            batch=ready[offset:offset+15]
-            lines=[]
-            for member,wid,name,tier,points,updated in batch:
-                role=GRANDMASTER if tier=="Grandmaster" else MASTER
-                lines.append(f"{check()} {member.mention} • <@&{role}> • {points:,} pts")
-            embed=discord.Embed(title=TITLE,description="\n".join(lines)+"\n\nRuneProfile indicates eligibility. Verify the account and award the rank after staff review.",color=discord.Color.green())
-            embed.set_footer(text="Novus Membership • RuneProfile • Staff review")
-            msg=await channel.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
-            with closing(db()) as conn,conn:
-                conn.executemany("INSERT OR IGNORE INTO runeprofile_ca_notices VALUES (?,?,?)",[(wid,tier,msg.id) for _,wid,_,tier,_,_ in batch])
+        # Cache evidence only; the existing noon staff report handles alerts.
         with closing(db()) as conn,conn:
             conn.execute("INSERT OR REPLACE INTO runeprofile_audit_days VALUES (?,?)",(day,dt.datetime.now(dt.timezone.utc).isoformat()))
-        logger.info("RuneProfile daily audit day=%s coverage=%s candidates=%s",day,coverage,len(ready))
+        logger.info("RuneProfile daily audit day=%s coverage=%s candidates=%s",day,coverage,len(candidates))
+
+    def promotion_report(self,guild,memberships):
+        """Pending promotions from today's completed audit, rechecked against live roles.
+        No role mutations or standalone posts; candidates remain actionable until granted.
+        """
+        day=dt.datetime.now(ET).date().isoformat()
+        master_role,gm_role=guild.get_role(MASTER),guild.get_role(GRANDMASTER)
+        if not master_role or not gm_role or master_role.name.casefold()!="master ca" or gm_role.name.casefold()!="grandmaster ca":
+            return [],"CA role configuration unverified."
+        with closing(db()) as conn:
+            done=conn.execute("SELECT finished_at FROM runeprofile_audit_days WHERE day=?",(day,)).fetchone()
+            if not done:
+                return [],"Today's RuneProfile audit has not completed."
+            rows=conn.execute("""SELECT l.discord_id,l.rsn,l.wom_id,s.rsn,s.tier,s.points,s.checked_at
+                FROM links l JOIN runeprofile_snapshots s ON l.wom_id=s.wom_id
+                WHERE l.guild_id=? AND s.status='tracked'""",(GUILD,)).fetchall()
+        candidates=[]
+        tracked=0
+        for did,rsn,wid,snapshot_rsn,tier,points,checked in rows:
+            try:
+                if dt.datetime.fromisoformat(checked).astimezone(ET).date().isoformat()!=day:
+                    continue
+            except (ValueError,TypeError):
+                continue
+            member=guild.get_member(did)
+            if not member or member.bot or not has_novus_member_role(member):
+                continue
+            primary=find_primary_wom_membership(rsn,wid,memberships)
+            if not primary or primary.get("role","").casefold() in NOVUS_TRIAL_WOM_RANKS:
+                continue
+            name=primary_name(primary["player"].get("displayName") or primary["player"].get("username"))
+            if not name or sanitize_rsn(name).casefold()!=sanitize_rsn(snapshot_rsn).casefold():
+                continue
+            tracked+=1
+            target=candidate_tier(tier,{r.id for r in member.roles})
+            if target and type(points) is int and points>0:
+                candidates.append((member.id,target,points))
+        candidates.sort(key=lambda item:(item[1]!="Grandmaster", -item[2],item[0]))
+        lines=[f"{check()} <@{did}> • **{tier} CA** • {points:,} pts" for did,tier,points in candidates]
+        return lines,f"{tracked} members with verified CA data; staff review required."
 
     @tasks.loop(minutes=30)
     async def audit(self):
@@ -204,7 +224,7 @@ class RuneProfileCog(commands.Cog):
         if not guild:
             return
         now=dt.datetime.now(ET)
-        if now.hour<13:
+        if now.hour<8:
             return
         day=now.date().isoformat()
         try:

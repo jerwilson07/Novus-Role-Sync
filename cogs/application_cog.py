@@ -271,12 +271,39 @@ def applicant_ca_context(values, evidence):
         ca+=f" • {ranges} range review"
     if known<len(progress["kc"]):
         ca+=f" • {len(progress['kc'])-known} unverified"
-    if progress["ca_completed"]==progress["ca_total"] and met+ranges==len(progress["kc"]):
-        guide="RPP: review remaining mechanical proof and staff approval."
-    elif status=="verified" and evidence.get("tier") in ("Elite","Master","Grandmaster"):
-        guide="Strong CA evidence may support staff consideration for Raid Trial; RPP remains an option."
+    raid_known=all(type(values.get(k)) is int and values[k]>=0 for _,k in RAIDS)
+    cape=any(type(values.get(k)) is int and values[k]>0 for _,k in EXTRAS)
+    cape_known=cape or all(type(values.get(k)) is int and values[k]>=0 for _,k in EXTRAS)
+    raid_total=sum(values.get(k) or 0 for _,k in RAIDS)
+    target=100 if cape else 200
+    remaining=max(0,target-raid_total)
+    kc_remaining=sum(max(0,s["minimum"]-s["kc"]) for s in progress["kc"] if s["kc"] is not None)
+    ca_remaining=progress["ca_total"]-progress["ca_completed"]
+    if raid_known and cape_known:
+        comparison=f"**KC:** {remaining} raid KC remaining ({target} target)."
     else:
-        guide="Compare remaining KC with RPP objectives; Raid Trial remains at staff discretion."
+        comparison="**KC:** WOM data incomplete; refresh before comparing remaining KC."
+    comparison+=f"\n**RPP:** {kc_remaining}{'+' if known<len(progress['kc']) else ''} additional baseline KC"
+    if status=="verified":
+        comparison+=f"; {ca_remaining} CAs not yet confirmed complete."
+    else:
+        comparison+="; CA progress unverified."
+    if ranges:
+        comparison+=" CG range needs staff review."
+    # Advisory heuristics, not new admission requirements or automated assignments.
+    if raid_known and cape_known and remaining<=20:
+        guide="**Suggested: KC pathway** • close to the existing requirement."
+    elif status=="verified" and progress["ca_completed"]==progress["ca_total"] and met+ranges==len(progress["kc"]):
+        guide="**Suggested: RPP** • review remaining mechanical proof and staff approval."
+    elif status=="verified" and evidence.get("tier") in ("Elite","Master","Grandmaster"):
+        guide="**Consider Raid Trial** • strong overall CA evidence; staff must assess raid readiness and require three vouches."
+        if progress["ca_completed"]>=6 and met+ranges>=6:
+            guide="**Consider RPP or Raid Trial** • substantial RPP progress and strong CA evidence."
+    elif status=="verified" and known==len(progress["kc"]) and (progress["ca_completed"]>=4 or met+ranges>=5) and raid_known and cape_known and kc_remaining<remaining:
+        guide="**Consider RPP** • existing progress may make this more practical than the remaining raid KC."
+    else:
+        guide="**Staff discussion:** compare KC and RPP workload, skills and preferred pathway."
+    guide=comparison+"\n"+guide
     return ca,guide
 
 def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=None, logo_url=None, applicant_id=None):

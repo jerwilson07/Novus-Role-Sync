@@ -350,7 +350,7 @@ def apply_staff_tenure_exceptions(cursor, guild_id, group_id, memberships, now=N
 
 
 def apply_tenure_resets(cursor, guild_id, group_id, memberships, now=None):
-    """Record only verified departures and rejoins on or after the policy start."""
+    """Reset verified returning members whose current join is on or after the policy start."""
     if guild_id != NOVUS_GUILD_ID or not isinstance(group_id, int):
         return [], []
     now = now or datetime.datetime.now(UTC)
@@ -379,9 +379,9 @@ def apply_tenure_resets(cursor, guild_id, group_id, memberships, now=None):
     cursor.execute("""
         SELECT player_id, MAX(event_at) FROM tenure_activity
         WHERE guild_id = ? AND group_id = ? AND event_type = 'left'
-          AND event_at >= ? AND event_at <= ?
+          AND event_at <= ?
         GROUP BY player_id
-    """, (guild_id, group_id, iso(RESET_POLICY_START), iso(now)))
+    """, (guild_id, group_id, iso(now)))
     for player_id, left_raw in cursor.fetchall():
         joined = current_joins.get(player_id)
         left = parse_timestamp(left_raw)
@@ -406,6 +406,13 @@ def apply_tenure_resets(cursor, guild_id, group_id, memberships, now=None):
             """, (guild_id, group_id, player_id, iso(joined), left_raw))
             if recorded_readd and cursor.fetchone():
                 write_tenure_reset(cursor, guild_id, group_id, player_id, joined)
+    # A known earlier completed stint or staff-verified prior service also
+    # establishes a returning member when the departure event is missing.
+    # A fresh in-game join on/after the cutoff is still required.
+    for player_id, joined in current_joins.items():
+        if (prior_tenure(cursor, guild_id, group_id, player_id, joined)
+                or get_manual_previous_tenure(cursor, guild_id, group_id, player_id)):
+            write_tenure_reset(cursor, guild_id, group_id, player_id, joined)
     return applied, unresolved
 
 

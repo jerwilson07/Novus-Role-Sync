@@ -6256,7 +6256,7 @@ class TasksCog(commands.Cog):
                 embed.add_field(
                     name="Tenure Reset to 0 Days",
                     value=", ".join(f"`{name}`" for name in reset_names)
-                    + "\nNew stint started November 15, 2026.",
+                    + "\nTenure reset policy effective November 16, 2026.",
                     inline=False,
                 )
 

@@ -223,7 +223,7 @@ class TrialKCEligibilityCog(commands.Cog):
             for offset in range(0,len(ready),10):
                 batch = ready[offset:offset+10]
                 lines = [f"{check()} {m.mention} • **{total:,} raid KC** ({qualified})" for m,_,total,qualified in batch]
-                embed = discord.Embed(title=TITLE, description="\n".join(lines)+"\n\nYou meet the KC requirements for full membership. Please contact staff for final review.", color=discord.Color.green())
+                embed = discord.Embed(title=TITLE, description="\n".join(lines)+"\n\nYou meet the KC requirements for full membership. [Apply for Membership](https://discord.com/channels/1532817291048124466/1537889319220551753/1565523333762785311).", color=discord.Color.green())
                 embed.set_footer(text=marker)
                 embed.set_thumbnail(url=(guild.icon or self.bot.user.display_avatar).url)
                 msg = await channel.send(content=" ".join(m.mention for m,_,_,_ in batch), embed=embed,

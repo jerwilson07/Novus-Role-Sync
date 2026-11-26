@@ -309,12 +309,31 @@ class TrialKCEligibilityCog(commands.Cog):
         return pathway, start, trial_deadline(start,pathway)
 
     async def wom_payload(self, member):
+        # Trial eligibility is read-only and does not require in-game clan
+        # membership. Prefer stable linked/episode WOM identity; otherwise
+        # require a verified RSN or the current staff-confirmed exact RSN.
+        row = episode(member.id)
         with closing(db()) as conn:
             saved = conn.execute("SELECT rsn,wom_id FROM links WHERE guild_id=? AND discord_id=?",
                                  (GUILD,member.id)).fetchone()
-        if not saved or not saved[0] or not saved[1]:
-            return None
-        rsn = primary_name(saved[0])
+            cached = conn.execute("SELECT rsn FROM application_kc_cache WHERE guild_id=? AND discord_id=?",
+                                  (GUILD,member.id)).fetchone()
+        rsn = primary_name(saved[0]) if saved and saved[0] else None
+        expected = saved[1] if saved else None
+        if row and row["wom_id"] is not None:
+            if expected is not None and expected != row["wom_id"]:
+                return None
+            expected = row["wom_id"]
+            rsn = rsn or primary_name(row["rsn"])
+        if not rsn and any(r.name.strip().casefold()=="verified" for r in member.roles):
+            rsn = primary_name(cached[0]) if cached else None
+            rsn = rsn or primary_name(member.nick)
+        # Staff confirmed this specific current trial's exact in-game name.
+        # This is not a membership link and grants no roles or clan access.
+        if not rsn and member.display_name.casefold()=="sirgrotesque" and row and is_trial(member):
+            start = await self.verified_start(member.guild,member,row)
+            if start and start.astimezone(ET).date()==dt.date(2026,11,14):
+                rsn = "sirgrotesque"
         if not rsn:
             return None
         headers = {"User-Agent":"NovusRoleSync/1.0"}
@@ -323,9 +342,15 @@ class TrialKCEligibilityCog(commands.Cog):
         url = "https://api.wiseoldman.net/v2/players/" + quote(rsn,safe="")
         async with self.bot.http_session.get(url, headers=headers, timeout=20) as response:
             if response.status != 200:
+                logger.info("Trial WOM profile unavailable rsn=%s HTTP=%s",rsn,response.status)
                 return None
             data = await response.json()
-        if data.get("id") != saved[1] or not data.get("latestSnapshot"):
+        if expected is not None and data.get("id") != expected:
+            return None
+        if not any(isinstance(n,str) and sanitize_rsn(n).casefold()==sanitize_rsn(rsn).casefold()
+                   for n in (data.get("username"),data.get("displayName"))):
+            return None
+        if not data.get("latestSnapshot"):
             return None
         return extract(data)
 

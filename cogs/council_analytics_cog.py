@@ -25,6 +25,18 @@ RANKS = ["squire","duellist","inquisitor","expert","knight","paladin"]
 DIARY = {"challenger","vanguard","paragon"}
 BOSSES = set("""abyssal_sire alchemical_hydra amoxliatl araxxor artio barrows_chests brutus bryophyta callisto calvarion cerberus chambers_of_xeric chambers_of_xeric_challenge_mode chaos_elemental chaos_fanatic commander_zilyana corporeal_beast crazy_archaeologist dagannoth_prime dagannoth_rex dagannoth_supreme deranged_archaeologist doom_of_mokhaiotl duke_sucellus general_graardor giant_mole grotesque_guardians hespori kalphite_queen king_black_dragon kraken kreearra kril_tsutsaroth lunar_chests mad_angel maggot_king mimic nex nightmare phosanis_nightmare obor phantom_muspah sarachnis scorpia scurrius shellbane_gryphon skotizo sol_heredit spindel tempoross the_gauntlet the_corrupted_gauntlet the_fractured_archive the_hueycoatl the_leviathan the_royal_titans the_whisperer theatre_of_blood theatre_of_blood_hard_mode thermonuclear_smoke_devil tombs_of_amascut tombs_of_amascut_expert tzkal_zuk tztok_jad vardorvis venenatis vetion vorkath wintertodt yama zalcano zulrah""".split())
 RAID_METRICS = dict(RAIDS + (("ToA Normal","tombs_of_amascut"),))
+RAID_FAMILIES = {
+    "CoX": ("chambers_of_xeric","chambers_of_xeric_challenge_mode"),
+    "TFA": ("the_fractured_archive",),
+    "ToB": ("theatre_of_blood","theatre_of_blood_hard_mode"),
+    "ToA": ("tombs_of_amascut","tombs_of_amascut_expert"),
+}
+
+def raid_family_gains(kc,observed):
+    """Sum observed variant gains without treating missing families as zero."""
+    return {name:sum(kc.get(metric,0) for metric in variants if metric in observed)
+            if any(metric in observed for metric in variants) else None
+            for name,variants in RAID_FAMILIES.items()}
 
 def now():
     return dt.datetime.now(UTC)
@@ -435,9 +447,10 @@ class CouncilAnalyticsCog(commands.Cog):
         t=f"**Active tracked trials at cutoff:** {active}\n**New / late-observed trials:** {new} / {late}\n**Vouch-based / other-path graduations:** {passed} / {other}\n**Unclassified graduations:** {unknown}\n**Closed without graduation:** {departed} (reason unknown)\n**Vouches recorded:** {vouches}\n**Confirmed vouch graduation share of classified closures:** {pct(passed,passed+other+departed) if passed+other+departed and not unknown else 'Not yet measurable'}"
         t+="\n**Median confirmed trial duration:** "+(f"{statistics.median(durations):.1f} days" if durations else "Not yet measurable")
         field("Raid Trial Analytics",t)
-        raid_total=sum(kc[m] for m in RAID_METRICS.values())
+        family_gains=raid_family_gains(kc,observed)
+        raid_total=sum(v for v in family_gains.values() if v is not None)
         if covered_accounts:
-            p=f"**Observed raid gains:** {raid_total:,} KC\n"+"\n".join(f"{name}: {kc[metric]:,}" if metric in observed else f"{name}: N/A" for name,metric in RAID_METRICS.items())
+            p=f"**Observed raid gains:** {raid_total:,} KC\n"+"\n".join(f"{name}: {value:,}" if value is not None else f"{name}: N/A" for name,value in family_gains.items())
             top=[(m,n) for m,n in kc.most_common() if m not in RAID_METRICS.values() and n>0][:5]
             if top:
                 p+="\n**Top non-raid bosses:** "+", ".join(f"{m.replace('_',' ').title()} {n:,}" for m,n in top)
@@ -491,7 +504,7 @@ class CouncilAnalyticsCog(commands.Cog):
             "paths":dict(paths),"active":active,"new":new,"late":late,"passed":passed,"other":other,
             "unknown":unknown,"departed":departed,"vouches":vouches,
             "duration":statistics.median(durations) if durations else None,
-            "raids":{name:kc[metric] if metric in observed else None for name,metric in RAID_METRICS.items()},
+            "raids":family_gains,
             "bosses":{m.replace("_"," ").title():n for m,n in kc.most_common() if m not in RAID_METRICS.values() and n>0},
             "first":dict(first),"diary":sum(diary.values()),"promotions":dict(promo),
             "ranks":dict(rank_counts),"engaged":len(active_players),"measured":len(measured_members),
@@ -643,7 +656,7 @@ def render_dashboards(d):
     bars(a[2],"Current tenure ranks",[(r.title(),d["ranks"].get(r,0)) for r in RANKS]+[("Unranked",d["ranks"].get("unranked",0))],GREEN)
     two=save(f,"Historical application and trial records are incomplete.\nN/A means unavailable, not zero.")
     f,a=board("PvM activity","Observed WOM kill-count gains",[3.4,2.8,2.1])
-    bars(a[0],"Raid KC gained",list(d["raids"].items()),GREEN)
+    bars(a[0],"Raid KC gained (all modes)",list(d["raids"].items()),GREEN)
     bars(a[1],"Top non-raid bosses",list(d["bosses"].items())[:5],BLUE)
     if d["covered"]:
         bars(a[2],"Member PvM engagement",[("Positive gains",d["engaged"]),("No positive gains",d["measured"]-d["engaged"]),("No comparable data",d["unmeasured"])],[GREEN,GOLD,MUTED])

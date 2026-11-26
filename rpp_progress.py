@@ -1,5 +1,7 @@
 """RPP progress evidence from the published Novus requirements.
-Automated evidence does not replace mentor/Word-document approval.
+Final raid stage is KC-based; clan teams and voice chat are encouraged,
+not mandatory proof. Other boss objectives still require mentor/recorded
+proof and staff approval.
 """
 RPP_CA = (
     (651, "Dancing Queen", "The Mad Angel"),
@@ -30,9 +32,6 @@ MANUAL_PROOF = (
     "Leviathan: five stacked boulders and no final explosion damage",
     "Leviathan: full lightning phase skip",
     "Corrupted Gauntlet: demonstrate 5:1 method",
-    "Raids: 5 CoX, 5 ToB and 10 Expert ToA with clan members",
-    "Raids: one deathless KC in each raid",
-    "Raids: voice chat participation",
 )
 
 def ca_progress(payload):

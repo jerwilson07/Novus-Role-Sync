@@ -6105,107 +6105,8 @@ class TasksCog(commands.Cog):
         # TRIAL MEMBERS ENDING SOON
         # ----------------------------------------------------
 
-        discord_by_wom_id = {
-            wom_id: discord_id
-            for discord_id, _, wom_id in eligible_links
-            if wom_id is not None
-        }
-        discord_by_rsn = {
-            rsn.lower(): discord_id
-            for discord_id, rsn, _ in eligible_links
-            if rsn
-        }
-
-        now_local = datetime.datetime.now(
-            ZoneInfo("America/New_York")
-        )
-        trials_ending_soon = []
-
-        for membership in group_data.get(
-            "memberships",
-            []
-        ):
-            current_wom_role = (
-                membership.get(
-                    "role",
-                    ""
-                ).lower()
-            )
-
-            if current_wom_role not in NOVUS_TRIAL_WOM_RANKS:
-                continue
-
-            player = membership.get(
-                "player",
-                {}
-            )
-            rsn = player.get(
-                "username",
-                "Unknown"
-            )
-            wom_id = player.get(
-                "id"
-            )
-            joined_at = get_membership_joined_at(
-                membership
-            )
-
-            discord_id = discord_by_wom_id.get(
-                wom_id
-            )
-
-            if discord_id is None:
-                discord_id = discord_by_rsn.get(
-                    rsn.lower()
-                )
-
-            member = (
-                guild.get_member(discord_id)
-                if discord_id is not None
-                else None
-            )
-
-            identity = (
-                f"{member.mention} (`{rsn}`)"
-                if member
-                else f"`{rsn}`"
-            )
-
-            trial_cog = self.bot.get_cog("TrialKCEligibilityCog")
-            pathway, started, trial_end = (await trial_cog.trial_timing(guild, member)
-                if trial_cog and member else (None, None, None))
-            if trial_end is None:
-                trials_ending_soon.append((9999, f"- {identity}: trial pathway or role start unverified"))
-                continue
-            days_remaining = (trial_end.date() - now_local.date()).days
-            if days_remaining > TRIAL_ENDING_SOON_DAYS:
-                continue
-
-            if days_remaining > 0:
-                status_text = (
-                    f"{days_remaining} day(s) remaining"
-                )
-            elif days_remaining == 0:
-                status_text = "ends today"
-            else:
-                status_text = (
-                    f"overdue by {abs(days_remaining)} day(s)"
-                )
-
-            trials_ending_soon.append(
-                (
-                    days_remaining,
-                    f"- {identity}: {status_text} ({pathway}) - ends `{trial_end.date()}`"
-                )
-            )
-
-        trials_ending_soon.sort(
-            key=lambda entry: entry[0]
-        )
-        trial_lines = [
-            line
-            for _, line in trials_ending_soon
-        ]
+        # Trial deadlines are read after closing the sync write transaction.
+        trial_lines = []
 
         now = datetime.datetime.now().isoformat()
 
@@ -6246,6 +6147,26 @@ class TasksCog(commands.Cog):
         conn.commit()
         conn.close()
 
+        trial_cog = self.bot.get_cog("TrialKCEligibilityCog")
+        if guild.id == NOVUS_GUILD_ID and trial_cog:
+            from cogs.vouches_cog import is_trial
+            now_local = datetime.datetime.now(ZoneInfo("America/New_York"))
+            entries = []
+            for member in guild.members:
+                if not is_trial(member):
+                    continue
+                try:
+                    pathway, started, deadline = await trial_cog.trial_timing(guild,member)
+                    if deadline:
+                        days = (deadline.astimezone(ZoneInfo("America/New_York")).date()-now_local.date()).days
+                        status = f"{days}d left" if days>0 else "ends today" if days==0 else f"{abs(days)}d overdue"
+                        entries.append((days,f"- {member.mention}: {status} • <t:{int(deadline.timestamp())}:D>"))
+                    else:
+                        entries.append((9999,f"- {member.mention}: trial deadline unverified"))
+                except Exception:
+                    logger.exception("Staff report trial deadline lookup failed discord=%s",member.id)
+                    entries.append((9999,f"- {member.mention}: deadline temporarily unavailable"))
+            trial_lines=[line for _,line in sorted(entries)]
         ca_lines, ca_status = [], None
         if guild.id == NOVUS_GUILD_ID and log_channel_id == NOVUS_MOD_CHAT_CHANNEL_ID:
             rp = self.bot.get_cog("RuneProfileCog")
@@ -6397,7 +6318,7 @@ class TasksCog(commands.Cog):
 
             if trial_lines:
                 embed.add_field(
-                    name=f"Trials Ending Soon ({len(trial_lines)})",
+                    name=f"Active Trial Members ({len(trial_lines)})",
                     value="\n".join(trial_lines)[:1024],
                     inline=False
                 )

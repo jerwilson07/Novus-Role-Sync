@@ -115,14 +115,31 @@ class TenureResetTests(unittest.TestCase):
         self.apply(roster)
         self.assertIsNone(self.reset(9))
 
-    def test_pre_policy_or_other_group_departure_does_not_reset(self):
+    def test_pre_policy_departure_and_post_policy_rejoin_resets(self):
         self.events(9, ("left", START - dt.timedelta(seconds=1)))
-        self.events(9, ("left", START), group=GROUP + 1)
         set_manual_previous_tenure(self.c, G, GROUP, 9, 42)
         rejoined = START + dt.timedelta(days=2)
-        self.apply(member(9, "Grandfathered", rejoined))
+        self.apply(member(9, "Returning", rejoined))
+        self.assertEqual(self.reset(9), rejoined)
+        self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 9, rejoined), (rejoined, ZERO))
+
+    def test_other_group_departure_does_not_reset(self):
+        self.events(9, ("left", START), group=GROUP + 1)
+        self.apply(member(9, "New Member", START + dt.timedelta(days=2)))
         self.assertIsNone(self.reset(9))
-        self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 9, rejoined)[1].days, 42)
+
+    def test_verified_manual_prior_service_and_post_policy_join_resets(self):
+        set_manual_previous_tenure(self.c, G, GROUP, 9, 42)
+        rejoined = START + dt.timedelta(days=2)
+        self.apply(member(9, "Returning", rejoined))
+        self.assertEqual(self.reset(9), rejoined)
+
+    def test_earlier_observed_stint_and_post_policy_rejoin_resets(self):
+        record_roster(self.c, G, GROUP, [member(9, "Returning", OLD)], now=START - dt.timedelta(days=5))
+        record_roster(self.c, G, GROUP, [member(10, "Other", OLD)], now=START - dt.timedelta(days=4))
+        rejoined = START + dt.timedelta(days=2)
+        self.apply(member(9, "Returning", rejoined))
+        self.assertEqual(self.reset(9), rejoined)
 
     def test_same_day_delayed_wom_events_with_older_observation(self):
         record_roster(self.c, G, GROUP, [member(9, "Same Day")], now=START)

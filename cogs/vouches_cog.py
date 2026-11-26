@@ -423,7 +423,7 @@ class VouchesCog(commands.Cog):
 
         rows = get_vouches(interaction.guild_id, member.id)
         embed = discord.Embed(
-            title="Novus Trial Vouches",
+            title="✦ Novus Trial Vouches",
             description=f"**Trial Member:** {member.mention}",
             color=discord.Color.green() if len(rows) >= REQUIRED_VOUCHES
             else discord.Color.blurple(),

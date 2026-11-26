@@ -183,11 +183,9 @@ class RuneProfileCog(commands.Cog):
         """Pending promotions from today's completed audit, rechecked against live roles.
         No role mutations or standalone posts; candidates remain actionable until granted.
         """
-        if os.getenv("NOVUS_RUNEPROFILE_NOTICES_ENABLED","").lower()!="true":
-            return [],None
         day=dt.datetime.now(ET).date().isoformat()
         master_role,gm_role=guild.get_role(MASTER),guild.get_role(GRANDMASTER)
-        if not master_role or not gm_role or master_role.name.casefold()!="master ca" or gm_role.name.casefold()!="grandmaster ca":
+        if not master_role or not gm_role or master_role.name.casefold()!="master" or gm_role.name.casefold()!="grandmaster":
             return [],"CA role configuration unverified."
         with closing(db()) as conn:
             done=conn.execute("SELECT finished_at FROM runeprofile_audit_days WHERE day=?",(day,)).fetchone()
@@ -218,8 +216,43 @@ class RuneProfileCog(commands.Cog):
             if target and type(points) is int and points>0:
                 candidates.append((member.id,target,points))
         candidates.sort(key=lambda item:(item[1]!="Grandmaster", -item[2],item[0]))
-        lines=[f"{check()} <@{did}> • **{tier} CA** • {points:,} pts" for did,tier,points in candidates]
+        lines=[f"{check()} <@{did}> → **{tier} CA**" for did,tier,points in candidates]
         return lines,f"{tracked} members with verified CA data; staff review required."
+
+    async def requested_staff_report(self,guild,day):
+        # One explicitly requested replacement report today, after fresh CA data.
+        if day!="2026-11-26":
+            return
+        sync=self.bot.get_cog("TasksCog")
+        if not sync:
+            return
+        key=f"novus_ca_staff_report_20261126:{GUILD}"
+        label="✦ Novus Noon Staff Sync • CA Update"
+        channel=guild.get_channel(MOD_CHAT)
+        if not isinstance(channel,discord.TextChannel) or channel.name!="mod-chat" or not guild.me:
+            return
+        perms=channel.permissions_for(guild.me)
+        if not (perms.send_messages and perms.embed_links and perms.read_message_history):
+            return
+        master,gm=guild.get_role(MASTER),guild.get_role(GRANDMASTER)
+        if not master or not gm or master.name.casefold()!="master" or gm.name.casefold()!="grandmaster":
+            return
+        with closing(db()) as conn:
+            if sync._one_time_delivery_sent(conn.cursor(),key):
+                return
+            config=conn.execute("SELECT group_id,nickname_enforcement,dm_notifications_on FROM guild_configs WHERE guild_id=?",(GUILD,)).fetchone()
+        if not config or config[0]!=25802:
+            return
+        async for msg in channel.history(limit=100):
+            if msg.author.id==self.bot.user.id and msg.embeds and msg.embeds[0].footer.text==label:
+                sync._mark_one_time_delivery(key,msg.id)
+                return
+        sync._last_staff_report_message_ids.pop(GUILD,None)
+        await sync.sync_guild(guild,config[0],MOD_CHAT,config[1],config[2],report_label=label)
+        mid=sync._last_staff_report_message_ids.get(GUILD)
+        if mid:
+            sync._mark_one_time_delivery(key,mid)
+            logger.info("Novus requested CA staff report delivered message=%s",mid)
 
     @tasks.loop(minutes=30)
     async def audit(self):
@@ -233,9 +266,13 @@ class RuneProfileCog(commands.Cog):
         day=now.date().isoformat()
         try:
             with closing(db()) as conn:
-                if conn.execute("SELECT 1 FROM runeprofile_audit_days WHERE day=?",(day,)).fetchone():
-                    return
-            await self.audit_once(guild,day)
+                done=conn.execute("SELECT 1 FROM runeprofile_audit_days WHERE day=?",(day,)).fetchone()
+            if not done:
+                await self.audit_once(guild,day)
+            with closing(db()) as conn:
+                done=conn.execute("SELECT 1 FROM runeprofile_audit_days WHERE day=?",(day,)).fetchone()
+            if done:
+                await self.requested_staff_report(guild,day)
         except Exception:
             logger.exception("RuneProfile daily audit failed")
 

@@ -54,6 +54,11 @@ def db():
 
 def initialize():
     with closing(db()) as conn, conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS council_application_ca_baselines (
+            channel_id INTEGER PRIMARY KEY, applicant_id INTEGER NOT NULL, rsn TEXT NOT NULL,
+            captured_at TEXT NOT NULL, wom_snapshot TEXT, runeprofile_updated TEXT,
+            ca_status TEXT NOT NULL, ca_tier TEXT, ca_points INTEGER, ca_tasks INTEGER,
+            metrics_json TEXT NOT NULL)""")
         conn.execute("CREATE TABLE IF NOT EXISTS application_kc_cache (guild_id INTEGER, discord_id INTEGER, rsn TEXT, payload TEXT, PRIMARY KEY(guild_id, discord_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS application_kc_reports (channel_id INTEGER PRIMARY KEY, applicant_id INTEGER, rsn TEXT NOT NULL, message_id INTEGER NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS application_gear_reviews (channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL, reviewer_id INTEGER NOT NULL, verified_at TEXT NOT NULL, PRIMARY KEY(channel_id, message_id))")
@@ -244,6 +249,38 @@ def trial_vouch_records(applicant_id):
             continue
     return current, False
 
+
+def application_research_baseline(payload):
+    """Freeze only observed metrics, not raw API responses or guesses."""
+    payload=payload or {}
+    values=payload.get("values") or {}
+    evidence=payload.get("runeprofile") or {}
+    status=evidence.get("status","unverified")
+    verified=status=="verified"
+    progress=rpp_progress(values,evidence.get("tasks") if verified else None)
+    raid_kc={key:values.get(key) for _,key in RAIDS}
+    cape_kc={key:values.get(key) for _,key in EXTRAS}
+    total=sum(v for v in raid_kc.values() if type(v) is int and v>=0)
+    complete=all(type(v) is int and v>=0 for v in raid_kc.values())
+    return {"wom_snapshot":payload.get("snapshot"),"runeprofile_updated":evidence.get("updated") if verified else None,
+            "ca_status":status,"ca_tier":evidence.get("tier") if verified else None,
+            "ca_points":evidence.get("points") if verified else None,
+            "ca_tasks":evidence.get("completed_tasks") if verified else None,
+            "metrics":{"raid_kc":raid_kc,"raid_total_observed":total if any(type(v) is int and v>=0 for v in raid_kc.values()) else None,
+                       "raid_total_complete":complete,"cape_kc":cape_kc,"rpp_kc":progress["kc"],
+                       "rpp_ca":progress["ca"],"rpp_ca_completed":progress["ca_completed"] if verified else None}}
+
+def save_application_research_baseline(channel_id,applicant_id,rsn,payload):
+    if channel_id==TEST_CHANNEL or not applicant_id:
+        return
+    row=application_research_baseline(payload)
+    with closing(db()) as conn,conn:
+        conn.execute("""INSERT OR IGNORE INTO council_application_ca_baselines
+            (channel_id,applicant_id,rsn,captured_at,wom_snapshot,runeprofile_updated,
+             ca_status,ca_tier,ca_points,ca_tasks,metrics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+             (channel_id,applicant_id,rsn,datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              row["wom_snapshot"],row["runeprofile_updated"],row["ca_status"],row["ca_tier"],
+              row["ca_points"],row["ca_tasks"],json.dumps(row["metrics"])))
 
 def applicant_ca_context(values, evidence):
     """Advisory only. CA points do not satisfy Novus membership thresholds."""
@@ -660,12 +697,12 @@ class ApplicationCog(commands.Cog):
             logger.exception("Application vouch review failed")
             await notice(interaction, True, "Vouches could not be retrieved. Try /vouches or refresh later.", ephemeral=True)
 
-    async def application_ca_evidence(self,rsn,payload):
+    async def application_ca_evidence(self,rsn,payload,include_qualified=False):
         """Use the shared rate-limited client, never delay approval on missing CA data."""
         result=dict(payload)
         values=result.get("values",{})
         total=sum(values.get(k) or 0 for _,k in RAIDS)
-        if total>=200 or (total>=100 and any((values.get(k) or 0)>0 for _,k in EXTRAS)):
+        if not include_qualified and (total>=200 or (total>=100 and any((values.get(k) or 0)>0 for _,k in EXTRAS))):
             return result
         rp=self.bot.get_cog("RuneProfileCog")
         name=primary_name(result.get("name"))
@@ -704,7 +741,7 @@ class ApplicationCog(commands.Cog):
             result["runeprofile"]={"status":"unverified"}
         return result
 
-    async def get_payload(self, rsn, applicant_id, update=False, include_ca=True):
+    async def get_payload(self, rsn, applicant_id, update=False, include_ca=True, research_baseline=False):
         try:
             payload, note = await self.fetch_stats(rsn, update=update)
         except Exception:
@@ -714,13 +751,13 @@ class ApplicationCog(commands.Cog):
             if applicant_id:
                 with closing(db()) as conn, conn:
                     conn.execute("INSERT OR REPLACE INTO application_kc_cache VALUES (?, ?, ?, ?)", (GUILD, applicant_id, rsn, json.dumps(payload)))
-            return (await self.application_ca_evidence(rsn,payload) if include_ca else payload), note
+            return (await self.application_ca_evidence(rsn,payload,include_qualified=research_baseline) if include_ca else payload), note
         if applicant_id:
             with closing(db()) as conn:
                 cached = conn.execute("SELECT rsn, payload FROM application_kc_cache WHERE guild_id=? AND discord_id=?", (GUILD, applicant_id)).fetchone()
             if cached and cached[1] and sanitize_rsn(cached[0]).casefold() == sanitize_rsn(rsn).casefold():
                 payload=json.loads(cached[1])
-                return (await self.application_ca_evidence(rsn,payload) if include_ca else payload), "WOM lookup failed; showing previously saved snapshot. Staff should refresh before approval."
+                return (await self.application_ca_evidence(rsn,payload,include_qualified=research_baseline) if include_ca else payload), "WOM lookup failed; showing previously saved snapshot. Staff should refresh before approval."
         return None, note
 
     async def ensure_form_prompt(self, channel, submitted=False):
@@ -827,7 +864,13 @@ class ApplicationCog(commands.Cog):
                         conn.execute("INSERT OR IGNORE INTO council_application_origins VALUES (?,?,?,?)", (channel.id, applicant_id, origin, datetime.datetime.now(datetime.timezone.utc).isoformat()))
                 except Exception:
                     logger.exception("Council application origin not recorded; application continues")
-            payload, note = await self.get_payload(rsn, applicant_id, update=True)
+            payload, note = await self.get_payload(rsn, applicant_id, update=True, research_baseline=bool(applicant_id and not test))
+            if applicant_id and not test:
+                try:
+                    save_application_research_baseline(channel.id,applicant_id,rsn,payload)
+                    logger.info("Council applicant CA baseline captured channel=%s status=%s",channel.id,((payload or {}).get("runeprofile") or {}).get("status","unverified"))
+                except Exception:
+                    logger.exception("Applicant CA research baseline could not be saved; application continues")
             trial = await self.trial_context(channel, applicant_id)
             await self.ensure_form_prompt(channel)
             message = await channel.send(embed=report_embed(rsn, payload, test, note, trial=trial, logo_url=(channel.guild.icon or self.bot.user.display_avatar).url, applicant_id=applicant_id), view=ApplicationView(self, rsn, separate_prompt=True, trial=trial is not None), allowed_mentions=discord.AllowedMentions.none())

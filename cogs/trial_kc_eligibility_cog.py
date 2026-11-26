@@ -240,6 +240,36 @@ class TrialKCEligibilityCog(commands.Cog):
             conn.execute("INSERT OR IGNORE INTO trial_kc_seeded VALUES ('drysimulatr-20261126')")
         logger.info("Drysimulatr Raid Trial classified discord=%s episode=%s",member.id,row["episode_id"])
 
+    async def apply_yngasmaster_pathway_change(self, guild):
+        """One staff-approved switch for the current RPP episode, not future trials."""
+        key = "yngasmaster-kc-20261126"
+        with closing(db()) as conn:
+            if conn.execute("SELECT 1 FROM trial_kc_seeded WHERE key=?", (key,)).fetchone():
+                return
+            links = conn.execute("SELECT discord_id,rsn,wom_id FROM links WHERE guild_id=?", (GUILD,)).fetchall()
+        matches = [(did,wid) for did,rsn,wid in links if wid and primary_name(rsn) and sanitize_rsn(primary_name(rsn)).casefold()=="yngasmaster"]
+        if len(matches) != 1:
+            logger.warning("Yngasmaster pathway change pending unique verified link")
+            return
+        member = guild.get_member(matches[0][0])
+        row = episode(member.id) if member and is_trial(member) else None
+        if not row:
+            return
+        start = await self.verified_start(guild, member, row)
+        # Match the exact currently reviewed trial, including its original
+        # role assignment. Do not apply this decision to a later episode.
+        if not start or start.astimezone(ET).date() != dt.date(2026,11,10):
+            logger.warning("Yngasmaster pathway change pending verified original trial start")
+            return
+        with closing(db()) as conn, conn:
+            current = conn.execute("SELECT pathway FROM trial_kc_pathways WHERE episode_id=?", (row["episode_id"],)).fetchone()
+            if not current or current[0] not in ("rpp","kc"):
+                logger.warning("Yngasmaster pathway change skipped: current staff classification differs")
+                return
+            conn.execute("UPDATE trial_kc_pathways SET pathway='kc' WHERE episode_id=? AND pathway='rpp'", (row["episode_id"],))
+            conn.execute("INSERT OR IGNORE INTO trial_kc_seeded VALUES (?)", (key,))
+        logger.info("Yngasmaster pathway change verified episode=%s pathway=kc deadline=%s", row["episode_id"],trial_deadline(start,"kc").isoformat())
+
     async def verified_start(self, guild, member, row):
         with closing(db()) as conn:
             saved = conn.execute("SELECT started_at FROM trial_kc_start_dates WHERE episode_id=?", (row["episode_id"],)).fetchone()
@@ -358,6 +388,7 @@ class TrialKCEligibilityCog(commands.Cog):
             logger.warning("Trial KC eligibility: missing hub permissions")
             return
         await self.classify_known_raid_trial(guild)
+        await self.apply_yngasmaster_pathway_change(guild)
         if not self._preview_done and dt.datetime.now(ET).date() == dt.date(2026,11,26):
             self._preview_done = True
             await self.preview_progress(guild)

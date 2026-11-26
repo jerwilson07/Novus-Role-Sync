@@ -277,6 +277,8 @@ def get_tenure_reset(cursor, guild_id, group_id, player_id):
 
 def write_tenure_reset(cursor, guild_id, group_id, player_id, joined_at):
     """Keep reset boundaries even if a stale roster later reports an old join."""
+    if joined_at is None or joined_at < RESET_POLICY_START:
+        return
     cursor.execute("""
         INSERT INTO tenure_resets (guild_id, group_id, player_id, reset_at)
         VALUES (?, ?, ?, ?)
@@ -287,7 +289,7 @@ def write_tenure_reset(cursor, guild_id, group_id, player_id, joined_at):
 
 
 def apply_tenure_resets(cursor, guild_id, group_id, memberships, now=None):
-    """Resolve one-time corrections and record verified departures by stable ID."""
+    """Record only verified departures and rejoins on or after the policy start."""
     if guild_id != NOVUS_GUILD_ID or not isinstance(group_id, int):
         return [], []
     now = now or datetime.datetime.now(UTC)
@@ -301,46 +303,16 @@ def apply_tenure_resets(cursor, guild_id, group_id, memberships, now=None):
     ):
         return [], []
 
-    cursor.execute("""
-        SELECT rsn FROM tenure_reset_requests WHERE guild_id = ? AND group_id = ?
-    """, (guild_id, group_id))
-    done = {row[0] for row in cursor.fetchall()}
-    names = {}
     current_joins = {}
     for membership in memberships:
         player = membership["player"]
-        player_id = player["id"]
-        for name in (player.get("username"), player.get("displayName")):
-            if isinstance(name, str) and name:
-                names.setdefault(sanitize_rsn(name).casefold(), set()).add(player_id)
         joined = parse_timestamp(
             membership.get("clientSyncJoinedAt") or player.get("clientSyncJoinedAt")
         )
         if joined and RESET_POLICY_START <= joined <= now:
-            current_joins[player_id] = joined
+            current_joins[player["id"]] = joined
 
     applied, unresolved = [], []
-    for rsn in REQUESTED_REJOIN_RESETS:
-        key = rsn.casefold()
-        if key in done:
-            continue
-        matches = names.get(key, set())
-        if len(matches) != 1:
-            unresolved.append(rsn)
-            continue
-        player_id = next(iter(matches))
-        joined = current_joins.get(player_id)
-        reset_at = (
-            joined if joined and joined.astimezone(EASTERN).date() == RESET_POLICY_START.date()
-            else RESET_POLICY_START
-        )
-        write_tenure_reset(cursor, guild_id, group_id, player_id, reset_at)
-        cursor.execute("""
-            INSERT INTO tenure_reset_requests (guild_id, group_id, rsn, player_id)
-            VALUES (?, ?, ?, ?)
-        """, (guild_id, group_id, key, player_id))
-        applied.append((rsn, player_id, reset_at))
-
     # A roster omission or a WOM-only add/remove does not count. Require a
     # same-clan departure event plus a fresh in-game join for that player ID.
     cursor.execute("""

@@ -4,7 +4,7 @@ import unittest
 
 from tenure_history import (
     NOVUS_GUILD_ID, REQUESTED_REJOIN_RESETS, RESET_POLICY_START,
-    apply_tenure_resets, cumulative_effective_join, get_tenure_diagnostics,
+    apply_tenure_resets, apply_staff_tenure_exceptions, cumulative_effective_join, get_tenure_diagnostics,
     get_tenure_reset, initialize_tenure_tables, record_roster,
     set_manual_previous_tenure, store_group_activity,
 )
@@ -64,6 +64,30 @@ class TenureResetTests(unittest.TestCase):
         effective = rejoined.astimezone(dt.timezone.utc) - credited
         self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 9, rejoined),
                          (effective, credited))
+
+    def test_named_staff_exceptions_use_actual_join_and_do_not_affect_others(self):
+        joined = START - dt.timedelta(days=3)
+        for pid in (1, 2, 3):
+            set_manual_previous_tenure(self.c, G, GROUP, pid, 150)
+        roster = [member(1, "One Wise Nut", joined), member(2, "NoRain", joined),
+                  member(3, "Other Member", joined)]
+        applied, pending = apply_staff_tenure_exceptions(self.c, G, GROUP, roster, now=START)
+        self.assertEqual([x[1] for x in applied], [1, 2])
+        self.assertEqual(pending, [])
+        self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 1, joined), (joined, ZERO))
+        self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 2, joined), (joined, ZERO))
+        self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 3, joined)[1].days, 150)
+        self.assertEqual(apply_staff_tenure_exceptions(self.c, G, GROUP,
+                         [member(4, "One Wise Nut", START)], now=START), ([], []))
+        self.assertIsNone(self.reset(4))
+
+    def test_staff_exceptions_skip_ambiguous_or_missing_join_dates(self):
+        roster = [member(1, "One Wise Nut"), member(2, "One Wise Nut"), member(3, "NoRain", None)]
+        applied, pending = apply_staff_tenure_exceptions(self.c, G, GROUP, roster, now=START)
+        self.assertEqual(applied, [])
+        self.assertEqual(pending, ["One Wise Nut", "NoRain"])
+        self.assertIsNone(self.reset(1))
+        self.assertIsNone(self.reset(3))
 
     def test_new_join_without_departure_is_not_a_reset(self):
         self.apply(member(9, "New Member", START + dt.timedelta(days=1)))

@@ -23,7 +23,7 @@ from tenure_history import (
     cumulative_effective_join, record_roster, refresh_activity_history,
     set_manual_previous_tenure, prior_tenure, get_tenure_diagnostics,
     apply_tenure_resets, get_tenure_reset, write_tenure_reset,
-    REQUESTED_REJOIN_RESETS, RESET_POLICY_START,
+    RESET_POLICY_START,
 )
 
 
@@ -1232,68 +1232,12 @@ class TasksCog(commands.Cog):
             logger.exception("Could not deliver Novus weekly schedule note")
 
     async def _run_requested_reset_sync(self):
-        """After the four verified resets, run the normal workflow once on request."""
+        """Retain the verified November 19 correction; retire legacy forced resets."""
         await self.bot.wait_until_ready()
         guild = self.bot.get_guild(NOVUS_GUILD_ID)
         if guild is None or datetime.datetime.now(datetime.timezone.utc) < RESET_POLICY_START:
             return
         await self._run_nov19_rejoin_correction(guild)
-        key = f"novus_requested_reset_sync_20261115:{guild.id}"
-
-        for attempt in range(4):
-            conn = sqlite3.connect("wom_multi.db")
-            try:
-                config = conn.execute(
-                    """SELECT group_id, nickname_enforcement, dm_notifications_on
-                       FROM guild_configs WHERE guild_id = ?""", (guild.id,),
-                ).fetchone()
-                already_sent = self._one_time_delivery_sent(conn.cursor(), key)
-            finally:
-                conn.close()
-            if not config or not config[0] or already_sent:
-                return
-
-            try:
-                group_data, status = await self.get_wom_group(config[0])
-                if not has_verifiable_wom_roster(group_data) or group_data.get("id") != config[0]:
-                    logger.warning("Requested Novus reset: WOM roster unavailable (%s)", status)
-                else:
-                    conn = sqlite3.connect("wom_multi.db")
-                    try:
-                        apply_tenure_resets(
-                            conn.cursor(), guild.id, config[0], group_data["memberships"],
-                        )
-                        rows = conn.execute(
-                            """SELECT q.rsn, q.player_id, r.reset_at
-                               FROM tenure_reset_requests q
-                               JOIN tenure_resets r USING (guild_id, group_id, player_id)
-                               WHERE q.guild_id = ? AND q.group_id = ?""",
-                            (guild.id, config[0]),
-                        ).fetchall()
-                        conn.commit()
-                    finally:
-                        conn.close()
-                    requested = {name.casefold() for name in REQUESTED_REJOIN_RESETS}
-                    resolved = {rsn for rsn, _, _ in rows}
-                    logger.info("Requested Novus tenure resets persisted: %s", rows)
-                    if not requested <= resolved:
-                        logger.warning("Requested Novus resets pending roster verification: %s", sorted(requested - resolved))
-                    else:
-                        self._last_staff_report_message_ids.pop(guild.id, None)
-                        await self.sync_guild(
-                            guild, config[0], NOVUS_MOD_CHAT_CHANNEL_ID, config[1], config[2],
-                            report_label="Requested Auto-Link + SyncAll",
-                            reset_names=REQUESTED_REJOIN_RESETS,
-                        )
-                        message_id = self._last_staff_report_message_ids.get(guild.id)
-                        if message_id:
-                            self._mark_one_time_delivery(key, message_id)
-                            logger.info("Requested Novus Auto-Link + SyncAll posted to #mod-chat message=%s", message_id)
-                            return
-            except Exception:
-                logger.exception("Requested Novus Auto-Link + SyncAll failed")
-            if attempt < 3:
-                await asyncio.sleep(30)
 
     async def _run_nov19_rejoin_correction(self, guild):
         """Apply the staff-confirmed rejoin to one WOM account and sync its tenure only."""

@@ -468,6 +468,43 @@ class TrialKCEligibilityCog(commands.Cog):
         await self.bot.wait_until_ready()
         await asyncio.sleep(75)
 
+    async def preview_sirgrotesque_rpp(self,guild):
+        """One-time requested read-only comparison; never changes the trial pathway."""
+        rp=self.bot.get_cog("RuneProfileCog")
+        if not rp:
+            return
+        key=f"novus_sirgrotesque_rpp_preview_20261126:{GUILD}"
+        sync=self.bot.get_cog("TasksCog")
+        if not sync:
+            return
+        with closing(db()) as conn:
+            if sync._one_time_delivery_sent(conn.cursor(),key):
+                return
+        members=[m for m in guild.members if m.display_name.casefold()=="sirgrotesque" and is_trial(m)]
+        if len(members)!=1:
+            return
+        payload=await self.wom_payload(members[0])
+        if not payload or not payload.get("name") or sanitize_rsn(payload["name"]).casefold()!="sirgrotesque":
+            return
+        name=payload["name"]
+        summary,status=await rp.request(name)
+        result={"profile_status":status,"name":name,"wom_snapshot":payload.get("snapshot")}
+        tasks_payload=None
+        if status==200 and isinstance(summary,dict) and sanitize_rsn(str(summary.get("username",""))).casefold()=="sirgrotesque":
+            from cogs.runeprofile_cog import parse_tasks
+            raw,task_status=await rp.request(name,"/combat-achievements/tasks")
+            result["task_status"]=task_status
+            result["profile_updated_at"]=summary.get("updatedAt")
+            parsed=parse_tasks(raw) if task_status==200 else None
+            if parsed:
+                result["tier"],result["points"]=parsed
+                tasks_payload=raw
+                result["completed_tasks"]=sum(1 for t in raw["data"] if isinstance(t,dict) and t.get("completed") is True and t.get("exempt") is False)
+        result["rpp"]=rpp_progress(payload.get("values"),tasks_payload)
+        logger.info("NOVUS_SIRGROTESQUE_RPP_REVIEW %s",json.dumps(result,ensure_ascii=False))
+        if status==404 or (status==200 and result.get("task_status")==200):
+            sync._mark_one_time_delivery(key,1)
+
     async def preview_progress(self, guild):
         """Read-only staff-requested preview. No Discord messages or role changes."""
         trial_roles = [r for r in guild.roles if r.name.strip().casefold() == "trial member"]
@@ -531,6 +568,11 @@ class TrialKCEligibilityCog(commands.Cog):
         if not self._preview_done and dt.datetime.now(ET).date() == dt.date(2026,11,26):
             self._preview_done = True
             await self.preview_progress(guild)
+        if dt.datetime.now(ET).date() == dt.date(2026,11,26):
+            try:
+                await self.preview_sirgrotesque_rpp(guild)
+            except Exception:
+                logger.exception("SirGrotesque RPP read-only preview failed")
         now = dt.datetime.now(dt.timezone.utc)
         week = week_key(now)
         with closing(db()) as conn:

@@ -175,6 +175,28 @@ class TrialProgressCog(commands.Cog):
         sync._mark_one_time_delivery(key,msg.id)
         logger.info("SirGrotesque trial progress revised message=%s kc=%s snapshot=%s",msg.id,kc_qualification(vals)[0],payload.get("snapshot"))
 
+    async def revise_membership_link(self,guild,hub,now):
+        if now.astimezone(ET).date()!=dt.date(2026,11,26):
+            return
+        sync=self.bot.get_cog("TasksCog")
+        if not sync:
+            return
+        key=f"novus_trial_membership_link_bold_20261126:{GUILD}"
+        with closing(db()) as conn:
+            if sync._one_time_delivery_sent(conn.cursor(),key):
+                return
+        msg=await hub.fetch_message(1575570534094213215)
+        if msg.author.id!=self.bot.user.id or TITLE not in msg.content:
+            return
+        old=f"[Apply for Membership]({LINK})"
+        new=f"[**Apply for Membership**]({LINK})"
+        if msg.content.count(old)==1:
+            await msg.edit(content=msg.content.replace(old,new),allowed_mentions=discord.AllowedMentions.none())
+        elif new not in msg.content:
+            return
+        sync._mark_one_time_delivery(key,msg.id)
+        logger.info("Novus trial membership link bold verified message=%s",msg.id)
+
     @tasks.loop(minutes=10)
     async def run(self):
         now=dt.datetime.now(dt.timezone.utc)
@@ -199,6 +221,7 @@ class TrialProgressCog(commands.Cog):
                     await guild.chunk(cache=True)
                 if guild.chunked:
                     await self.revise_sirgrotesque(guild,tc,hub,now)
+                    await self.revise_membership_link(guild,hub,now)
                 return
             roles=[guild.get_role(r) for r in (COUNCIL_ROLE_ID,MODERATOR_ROLE_ID,TRIAL_MOD_ROLE_ID)]
             if any(r is None for r in roles):
@@ -248,7 +271,7 @@ class TrialProgressCog(commands.Cog):
             for key,entries in sections.items():
                 if entries:
                     content+="\n**"+headings[key]+"**\n"+"\n\n".join(entries)+"\n"
-            content+=f"\n[Apply for Membership]({LINK})\n-# {marker} • Mondays & Thursdays, 5 PM ET"
+            content+=f"\n[**Apply for Membership**]({LINK})\n-# {marker} • Mondays & Thursdays, 5 PM ET"
             # Don't truncate member mentions or progress. Rare larger reports
             # use a single message with text attachment rather than losing rows.
             if len(content)>2000:

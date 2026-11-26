@@ -2,6 +2,7 @@
 import asyncio
 import datetime as dt
 import calendar
+import json
 import time
 import logging
 import sqlite3
@@ -81,6 +82,7 @@ class TrialKCEligibilityCog(commands.Cog):
         self.bot = bot
         initialize()
         self._audit_cache = None
+        self._preview_done = False
         self.weekly.start()
 
     def cog_unload(self):
@@ -297,6 +299,51 @@ class TrialKCEligibilityCog(commands.Cog):
             return None
         return extract(data)
 
+    async def preview_progress(self, guild):
+        """Read-only staff-requested preview. No Discord messages or role changes."""
+        trial_roles = [r for r in guild.roles if r.name.strip().casefold() == "trial member"]
+        if len(trial_roles) != 1:
+            logger.warning("Trial progress preview: trial role unavailable")
+            return
+        entries = []
+        for member in list(trial_roles[0].members):
+            if member.bot or not is_trial(member):
+                continue
+            entry = {"name":member.display_name}
+            try:
+                row = episode(member.id)
+                pathway, start, deadline = await self.trial_timing(guild,member)
+                entry.update(pathway=pathway, start=start.isoformat() if start else None,
+                             deadline=deadline.isoformat() if deadline else None)
+                if deadline:
+                    entry["days_remaining"] = (deadline.date()-dt.datetime.now(ET).date()).days
+                if pathway == "raidtrial":
+                    rows, legacy = trial_vouch_records(member.id)
+                    entry["vouches"] = len(rows)
+                    entry["vouches_legacy"] = legacy
+                    if start:
+                        from cogs.vouches_cog import get_vouches
+                        entry["vouches"] = sum(1 for record in get_vouches(GUILD,member.id)
+                            if start <= dt.datetime.fromisoformat(record[3].replace("Z","+00:00")) <= deadline)
+                        entry["vouches_legacy"] = False
+                elif pathway in ("kc","rpp"):
+                    payload = await self.wom_payload(member)
+                    if payload:
+                        values = payload["values"]
+                        total, qualification = kc_qualification(values)
+                        entry.update(raid_kc=total, qualification=qualification, snapshot=payload.get("snapshot"),
+                                     inferno=values.get("tzkal_zuk"), colosseum=values.get("sol_heredit"),
+                                     raid_values={key:values.get(key) for _,key in RAIDS})
+                    else:
+                        entry["wom_unavailable"] = True
+                if pathway=="rpp":
+                    entry["rpp_progress"]="staff confirmation required"
+            except Exception:
+                logger.exception("Trial progress preview failed member=%s",member.id)
+                entry["error"] = True
+            entries.append(entry)
+        logger.info("NOVUS_TRIAL_PROGRESS_PREVIEW %s",json.dumps(entries,ensure_ascii=False))
+
     @tasks.loop(minutes=30)
     async def weekly(self):
         await self.bot.wait_until_ready()
@@ -311,6 +358,9 @@ class TrialKCEligibilityCog(commands.Cog):
             logger.warning("Trial KC eligibility: missing hub permissions")
             return
         await self.classify_known_raid_trial(guild)
+        if not self._preview_done and dt.datetime.now(ET).date() == dt.date(2026,11,26):
+            self._preview_done = True
+            await self.preview_progress(guild)
         now = dt.datetime.now(dt.timezone.utc)
         week = week_key(now)
         with closing(db()) as conn:

@@ -59,8 +59,11 @@ class TenureResetTests(unittest.TestCase):
                        (G, GROUP, 9, rejoined.astimezone(dt.timezone.utc).isoformat()))
         self.apply(member(9, "Grandfathered", rejoined))
         self.assertIsNone(self.reset(9))
+        # Historical service is elapsed time, including the DST transition.
+        credited = left.astimezone(dt.timezone.utc) - OLD.astimezone(dt.timezone.utc)
+        effective = rejoined.astimezone(dt.timezone.utc) - credited
         self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 9, rejoined),
-                         (rejoined - (left - OLD), left - OLD))
+                         (effective, credited))
 
     def test_new_join_without_departure_is_not_a_reset(self):
         self.apply(member(9, "New Member", START + dt.timedelta(days=1)))

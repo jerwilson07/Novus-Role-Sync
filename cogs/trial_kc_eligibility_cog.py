@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from common import WOM_API_KEY, sanitize_rsn
+from common import WOM_API_KEY
 from novus_logging import check, notice
 from cogs.application_cog import GUILD, CATEGORY, TEST_CHANNEL, RAIDS, EXTRAS, APPLICATION_OPTIONS, DETAILS_TITLES, extract, primary_name, is_staff, trial_vouch_records
 from cogs.vouches_cog import is_trial
@@ -115,7 +115,7 @@ class TrialKCEligibilityCog(commands.Cog):
         selected = next((f.value for f in msg.embeds[0].fields if f.name == "Membership Pathway"), None)
         if selected == APPLICATION_OPTIONS["raidtrial"]:
             return "raidtrial"
-        if selected in {APPLICATION_OPTIONS[k] for k in ("standard","alternative","unsure")}:
+        if selected in {APPLICATION_OPTIONS[k] for k in ("standard","alternative","rpp","unsure")}:
             # Existing current-trial vouches are a reason to withhold an
             # automatic KC notice unless staff explicitly classifies the trial.
             vouches, _ = trial_vouch_records(member.id)

@@ -410,10 +410,9 @@ class RuneProfileCog(commands.Cog):
         if day!="2026-11-26":
             return
         sync=self.bot.get_cog("TasksCog")
-        trial=self.bot.get_cog("TrialKCEligibilityCog")
-        if not sync or not trial:
+        if not sync:
             return
-        key=f"novus_ca_staff_report_clean_20261126:{GUILD}"
+        key=f"novus_ca_staff_report_without_trials_20261126:{GUILD}"
         with closing(db()) as conn:
             if sync._one_time_delivery_sent(conn.cursor(),key):
                 return
@@ -438,19 +437,6 @@ class RuneProfileCog(commands.Cog):
         old=msg.embeds[0]
         if not old.footer.text or "Novus Noon Staff Sync • CA Update" not in old.footer.text:
             return
-        from cogs.vouches_cog import is_trial
-        trial_lines=[]
-        now=dt.datetime.now(ET)
-        for member in guild.members:
-            if not is_trial(member):
-                continue
-            pathway,start,end=await trial.trial_timing(guild,member)
-            if not end:
-                trial_lines.append((9999,f"- {member.mention}: deadline unverified"))
-                continue
-            days=(end.astimezone(ET).date()-now.date()).days
-            label=f"{days}d left" if days>0 else "ends today" if days==0 else f"{abs(days)}d overdue"
-            trial_lines.append((days,f"- {member.mention}: {label} • <t:{int(end.timestamp())}:D>"))
         lines,ca_status,ingame=self.promotion_report(guild,group["memberships"])
         if "tenure minimum applied" not in ca_status:
             return
@@ -493,8 +479,7 @@ class RuneProfileCog(commands.Cog):
             else:
                 name=field.name
             embed.add_field(name=name,value=value,inline=field.inline)
-        for heading,items in (("Active Trial Members",[line for _,line in sorted(trial_lines)]),
-                              ("Automatic Discord CA Promotions",granted),
+        for heading,items in (("Automatic Discord CA Promotions",granted),
                               ("In-Game CA Promotions Needed",ingame)):
             if not items:
                 continue
@@ -512,7 +497,7 @@ class RuneProfileCog(commands.Cog):
             return
         await msg.edit(embed=embed,allowed_mentions=discord.AllowedMentions.none())
         sync._mark_one_time_delivery(key,msg.id)
-        logger.info("Novus clean CA staff report revised message=%s eligible=%s under_minimum=%s trials=%s ingame=%s",msg.id,len(granted),len(corrections),len(trial_lines),len(ingame))
+        logger.info("Novus staff report without trial section revised message=%s eligible=%s under_minimum=%s ingame=%s",msg.id,len(granted),len(corrections),len(ingame))
 
     async def requested_staff_report(self,guild,day):
         # One explicitly requested replacement report today, after fresh CA data.

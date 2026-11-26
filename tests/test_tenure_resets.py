@@ -40,29 +40,31 @@ class TenureResetTests(unittest.TestCase):
     def apply(self, *roster, now=START + dt.timedelta(days=4)):
         return apply_tenure_resets(self.c, G, GROUP, list(roster), now=now)
 
-    def test_all_four_only_once_even_with_empty_or_stale_wom_join_date(self):
+    def test_legacy_named_members_do_not_reset_without_verified_rejoin(self):
         roster = [member(pid, name, OLD if pid % 2 else None)
                   for pid, name in enumerate(REQUESTED_REJOIN_RESETS, 1)]
         for pid in range(1, 5):
             set_manual_previous_tenure(self.c, G, GROUP, pid, 150)
-        applied, missing = self.apply(*roster)
-        self.assertEqual([name for name, _, _ in applied], list(REQUESTED_REJOIN_RESETS))
-        self.assertEqual(missing, [])
-        for pid in range(1, 5):
-            self.assertEqual(cumulative_effective_join(self.c, G, GROUP, pid, None), (START, ZERO))
-            self.assertEqual(cumulative_effective_join(self.c, G, GROUP, pid, OLD), (START, ZERO))
-            with self.assertRaises(ValueError):
-                set_manual_previous_tenure(self.c, G, GROUP, pid, 150)
-            self.assertEqual(get_tenure_diagnostics(self.c, G, GROUP, pid, OLD)["credited_previous_days"], 0)
-        self.db.commit()
         self.assertEqual(self.apply(*roster), ([], []))
-        self.apply(member(91, "Loves Rain"))
-        self.assertIsNone(self.reset(91))
+        for pid in range(1, 5):
+            self.assertIsNone(self.reset(pid))
+            self.assertEqual(cumulative_effective_join(self.c, G, GROUP, pid, OLD),
+                             (OLD - dt.timedelta(days=150), dt.timedelta(days=150)))
 
-    def test_ambiguity_is_not_reset(self):
-        applied, missing = self.apply(member(1, "Loves Rain"), member(2, "Loves_Rain"))
-        self.assertFalse(applied)
-        self.assertIn("Loves Rain", missing)
+    def test_pre_policy_leave_and_rejoin_keeps_credit_even_with_old_reset_row(self):
+        left = START - dt.timedelta(days=2)
+        rejoined = START - dt.timedelta(days=1)
+        self.events(9, ("joined", OLD), ("left", left), ("joined", rejoined))
+        self.c.execute("INSERT INTO tenure_resets VALUES (?, ?, ?, ?)",
+                       (G, GROUP, 9, rejoined.astimezone(dt.timezone.utc).isoformat()))
+        self.apply(member(9, "Grandfathered", rejoined))
+        self.assertIsNone(self.reset(9))
+        self.assertEqual(cumulative_effective_join(self.c, G, GROUP, 9, rejoined),
+                         (rejoined - (left - OLD), left - OLD))
+
+    def test_new_join_without_departure_is_not_a_reset(self):
+        self.apply(member(9, "New Member", START + dt.timedelta(days=1)))
+        self.assertIsNone(self.reset(9))
 
     def test_confirmed_rejoin_discards_prior_service_and_stale_timestamp(self):
         self.events(9, ("joined", OLD), ("left", START))

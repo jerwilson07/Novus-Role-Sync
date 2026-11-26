@@ -881,6 +881,7 @@ class WOMBot(
             "promotions",
             "vouch",
             "vouches",
+            "trialpathway",
             "exportchat",
             "rsn",
             "approve",

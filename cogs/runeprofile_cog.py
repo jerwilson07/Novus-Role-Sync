@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands, tasks
 from common import has_novus_member_role, find_primary_wom_membership, sanitize_rsn
-from cogs.tasks_cog import has_verifiable_wom_roster, NOVUS_TRIAL_WOM_RANKS
+from cogs.tasks_cog import has_verifiable_wom_roster, NOVUS_TRIAL_WOM_RANKS, add_calendar_months
 from cogs.application_cog import GUILD, primary_name
 from novus_logging import check
 
@@ -53,6 +53,16 @@ def candidate_tier(tier, role_ids):
     if tier == "Master" and MASTER not in role_ids:
         return tier
     return None
+
+def tenure_gate(sync,cursor,discord_id,memberships,now):
+    accounts=sync.get_linked_account_tenures(cursor,GUILD,25802,discord_id,memberships)
+    starts=[a["effective_joined_at"] for a in accounts
+            if a.get("effective_joined_at") and a.get("expected_rank")
+            and a.get("wom_role") not in NOVUS_TRIAL_WOM_RANKS]
+    if not starts:
+        return None,None
+    date=min(add_calendar_months(start,3).date() for start in starts)
+    return now.astimezone(ET).date()>=date,date
 
 def parse_tasks(payload):
     if not isinstance(payload,dict) or not isinstance(payload.get("data"),list) or not payload["data"]:
@@ -211,6 +221,10 @@ class RuneProfileCog(commands.Cog):
                 member=await guild.fetch_member(did)
                 if member.bot or not has_novus_member_role(member):
                     continue
+                with closing(db()) as conn:
+                    qualified,_=tenure_gate(sync,conn.cursor(),did,group["memberships"],dt.datetime.now(ET))
+                if qualified is not True:
+                    continue
                 target=candidate_tier(tier,{r.id for r in member.roles})
                 if not target:
                     continue
@@ -284,6 +298,29 @@ class RuneProfileCog(commands.Cog):
                 if f"<@{did}> → **{tier} CA** (awarded)" in value:
                     conn.execute("UPDATE runeprofile_ca_awards SET reported=1 WHERE discord_id=? AND tier=?",(did,tier))
 
+    async def audit_initial_awards(self,guild,day):
+        if day!="2026-11-26":
+            return
+        sync=self.bot.get_cog("TasksCog")
+        if not sync:
+            return
+        group,status=await sync.get_wom_group(25802)
+        if status!=200 or not has_verifiable_wom_roster(group) or group.get("id")!=25802:
+            return
+        with closing(db()) as conn,conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS runeprofile_initial_award_review (wom_id INTEGER,tier TEXT,result TEXT,eligible_date TEXT,PRIMARY KEY(wom_id,tier))")
+            rows=conn.execute("SELECT wom_id,discord_id,tier FROM runeprofile_ca_awards").fetchall()
+        for wid,did,tier in rows:
+            with closing(db()) as conn:
+                if conn.execute("SELECT 1 FROM runeprofile_initial_award_review WHERE wom_id=? AND tier=?",(wid,tier)).fetchone():
+                    continue
+                qualified,eligible=tenure_gate(sync,conn.cursor(),did,group["memberships"],dt.datetime.now(ET))
+            result="eligible" if qualified is True else "under_minimum" if qualified is False else "unverified"
+            logger.info("RuneProfile original award tenure review discord=%s tier=%s result=%s eligible=%s",did,tier,result,eligible)
+            if qualified is not None:
+                with closing(db()) as conn,conn:
+                    conn.execute("INSERT OR REPLACE INTO runeprofile_initial_award_review VALUES (?,?,?,?)",(wid,tier,result,str(eligible)))
+
     async def requested_staff_report(self,guild,day):
         # One explicitly requested replacement report today, after fresh CA data.
         if day!="2026-11-26":
@@ -337,6 +374,7 @@ class RuneProfileCog(commands.Cog):
             with closing(db()) as conn:
                 done=conn.execute("SELECT 1 FROM runeprofile_audit_days WHERE day=?",(day,)).fetchone()
             if done:
+                await self.audit_initial_awards(guild,day)
                 await self.award_verified_roles(guild,day)
                 await self.requested_staff_report(guild,day)
         except Exception:

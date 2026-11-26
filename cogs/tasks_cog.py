@@ -6542,6 +6542,14 @@ class TasksCog(commands.Cog):
                     "Sent Novus staff sync report to channel=%s message=%s",
                     log_channel_id, sent_message.id,
                 )
+                if ca_status is not None and rp and hasattr(rp,"mark_reported_awards"):
+                    for field in embed.fields:
+                        if field.name.startswith("Combat Achievement Promotions ("):
+                            try:
+                                rp.mark_reported_awards(field.value)
+                            except Exception:
+                                logger.exception("Could not save CA award report acknowledgement")
+                            break
                 if missing_tenure_field_index is not None:
                     # Only start the cooldown for mentions actually shown.
                     value = embed.fields[missing_tenure_field_index].value

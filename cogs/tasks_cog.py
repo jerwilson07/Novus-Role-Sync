@@ -6244,7 +6244,20 @@ class TasksCog(commands.Cog):
         conn.commit()
         conn.close()
 
+        ca_lines, ca_status = [], None
+        if guild.id == NOVUS_GUILD_ID and log_channel_id == NOVUS_MOD_CHAT_CHANNEL_ID:
+            rp = self.bot.get_cog("RuneProfileCog")
+            try:
+                if rp:
+                    ca_lines, ca_status = rp.promotion_report(guild, group_data.get("memberships", []))
+                else:
+                    ca_status = "RuneProfile audit module unavailable."
+            except Exception:
+                logger.exception("RuneProfile noon promotion section failed")
+                ca_status = "RuneProfile promotion data unavailable."
+
         actionable_items = any((
+            ca_lines,
             automatic_promotions,
             reset_rank_updates,
             reset_names,
@@ -6335,6 +6348,20 @@ class TasksCog(commands.Cog):
                     )[:1024],
                     inline=False
                 )
+
+            if ca_status is not None:
+                lines = []
+                for line in ca_lines:
+                    if len("\n".join(lines+[line])) > 820:
+                        break
+                    lines.append(line)
+                if len(lines)<len(ca_lines):
+                    lines.append(f"… {len(ca_lines)-len(lines)} more candidates")
+                if not lines:
+                    lines.append("No verified pending CA promotions." if ca_status.startswith("0 members") is False and "staff review required" in ca_status else "No complete CA eligibility assessment available." if "staff review required" not in ca_status else "No synced CA profiles verified.")
+                lines.append(ca_status)
+                embed.add_field(name=f"Combat Achievement Promotions ({len(ca_lines)})",
+                                value="\n".join(lines)[:1024],inline=False)
 
             if due_today_promotions:
                 embed.add_field(
@@ -6485,7 +6512,7 @@ class TasksCog(commands.Cog):
                 embed.add_field(
                     name="No Action Needed",
                     value=(
-                        "No promotions, linking issues, trial deadlines, "
+                        "No verified promotions, linking issues, trial deadlines, "
                         "role mismatches, or sync failures need staff attention today."
                     ),
                     inline=False

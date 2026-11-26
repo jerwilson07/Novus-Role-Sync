@@ -63,7 +63,7 @@ def migrate_details(message, logo):
         revised.add_field(name=field.name,value=field.value,inline=field.inline)
     count = len(message.attachments)
     revised.add_field(name="Gear Screenshots",value=f"{count} screenshot{'s' if count != 1 else ''} attached",inline=False)
-    revised.add_field(name="Application Status",value="✅ **Application submitted**\nGear verification pending\nStaff approval pending",inline=False)
+    revised.add_field(name="Application Status",value=f"{check()} **Application submitted**\n▫️ Gear verification pending\n▫️ Staff approval pending",inline=False)
     revised.set_image(url=f"attachment://{message.attachments[0].filename}")
     embeds=[revised]
     for i, attachment in enumerate(message.attachments[1:],2):
@@ -99,7 +99,7 @@ def migrate_staff(message, logo):
         for i,f in enumerate(old.fields):
             if f.name in ("Member","Reviewed by","Approved by","Pathway"):
                 embed.set_field_at(i,name=f.name,value=f.value.rstrip("\n\u200b")+"\n\u200b",inline=False)
-        embed.add_field(name="Status",value="Existing member • No promotion required" if status.startswith("Existing Member") else "✅ "+status,inline=False)
+        embed.add_field(name="Status",value="Existing member • No promotion required" if status.startswith("Existing Member") else f"{check()} "+status,inline=False)
         brand(embed,logo,"Novus Membership")
         return content,embed
     if not message.embeds:
@@ -109,12 +109,12 @@ def migrate_staff(message, logo):
         if match:
             action, member, _name, actor=match.groups()
             reviewed=action=="Reviewed existing membership"
-            embed=discord.Embed(title="Membership Reviewed" if reviewed else "✅ Membership Approved",color=discord.Color.blurple() if reviewed else discord.Color.green(),timestamp=message.created_at)
+            embed=discord.Embed(title="Membership Reviewed" if reviewed else f"{check()} Membership Approved",color=discord.Color.blurple() if reviewed else discord.Color.green(),timestamp=message.created_at)
             embed.add_field(name="Member",value=member+"\n\u200b",inline=False)
             if not reviewed:
                 embed.add_field(name="Pathway",value="Not recorded in original log\n\u200b",inline=False)
             embed.add_field(name="Reviewed by" if reviewed else "Approved by",value=actor+"\n\u200b",inline=False)
-            embed.add_field(name="Status",value="Existing member • No promotion required" if reviewed else "✅ Member access granted",inline=False)
+            embed.add_field(name="Status",value="Existing member • No promotion required" if reviewed else f"{check()} Member access granted",inline=False)
             brand(embed,logo,"Novus Membership")
             return "",embed
         match=re.fullmatch(r"\*\*New Trial Vouch\*\*\n(<@!?\d+>) vouched for (<@!?\d+>) \(\*\*(\d+)/(\d+) vouches\*\*\)\.",content)
@@ -123,7 +123,7 @@ def migrate_staff(message, logo):
             embed=discord.Embed(title="New Trial Vouch",color=discord.Color.green() if int(total)>=int(required) else discord.Color.blurple(),timestamp=message.created_at)
             embed.add_field(name="Trial Member",value=trial,inline=False)
             embed.add_field(name="Vouched by",value=voucher,inline=False)
-            embed.add_field(name="Vouch Progress",value=f"**{total}/{required}** unique vouches",inline=False)
+            embed.add_field(name="Vouch Progress",value=f"{check() if int(total)>=int(required) else '▫️'} **{total}/{required}** unique vouches",inline=False)
             brand(embed,logo,"Novus Membership • Raid Trial")
             return "",embed
     elif len(message.embeds)==1 and message.embeds[0].title=="Trial Member Ready for Staff Review":
@@ -135,8 +135,8 @@ def migrate_staff(message, logo):
         if match:
             member,count=match.groups()
             embed.description=f"**Trial Member:** {member}"
-            embed.insert_field_at(0,name="Vouch Progress",value=f"✅ **{count}/3** unique vouches",inline=False)
-            embed.insert_field_at(1,name="Application Status",value="Vouch requirement met\nStaff approval pending",inline=False)
+            embed.insert_field_at(0,name="Vouch Progress",value=f"{check()} **{count}/3** unique vouches",inline=False)
+            embed.insert_field_at(1,name="Application Status",value=f"{check()} Vouch requirement met\n▫️ Staff approval pending",inline=False)
         brand(embed,logo,"Novus Membership • Raid Trial")
         return content,embed
     return None

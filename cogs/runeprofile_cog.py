@@ -84,9 +84,62 @@ class RuneProfileCog(commands.Cog):
         self.lock=asyncio.Lock()
         init()
         self.audit.start()
+        self._staff_recap_task=asyncio.create_task(self.post_requested_staff_recap())
 
     def cog_unload(self):
         self.audit.cancel()
+        self._staff_recap_task.cancel()
+
+    async def post_requested_staff_recap(self):
+        """One Council-requested staff recap, with no mentions or repeated posts."""
+        await self.bot.wait_until_ready()
+        if dt.datetime.now(ET).date()!=dt.date(2026,11,26):
+            return
+        try:
+            guild=self.bot.get_guild(GUILD)
+            sync=self.bot.get_cog("TasksCog")
+            if not guild or not sync or not guild.me:
+                return
+            channel=guild.get_channel(MOD_CHAT)
+            if not isinstance(channel,discord.TextChannel) or channel.name!="mod-chat" or channel.permissions_for(guild.default_role).view_channel:
+                return
+            perms=channel.permissions_for(guild.me)
+            if not (perms.send_messages and perms.read_message_history):
+                return
+            key=f"novus_staff_changes_recap_20261126:{GUILD}"
+            with closing(db()) as conn:
+                if sync._one_time_delivery_sent(conn.cursor(),key):
+                    return
+            title="✦ Novus Updates • November 26"
+            async for msg in channel.history(limit=100):
+                if msg.author.id==self.bot.user.id and msg.content.startswith("## "+title):
+                    sync._mark_one_time_delivery(key,msg.id)
+                    return
+            content="""## ✦ Novus Updates • November 26
+
+**Novus Sync**
+• Daily noon report retains its usual tenure, promotion and linking checks.
+• RuneProfile now tracks CA tiers, points and collection log progress in the background. Master/Grandmaster Discord roles are awarded automatically after **3 months of verified clan tenure**; required in-game CA promotions are listed for staff.
+• Tenure remains tracked independently, including the existing rejoin/reset policy.
+
+**Trial Members**
+• Progress reports in <#1544747251983843349> every Monday and Thursday at 5 PM ET, with individual progress, deadlines and the membership application link.
+• KC/RPP trials have one calendar month; Raid Trials have two weeks to obtain three vouches, starting from Trial Member role assignment.
+• Pathways are tracked from applications and staff Raid Trial instructions. Staff can use `/trialpathway` to correct or confirm them.
+• Eligible KC trials receive a separate eligibility notice; full membership still requires staff approval.
+
+**Raids Prep Program**
+• WOM tracks required KC and RuneProfile tracks the eight specified CAs.
+• Final raid stage: 5 CoX, 5 ToB and 10 Expert ToA KC. Clan teams, deathless completions and VC are encouraged, not mandatory.
+• Other boss objectives and staff review remain in place.
+
+-# Trial progress stays in the trial hub; daily staff sync remains focused on actionable clan updates."""
+            msg=await channel.send(content,allowed_mentions=discord.AllowedMentions.none())
+            sync._mark_one_time_delivery(key,msg.id)
+            logger.info("Novus November 26 staff recap delivered message=%s",msg.id)
+        except Exception:
+            logger.exception("Novus November 26 staff recap failed")
+
 
     async def request(self,rsn,suffix=""):
         headers={"User-Agent":"NovusRoleSync/1.0 (Novus OSRS clan)"}

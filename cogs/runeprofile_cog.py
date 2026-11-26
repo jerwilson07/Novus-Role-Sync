@@ -413,12 +413,16 @@ class RuneProfileCog(commands.Cog):
         trial=self.bot.get_cog("TrialKCEligibilityCog")
         if not sync or not trial:
             return
-        key=f"novus_ca_staff_report_revision_20261126:{GUILD}"
+        key=f"novus_ca_staff_report_corrections_complete_20261126:{GUILD}"
         with closing(db()) as conn:
             if sync._one_time_delivery_sent(conn.cursor(),key):
                 return
             awards=conn.execute("SELECT wom_id,discord_id,tier FROM runeprofile_ca_awards").fetchall()
             reviews={(wid,tier):(result,date) for wid,tier,result,date in conn.execute("SELECT wom_id,tier,result,eligible_date FROM runeprofile_initial_award_review")}
+            corrected={did:tier for did,tier in conn.execute("SELECT discord_id,tier FROM runeprofile_initial_corrections WHERE result IN ('removed','already_absent')")}
+        if any(reviews.get((wid,tier),(None,None))[0]=="under_minimum" and corrected.get(did)!=tier for wid,did,tier in awards):
+            logger.info("CA report final revision awaiting confirmed role corrections")
+            return
         if any((wid,tier) not in reviews for wid,did,tier in awards):
             logger.warning("CA report revision waiting for verified initial award review")
             return
@@ -461,7 +465,12 @@ class RuneProfileCog(commands.Cog):
             if result=="eligible" and role_id in {r.id for r in member.roles}:
                 granted.append(f"{check()} {member.mention} → **{tier} CA**")
             elif result=="under_minimum":
-                corrections.append(f"⚠️ {member.mention}: {tier} • eligible {date}")
+                if role_id in {r.id for r in member.roles}:
+                    logger.warning("CA report final revision: role still present discord=%s",did)
+                    return
+                eligible=dt.date.fromisoformat(date)
+                display=f"{eligible.strftime('%B')} {eligible.day}, {eligible.year}"
+                corrections.append(f"{check()} {member.mention}: {tier} removed • eligible {display}")
         for line in lines:
             if "(Discord pending)" in line:
                 granted.append(line)
@@ -472,7 +481,7 @@ class RuneProfileCog(commands.Cog):
         import re
         ca_ids={did for line in ingame for did in re.findall(r"<@(\d+)>",line)}
         for field in old.fields:
-            if field.name.startswith(("Trials Ending Soon","Active Trial Members","Combat Achievement Promotions","Automatic Discord CA Promotions","In-Game CA Promotions Needed")):
+            if field.name.startswith(("Trials Ending Soon","Active Trial Members","Combat Achievement Promotions","Automatic Discord CA Promotions","In-Game CA Promotions Needed","CA Tenure Corrections Required","CA Tenure Corrections Completed")):
                 continue
             value=field.value
             if field.name.startswith(("In-Game Promotions Due Today","Overdue In-Game Promotions")):
@@ -487,7 +496,7 @@ class RuneProfileCog(commands.Cog):
         for heading,items in (("Active Trial Members",[line for _,line in sorted(trial_lines)]),
                               ("Automatic Discord CA Promotions",granted),
                               ("In-Game CA Promotions Needed",ingame),
-                              ("CA Tenure Corrections Required",corrections)):
+                              ("CA Tenure Corrections Completed",corrections)):
             if not items:
                 continue
             chunk=[]
@@ -498,13 +507,13 @@ class RuneProfileCog(commands.Cog):
                 chunk.append(line)
             if chunk:
                 embed.add_field(name=f"{heading} ({len(items)})" if not any(f.name.startswith(heading) for f in embed.fields) else heading+" (continued)",value="\n".join(chunk),inline=False)
-        embed.set_footer(text="✦ Novus Noon Staff Sync • CA Update • Revised")
+        embed.set_footer(text="✦ Novus Noon Staff Sync • CA Update • Corrections Verified")
         if len(embed)>6000 or len(embed.fields)>25:
             logger.warning("CA report revision exceeds Discord embed limits")
             return
         await msg.edit(embed=embed,allowed_mentions=discord.AllowedMentions.none())
         sync._mark_one_time_delivery(key,msg.id)
-        logger.info("Novus original CA staff report revised message=%s eligible=%s under_minimum=%s trials=%s ingame=%s",msg.id,len(granted),len(corrections),len(trial_lines),len(ingame))
+        logger.info("Novus final CA staff report revised message=%s eligible=%s under_minimum=%s trials=%s ingame=%s",msg.id,len(granted),len(corrections),len(trial_lines),len(ingame))
 
     async def requested_staff_report(self,guild,day):
         # One explicitly requested replacement report today, after fresh CA data.

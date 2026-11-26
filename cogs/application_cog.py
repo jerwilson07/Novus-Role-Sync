@@ -309,7 +309,7 @@ def report_embed(rsn, payload, test=False, note=None, reviewer_id=None, trial=No
             graduation += "\n-# Existing vouch records: staff must confirm they apply to this trial."
         embed.add_field(name="Trial Member Graduation", value=graduation, inline=False)
     if not qualified and trial is None:
-        embed.add_field(name="Alternative Pathways", value="Raids Prep Program or Raid Trial (staff discretion).\nRaid Trial: 3 member vouches within 2 weeks of receiving the Trial Member role.\n\u200b", inline=False)
+        embed.add_field(name="Alternative Pathways", value="Raids Prep Program or Raid Trial (staff discretion).\nKC / Raids Prep Program trials: 1 month.\nRaid Trial: 3 member vouches within 2 weeks.\nBoth start when the Trial Member role is assigned.\n\u200b", inline=False)
         trial_rows = "\n".join(
             f"**{label}:** {fmt(key)}" + (" KC" if values.get(key) is not None else "")
             for label, key in TRIAL_REFERENCE

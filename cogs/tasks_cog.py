@@ -1239,6 +1239,48 @@ class TasksCog(commands.Cog):
             return
         await self._run_staff_tenure_exceptions(guild)
         await self._run_nov19_rejoin_correction(guild)
+        await self._run_nov26_staff_sync(guild)
+
+    async def _run_nov26_staff_sync(self, guild):
+        """One requested extra Auto-Link + SyncAll, without changing noon scheduling."""
+        if datetime.datetime.now(ZoneInfo("America/New_York")).date() != datetime.date(2026, 11, 26):
+            return
+        key = f"novus_extra_staff_sync_20261126:{guild.id}"
+        with sqlite3.connect("wom_multi.db") as conn:
+            cursor = conn.cursor()
+            if self._one_time_delivery_sent(cursor, key):
+                return
+            config = cursor.execute(
+                "SELECT group_id, nickname_enforcement, dm_notifications_on FROM guild_configs WHERE guild_id=?",
+                (guild.id,),
+            ).fetchone()
+        if not config or config[0] != 25802:
+            logger.warning("Novus extra staff sync skipped: WOM group unverified")
+            return
+        channel = guild.get_channel(NOVUS_MOD_CHAT_CHANNEL_ID)
+        if channel is None or guild.me is None:
+            logger.warning("Novus extra staff sync skipped: #mod-chat unavailable")
+            return
+        permissions = channel.permissions_for(guild.me)
+        if not permissions.send_messages or not permissions.embed_links:
+            logger.warning("Novus extra staff sync skipped: missing #mod-chat permissions")
+            return
+        self._last_staff_report_message_ids.pop(guild.id, None)
+        logger.info("Novus requested extra staff sync started guild=%s", guild.id)
+        try:
+            await self.sync_guild(
+                guild, config[0], NOVUS_MOD_CHAT_CHANNEL_ID, config[1], config[2],
+                report_label="✦ Novus Sync • Requested Auto-Link + SyncAll",
+            )
+            message_id = self._last_staff_report_message_ids.get(guild.id)
+            if message_id:
+                self._mark_one_time_delivery(key, message_id)
+                logger.info("Novus requested extra staff sync completed #mod-chat message=%s", message_id)
+            else:
+                logger.warning("Novus requested extra staff sync ended without confirmed report")
+        except Exception:
+            logger.exception("Novus requested extra staff sync failed")
+
 
     async def _run_staff_tenure_exceptions(self, guild):
         """Persist explicitly approved exceptions and synchronize only affected members."""

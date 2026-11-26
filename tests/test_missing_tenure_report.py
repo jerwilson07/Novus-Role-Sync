@@ -130,10 +130,10 @@ class DailyReportIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.cog.bot.get_cog=lambda name: rp if name=="RuneProfileCog" else None
         report=await self.run_sync()
         self.assertEqual(report.fields[0].name,"Member Role Without Tenure (2)")
-        self.assertEqual(report.fields[-1].name,"Combat Achievement Promotions (1)")
+        self.assertEqual(report.fields[-1].name,"Automatic Discord CA Promotions (1)")
         self.assertIn("Grandmaster CA",report.fields[-1].value)
         next_report=await self.run_sync()
-        self.assertEqual([f.name for f in next_report.fields],["Combat Achievement Promotions (1)"])
+        self.assertEqual([f.name for f in next_report.fields],["Automatic Discord CA Promotions (1)"])
 
     async def test_failed_discord_delivery_does_not_start_cooldown(self):
         response = SimpleNamespace(status=403, reason="Forbidden")

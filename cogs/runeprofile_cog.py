@@ -339,6 +339,107 @@ class RuneProfileCog(commands.Cog):
                 with closing(db()) as conn,conn:
                     conn.execute("INSERT OR REPLACE INTO runeprofile_initial_award_review VALUES (?,?,?,?)",(wid,tier,result,str(eligible)))
 
+    async def revise_staff_report(self,guild,day):
+        """Edit only the explicitly requested original CA update message."""
+        if day!="2026-11-26":
+            return
+        sync=self.bot.get_cog("TasksCog")
+        trial=self.bot.get_cog("TrialKCEligibilityCog")
+        if not sync or not trial:
+            return
+        key=f"novus_ca_staff_report_revision_20261126:{GUILD}"
+        with closing(db()) as conn:
+            if sync._one_time_delivery_sent(conn.cursor(),key):
+                return
+            awards=conn.execute("SELECT wom_id,discord_id,tier FROM runeprofile_ca_awards").fetchall()
+            reviews={(wid,tier):(result,date) for wid,tier,result,date in conn.execute("SELECT wom_id,tier,result,eligible_date FROM runeprofile_initial_award_review")}
+        if any((wid,tier) not in reviews for wid,did,tier in awards):
+            logger.warning("CA report revision waiting for verified initial award review")
+            return
+        group,status=await sync.get_wom_group(25802)
+        if status!=200 or not has_verifiable_wom_roster(group) or group.get("id")!=25802:
+            return
+        channel=guild.get_channel(MOD_CHAT)
+        if not isinstance(channel,discord.TextChannel) or channel.name!="mod-chat":
+            return
+        msg=await channel.fetch_message(1575573807857532929)
+        if msg.author.id!=self.bot.user.id or not msg.embeds:
+            return
+        old=msg.embeds[0]
+        if not old.footer.text or "Novus Noon Staff Sync • CA Update" not in old.footer.text:
+            return
+        from cogs.vouches_cog import is_trial
+        trial_lines=[]
+        now=dt.datetime.now(ET)
+        for member in guild.members:
+            if not is_trial(member):
+                continue
+            pathway,start,end=await trial.trial_timing(guild,member)
+            if not end:
+                trial_lines.append((9999,f"- {member.mention}: deadline unverified"))
+                continue
+            days=(end.astimezone(ET).date()-now.date()).days
+            label=f"{days}d left" if days>0 else "ends today" if days==0 else f"{abs(days)}d overdue"
+            trial_lines.append((days,f"- {member.mention}: {label} • <t:{int(end.timestamp())}:D>"))
+        lines,ca_status,ingame=self.promotion_report(guild,group["memberships"])
+        if "tenure minimum applied" not in ca_status:
+            return
+        # Include all originally awarded roles, even those acknowledged in
+        # the earlier report, but only after verified tenure review.
+        granted=[]
+        corrections=[]
+        for wid,did,tier in awards:
+            result,date=reviews[(wid,tier)]
+            member=await guild.fetch_member(did)
+            role_id=GRANDMASTER if tier=="Grandmaster" else MASTER
+            if result=="eligible" and role_id in {r.id for r in member.roles}:
+                granted.append(f"{check()} {member.mention} → **{tier} CA**")
+            elif result=="under_minimum":
+                corrections.append(f"⚠️ {member.mention}: {tier} • eligible {date}")
+        for line in lines:
+            if "(Discord pending)" in line:
+                granted.append(line)
+        embed=discord.Embed.from_dict(old.to_dict())
+        embed.clear_fields()
+        # Keep unrelated original fields; CA rank takes priority over an
+        # ordinary in-game tenure recommendation for the same member.
+        import re
+        ca_ids={did for line in ingame for did in re.findall(r"<@(\d+)>",line)}
+        for field in old.fields:
+            if field.name.startswith(("Trials Ending Soon","Active Trial Members","Combat Achievement Promotions","Automatic Discord CA Promotions","In-Game CA Promotions Needed")):
+                continue
+            value=field.value
+            if field.name.startswith(("In-Game Promotions Due Today","Overdue In-Game Promotions")):
+                remaining=[line for line in value.splitlines() if not any(f"<@{did}>" in line for did in ca_ids)]
+                if not remaining:
+                    continue
+                value="\n".join(remaining)
+                name=field.name.split(" (")[0]+f" ({len(remaining)})"
+            else:
+                name=field.name
+            embed.add_field(name=name,value=value,inline=field.inline)
+        for heading,items in (("Active Trial Members",[line for _,line in sorted(trial_lines)]),
+                              ("Automatic Discord CA Promotions",granted),
+                              ("In-Game CA Promotions Needed",ingame),
+                              ("CA Tenure Corrections Required",corrections)):
+            if not items:
+                continue
+            chunk=[]
+            for line in items:
+                if len("\n".join(chunk+[line]))>1000 and chunk:
+                    embed.add_field(name=f"{heading} ({len(items)})" if not any(f.name.startswith(heading) for f in embed.fields) else heading+" (continued)",value="\n".join(chunk),inline=False)
+                    chunk=[]
+                chunk.append(line)
+            if chunk:
+                embed.add_field(name=f"{heading} ({len(items)})" if not any(f.name.startswith(heading) for f in embed.fields) else heading+" (continued)",value="\n".join(chunk),inline=False)
+        embed.set_footer(text="✦ Novus Noon Staff Sync • CA Update • Revised")
+        if len(embed)>6000 or len(embed.fields)>25:
+            logger.warning("CA report revision exceeds Discord embed limits")
+            return
+        await msg.edit(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+        sync._mark_one_time_delivery(key,msg.id)
+        logger.info("Novus original CA staff report revised message=%s eligible=%s under_minimum=%s trials=%s ingame=%s",msg.id,len(granted),len(corrections),len(trial_lines),len(ingame))
+
     async def requested_staff_report(self,guild,day):
         # One explicitly requested replacement report today, after fresh CA data.
         if day!="2026-11-26":
@@ -395,6 +496,7 @@ class RuneProfileCog(commands.Cog):
                 await self.audit_initial_awards(guild,day)
                 await self.award_verified_roles(guild,day)
                 await self.requested_staff_report(guild,day)
+                await self.revise_staff_report(guild,day)
         except Exception:
             logger.exception("RuneProfile daily audit failed")
 

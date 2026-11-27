@@ -144,6 +144,7 @@ class RuneProfileCog(commands.Cog):
     def __init__(self,bot):
         self.bot=bot
         self.lock=asyncio.Lock()
+        self._report_revision_lock=asyncio.Lock()
         init()
         self.audit.start()
         self._staff_recap_task=asyncio.create_task(self.post_requested_staff_recap())
@@ -155,6 +156,14 @@ class RuneProfileCog(commands.Cog):
     async def post_requested_staff_recap(self):
         """One Council-requested staff recap, with no mentions or repeated posts."""
         await self.bot.wait_until_ready()
+        if dt.datetime.now(ET).date()==dt.date(2026,11,27):
+            try:
+                guild=self.bot.get_guild(GUILD)
+                if guild:
+                    await self.merge_requested_noon_report(guild,"2026-11-27")
+            except Exception:
+                logger.exception("Novus requested November 27 report edit failed")
+            return
         if dt.datetime.now(ET).date()!=dt.date(2026,11,26):
             return
         try:
@@ -649,6 +658,92 @@ class RuneProfileCog(commands.Cog):
             sync._mark_one_time_delivery(key,mid)
             logger.info("Novus requested CA staff report delivered message=%s",mid)
 
+
+    async def merge_requested_noon_report(self,guild,day):
+        """One-time edit of the existing November 27 noon report, no role changes."""
+        if day!="2026-11-27" or dt.datetime.now(ET).date().isoformat()!=day:
+            return
+        async with self._report_revision_lock:
+            sync=self.bot.get_cog("TasksCog")
+            if not sync or guild.id!=GUILD:
+                return
+            message_id=1575919164911263836
+            key=f"novus_merge_ca_noon_20261127:{GUILD}"
+            with closing(db()) as conn:
+                if sync._one_time_delivery_sent(conn.cursor(),key):
+                    return
+            channel=guild.get_channel(MOD_CHAT)
+            if not isinstance(channel,discord.TextChannel) or channel.name!="mod-chat":
+                return
+            msg=await channel.fetch_message(message_id)
+            if (msg.author.id!=self.bot.user.id or not msg.embeds
+                    or msg.created_at.astimezone(ET).date().isoformat()!=day):
+                return
+            old=msg.embeds[0]
+            if old.footer.text!="Novus Noon Staff Sync":
+                logger.warning("Requested noon report edit skipped: unexpected footer")
+                return
+            group,status=await sync.get_wom_group(25802)
+            if status!=200 or not has_verifiable_wom_roster(group) or group.get("id")!=25802:
+                return
+            if not guild.chunked:
+                await guild.chunk(cache=True)
+            with closing(db()) as conn,conn:
+                audit=sync.get_promotion_audit_entries(conn.cursor(),guild,group,upcoming_days=0)
+            prefixes=("In-Game Promotions Due Today","Overdue In-Game Promotions",
+                      "In-Game CA Promotions Needed")
+            fields=[]
+            for heading,rows,overdue in (
+                (prefixes[0],audit["due_today"],False),
+                (prefixes[1],audit["overdue"],True),
+            ):
+                lines=[]
+                for entry in rows:
+                    line=f"- {entry['member'].mention}: {entry['current_rank']} → {entry['target_rank']}"
+                    if overdue:
+                        line+=f" ({entry['overdue_days']}d overdue)"
+                    lines.append(line)
+                chunk=[]
+                first=True
+                for line in lines:
+                    if chunk and len("\n".join(chunk+[line]))>1000:
+                        fields.append((f"{heading} ({len(rows)})" if first else heading+" (continued)","\n".join(chunk)))
+                        first=False
+                        chunk=[]
+                    chunk.append(line)
+                if chunk:
+                    fields.append((f"{heading} ({len(rows)})" if first else heading+" (continued)","\n".join(chunk)))
+            embed=discord.Embed.from_dict(old.to_dict())
+            embed.clear_fields()
+            inserted=False
+            for field in old.fields:
+                if field.name.startswith(prefixes):
+                    if not inserted:
+                        for name,value in fields:
+                            embed.add_field(name=name,value=value,inline=False)
+                        inserted=True
+                    continue
+                if field.name=="No Action Needed" and fields:
+                    continue
+                embed.add_field(name=field.name,value=field.value,inline=field.inline)
+            if not inserted:
+                for name,value in fields:
+                    embed.add_field(name=name,value=value,inline=False)
+            if len(embed)>6000 or len(embed.fields)>25:
+                logger.warning("Requested November 27 report edit exceeds Discord embed limits")
+                return
+            edited=await msg.edit(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+            # Confirm the actual edited message before recording completion.
+            if not edited or not edited.embeds:
+                return
+            if [(f.name,f.value) for f in edited.embeds[0].fields]!=[(f.name,f.value) for f in embed.fields]:
+                logger.warning("Requested November 27 report edit not confirmed")
+                return
+            sync._mark_one_time_delivery(key,message_id)
+            logger.info("Novus November 27 noon report merged in place message=%s due_today=%s overdue=%s ca=%s",
+                        message_id,len(audit["due_today"]),len(audit["overdue"]),
+                        sum(bool(e.get("ca_promotion")) for e in audit["due_today"]+audit["overdue"]))
+
     @tasks.loop(minutes=30)
     async def audit(self):
         await self.bot.wait_until_ready()
@@ -672,6 +767,7 @@ class RuneProfileCog(commands.Cog):
                 await self.award_verified_roles(guild,day)
                 await self.requested_staff_report(guild,day)
                 await self.revise_staff_report(guild,day)
+            await self.merge_requested_noon_report(guild,day)
         except Exception:
             logger.exception("RuneProfile daily audit failed")
 

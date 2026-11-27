@@ -5,7 +5,6 @@ from cogs.config_cog import can_manually_link_novus_member
 from types import SimpleNamespace
 
 from common import (
-    GUEST_ROLE_ID,
     CLAN_FRIEND_ROLE_ID,
     find_primary_wom_membership,
     has_novus_member_role,
@@ -26,7 +25,6 @@ ROSTER = [
 ]
 MEMBER = discord_user((100, "Verified"), (200, "Member"))
 VERIFIED_ONLY = discord_user((100, "Verified"))
-GUEST_MEMBER = discord_user((GUEST_ROLE_ID, "Guest"), (200, "Member"))
 FRIEND_MEMBER = discord_user((CLAN_FRIEND_ROLE_ID, "Clan Friend"), (200, "Member"))
 
 
@@ -48,12 +46,8 @@ class ActiveMembershipTests(unittest.TestCase):
         ))
         self.assertFalse(has_novus_member_role(VERIFIED_ONLY))
 
-    def test_guests_and_friends_never_qualify_even_with_member(self):
-        self.assertFalse(has_novus_member_role(GUEST_MEMBER))
+    def test_clan_friends_never_qualify_even_with_member(self):
         self.assertFalse(has_novus_member_role(FRIEND_MEMBER))
-        self.assertFalse(is_active_novus_member_link(
-            GUEST_MEMBER, "Novus Main", 12345, ROSTER
-        ))
         self.assertFalse(is_active_novus_member_link(
             FRIEND_MEMBER, "Novus Main", 12345, ROSTER
         ))
@@ -123,14 +117,12 @@ class ActiveMembershipTests(unittest.TestCase):
             discord_user((202, " VeRiFiEd "))
         ))
         self.assertTrue(can_manually_link_novus_member(
-            discord_user((200, "Member"), (GUEST_ROLE_ID, "Guest"))
-        ))
-        self.assertTrue(can_manually_link_novus_member(
             discord_user((201, "Trial Member"), (CLAN_FRIEND_ROLE_ID, "Clan Friend"))
         ))
 
     def test_manual_linking_rejects_unverified_targets_and_bots(self):
         self.assertFalse(can_manually_link_novus_member(discord_user((203, "Unverified"))))
+        self.assertFalse(can_manually_link_novus_member(discord_user((1, "@everyone"))))
         bot = discord_user((202, "Verified"))
         bot.bot = True
         self.assertFalse(can_manually_link_novus_member(bot))

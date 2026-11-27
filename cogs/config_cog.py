@@ -742,7 +742,7 @@ class ConfigCog(commands.Cog):
 
         if not can_manually_link_novus_member(user):
             await notice(interaction, False, 
-                f"{user.mention} needs Verified, Member, Trial Member, Guest, or Clan Friend.",
+                f"{user.mention} needs Verified, Member, Trial Member, or Clan Friend.",
                 ephemeral=True
             )
             return
@@ -923,7 +923,7 @@ class ConfigCog(commands.Cog):
         )
         if has_non_clan_role(user):
             link_status = (
-                "Saved as a non-clan link. Guest and Clan Friend are excluded "
+                "Saved as a non-clan link. Clan Friend is excluded "
                 "from clan rank sync and tenure reports."
             )
         elif has_novus_member_role(user):

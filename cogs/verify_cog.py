@@ -10,7 +10,7 @@ from novus_logging import check, notice, bind_novus_ui, _dismiss_private, start_
 from discord import app_commands
 from discord.ext import commands
 
-from common import GUEST_ROLE_ID, CLAN_FRIEND_ROLE_ID, sanitize_rsn
+from common import CLAN_FRIEND_ROLE_ID, sanitize_rsn
 from cogs.tasks_cog import (
     NOVUS_GUILD_ID, NOVUS_COMMAND_ROLE_IDS, NOVUS_TENURE_ROLES,
     NOVUS_MOD_CHAT_CHANNEL_ID,
@@ -134,9 +134,6 @@ class VerifyCog(commands.Cog):
         try:
             nickname = parse_rsn(username)
             verified = unique_role(guild, "Verified")
-            guest = guild.get_role(GUEST_ROLE_ID)
-            if guest is None:
-                raise ValueError("Guest role is not configured.")
         except ValueError as exc:
             await notice(interaction, False, str(exc), ephemeral=True)
             return
@@ -168,8 +165,6 @@ class VerifyCog(commands.Cog):
                     await member.edit(nick=nickname, reason="Novus /rsn")
                 if verified not in member.roles:
                     await member.add_roles(verified, reason="Novus /rsn")
-                if guest in member.roles:
-                    await member.remove_roles(guest, reason="Novus /rsn")
         except discord.HTTPException:
             logger.exception("RSN verification failed for %s", interaction.user.id)
             await notice(interaction, True, "Could not complete verification. Please contact staff or retry; some changes may already have applied.", ephemeral=True)
@@ -385,9 +380,8 @@ class VerifyCog(commands.Cog):
         trial = unique_role(guild, "Trial Member")
         verified = unique_role(guild, "Verified")
         friend = guild.get_role(CLAN_FRIEND_ROLE_ID)
-        guest = guild.get_role(GUEST_ROLE_ID)
-        if guest is None or friend is None:
-            raise ValueError("Guest or Clan Friend role is not configured.")
+        if friend is None:
+            raise ValueError("Clan Friend role is not configured.")
         async with self.lock(member):
             member = await guild.fetch_member(member.id)
             if verified not in member.roles:
@@ -401,7 +395,7 @@ class VerifyCog(commands.Cog):
                 add.append(squire)
             if add:
                 await member.add_roles(*add, reason=f"Novus approval by {actor.id}")
-            remove = [r for r in (friend, trial, guest) if r in member.roles]
+            remove = [r for r in (friend, trial) if r in member.roles]
             if remove:
                 await member.remove_roles(*remove, reason=f"Novus approval by {actor.id}")
         logged = await self.log_approval(guild, actor, member, already, was_trial=was_trial, pathway=pathway)

@@ -1,4 +1,4 @@
-"""Regression tests for Guest/Clan Friend exclusion and persistent account links."""
+"""Regression tests for Clan Friend exclusion and persistent account links."""
 
 import sqlite3
 import unittest
@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 from common import (
     CLAN_FRIEND_ROLE_ID,
-    GUEST_ROLE_ID,
     forget_member_links,
     clan_sync_link_rows,
     forget_unmatched_alt_links,
@@ -43,7 +42,7 @@ class NonClanExclusionTests(unittest.TestCase):
             "CREATE TABLE alt_links (guild_id INTEGER, discord_id INTEGER, rsn TEXT, wom_id INTEGER)"
         )
         for guild_id, discord_id, rsn in (
-            (1, 10, "GuestMain"), (1, 20, "FriendMain"),
+            (1, 10, "VisitorMain"), (1, 20, "FriendMain"),
             (1, 30, "MemberMain"), (2, 10, "OtherGuildMain"),
         ):
             self.cur.execute(
@@ -51,12 +50,12 @@ class NonClanExclusionTests(unittest.TestCase):
             )
         self.cur.executemany(
             "INSERT INTO alt_links (guild_id, discord_id, rsn) VALUES (?, ?, ?)",
-            [(1, 10, "GuestAlt"), (1, 20, "FriendAlt"), (1, 30, "MemberAlt")],
+            [(1, 10, "VisitorAlt"), (1, 20, "FriendAlt"), (1, 30, "MemberAlt")],
         )
         self.guild = DummyGuild(
             1,
             [
-                member(10, GUEST_ROLE_ID),
+                member(10, 1),
                 member(20, CLAN_FRIEND_ROLE_ID),
                 member(30, 987654),
             ],
@@ -72,17 +71,17 @@ class NonClanExclusionTests(unittest.TestCase):
         ).fetchone()[0]
 
     def test_role_recognition(self):
-        self.assertTrue(has_non_clan_role(member(10, GUEST_ROLE_ID)))
+        self.assertFalse(has_non_clan_role(member(10, 1)))
         self.assertTrue(has_non_clan_role(member(20, CLAN_FRIEND_ROLE_ID)))
         self.assertFalse(has_non_clan_role(member(30, 987654)))
 
-    def test_clan_matching_excludes_guest_and_friend_links_without_deleting_them(self):
+    def test_clan_matching_excludes_friend_links_without_deleting_them(self):
         for table in ("links", "alt_links"):
             rows = self.cur.execute(
                 f"SELECT discord_id, rsn FROM {table} WHERE guild_id = ?", (1,)
             ).fetchall()
             filtered = clan_sync_link_rows(self.guild, rows)
-            self.assertEqual([row[0] for row in filtered], [30])
+            self.assertEqual([row[0] for row in filtered], [10, 30])
             for user_id in (10, 20, 30):
                 self.assertEqual(self.count(table, 1, user_id), 1)
         self.assertEqual(self.count("links", 2, 10), 1)
@@ -128,7 +127,7 @@ class NonClanExclusionTests(unittest.TestCase):
 
 
 class NonClanSyncTests(unittest.IsolatedAsyncioTestCase):
-    async def test_sync_keeps_guest_and_friend_links_and_never_touches_roles(self):
+    async def test_sync_keeps_visitor_and_friend_links_and_never_touches_roles(self):
         from cogs.tasks_cog import TasksCog
         cog = TasksCog.__new__(TasksCog)
         db = sqlite3.connect(":memory:")
@@ -141,12 +140,12 @@ class NonClanSyncTests(unittest.IsolatedAsyncioTestCase):
             "INSERT INTO alt_links VALUES(1,10,'Alt'),(1,20,'FriendAlt');"
         )
         roster = {"memberships": [{"player": {"id": 91, "username": "Main"}, "role": "duellist"}]}
-        for target in (member(10, GUEST_ROLE_ID), member(20, CLAN_FRIEND_ROLE_ID)):
+        for target, expected in ((member(10, 1), "not_current_member"), (member(20, CLAN_FRIEND_ROLE_ID), "non_clan_ignored")):
             target.add_roles = AsyncMock()
             target.remove_roles = AsyncMock()
             guild = DummyGuild(1, [target])
             result = await cog.sync_one_member(guild, target, roster, cursor)
-            self.assertEqual(result["status"], "non_clan_ignored")
+            self.assertEqual(result["status"], expected)
             target.add_roles.assert_not_called()
             target.remove_roles.assert_not_called()
         self.assertEqual(cursor.execute("SELECT COUNT(*) FROM links").fetchone()[0], 2)

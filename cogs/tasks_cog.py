@@ -79,7 +79,7 @@ NOVUS_TRIAL_DISCORD_ROLE_NAME = "trial member"
 # Moderator or Trial Moderator.
 PROTECTED_NON_TENURE_ROLE_NAMES = frozenset({
     "member", "trial member", "moderator", "trial moderator", "council",
-    "founder", "verified", "guest", "clan friend",
+    "founder", "verified", "clan friend",
     "master", "grandmaster", "master ca", "grandmaster ca",
 })
 PROTECTED_NON_TENURE_ROLE_IDS = frozenset({
@@ -785,7 +785,7 @@ class TasksCog(commands.Cog):
             self._one_time_case_sync_task.cancel()
 
     # ========================================================
-    # GUEST / CLAN FRIEND EXCLUSION
+    # CLAN FRIEND EXCLUSION
     # ========================================================
 
     @commands.Cog.listener()
@@ -1682,7 +1682,7 @@ class TasksCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
-        # Once someone becomes a Guest/Clan Friend, inactive staff-removal
+        # Once someone becomes a Clan Friend, inactive staff-removal
         # evidence is no longer valid, but their primary and alt links stay.
         if not has_non_clan_role(after) or has_non_clan_role(before):
             return
@@ -3926,7 +3926,7 @@ class TasksCog(commands.Cog):
 
         if status == "non_clan_ignored":
             await notice(interaction, True, 
-                f"{member.mention} has Guest or Clan Friend and is excluded "
+                f"{member.mention} has Clan Friend and is excluded "
                 "from clan rank sync. Saved account links are kept.",
                 ephemeral=True
             )

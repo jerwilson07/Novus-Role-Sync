@@ -36,7 +36,7 @@ def is_trial(member: discord.Member) -> bool:
 
 
 def is_eligible_voucher(member: discord.Member) -> bool:
-    # Clan Friends, guests, and trial members cannot vouch. Full members
+    # Clan Friends, unverified visitors, and trial members cannot vouch. Full members
     # and staff submit under their own Discord account.
     return (
         not member.bot

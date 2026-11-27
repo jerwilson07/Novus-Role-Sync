@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 import discord
 
 from cogs.config_cog import ConfigCog, COUNCIL_ROLE_ID
-from common import GUEST_ROLE_ID, CLAN_FRIEND_ROLE_ID
+from common import CLAN_FRIEND_ROLE_ID
 from cogs.tasks_cog import nickname_change_confirmed
 
 
@@ -89,8 +89,8 @@ class ManualLinkNicknameTests(unittest.IsolatedAsyncioTestCase):
         )
         self.interaction.response.defer.assert_awaited_once()
 
-    async def test_staff_can_link_guests_and_clan_friends_as_non_clan(self):
-        for role_id, name in ((GUEST_ROLE_ID, "Guest"), (CLAN_FRIEND_ROLE_ID, "Clan Friend")):
+    async def test_staff_can_link_clan_friends_as_non_clan(self):
+        for role_id, name in ((CLAN_FRIEND_ROLE_ID, "Clan Friend"),):
             self.member.roles = [SimpleNamespace(id=role_id, name=name)]
             await self.link("Wise Old Nut | Alt")
             self.assertEqual(self.read("SELECT rsn FROM links"), [("Wise Old Nut",)])

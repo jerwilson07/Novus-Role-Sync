@@ -8,7 +8,7 @@ import discord
 from cogs.tasks_cog import (
     COUNCIL_ROLE_ID, MODERATOR_ROLE_ID, NOVUS_GUILD_ID, TRIAL_MOD_ROLE_ID, TasksCog,
 )
-from common import GUEST_ROLE_ID
+from common import CLAN_FRIEND_ROLE_ID
 
 
 def wom(wom_id, display_name):
@@ -57,12 +57,12 @@ class SilentNicknamePassTests(unittest.IsolatedAsyncioTestCase):
                 target.remove_roles.assert_not_called()
                 target.send.assert_not_called()
 
-    async def test_council_higher_owner_guests_and_bots_are_untouched(self):
+    async def test_council_higher_owner_clan_friends_and_bots_are_untouched(self):
         cases = [
             (member(7, "xaffluence", COUNCIL_ROLE_ID, 3), "council_or_higher"),
             (member(7, "xaffluence", 12, 4), "council_or_higher"),
             (member(99, "xaffluence", 12), "council_or_higher"),
-            (member(7, "xaffluence", GUEST_ROLE_ID), "excluded"),
+            (member(7, "xaffluence", CLAN_FRIEND_ROLE_ID), "excluded"),
         ]
         bot = member(7, "xaffluence", 12)
         bot.bot = True

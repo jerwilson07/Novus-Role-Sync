@@ -40,9 +40,8 @@ def wom_display_rsn(player: dict, fallback: str | None = None) -> str:
 
 
 # Discord roles indicating a person is not an active Novus clan member.
-GUEST_ROLE_ID = 1532905619412226199
 CLAN_FRIEND_ROLE_ID = 1534581044274270388
-NON_CLAN_ROLE_IDS = frozenset({GUEST_ROLE_ID, CLAN_FRIEND_ROLE_ID})
+NON_CLAN_ROLE_IDS = frozenset({CLAN_FRIEND_ROLE_ID})
 
 
 def has_non_clan_role(member) -> bool:
@@ -66,7 +65,7 @@ def forget_member_links(cursor, guild_id: int, discord_id: int) -> int:
 
 
 def clan_sync_link_rows(guild, rows):
-    """Keep Guest/Clan Friend links out of clan matching and reports."""
+    """Keep Clan Friend links out of clan matching and reports."""
     return [row for row in rows if not has_non_clan_role(guild.get_member(row[0]))]
 
 
@@ -88,7 +87,7 @@ NOVUS_MEMBER_ROLE_NAME = "member"
 
 
 def has_novus_member_role(member) -> bool:
-    """True only for Discord Member-role holders who aren't Guest/Clan Friend."""
+    """True only for Discord Member-role holders who aren't Clan Friend."""
     if member is None or has_non_clan_role(member):
         return False
     return any(

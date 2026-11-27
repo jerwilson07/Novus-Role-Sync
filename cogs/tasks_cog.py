@@ -2042,8 +2042,8 @@ class TasksCog(commands.Cog):
         Audit in-game promotions for primary and alt RSNs separately.
 
         Each account is compared only with its own WOM rank and its own
-        cumulative tenure. Discord role state does not determine whether an
-        in-game promotion is due.
+        cumulative tenure. An already-awarded Discord CA rank takes priority
+        on the primary account; linked alts retain independent tenure checks.
         """
 
         memberships = group_data.get(
@@ -2102,7 +2102,16 @@ class TasksCog(commands.Cog):
                 accounts
             )
 
+            ca_entry = None
+            if guild.id == NOVUS_GUILD_ID and group_id == 25802:
+                from cogs.runeprofile_cog import ingame_ca_promotion
+                ca_entry = ingame_ca_promotion(cursor, member, accounts, today)
+                if ca_entry:
+                    (overdue if ca_entry["overdue_days"] else due_today).append(ca_entry)
+
             for account in accounts:
+                if ca_entry and account.get("player_id") == ca_entry["player_id"]:
+                    continue
                 wom_role = account.get(
                     "wom_role"
                 )
@@ -4811,11 +4820,12 @@ class TasksCog(commands.Cog):
                     "wom_tenure_mismatches",
                     []
                 ):
-                    wom_mismatches.append(
+                    wom_mismatches.append((
+                        member.id, account.get("player_id"),
                         f"- {member.mention}: "
                         f"`{account['wom_role']}` → "
                         f"`{account['expected_rank']}`"
-                    )
+                    ))
 
         promotion_audit = (
             self.get_promotion_audit_entries(
@@ -4834,6 +4844,12 @@ class TasksCog(commands.Cog):
                 "overdue"
             ]
         )
+
+        ca_accounts = {(entry["member"].id, entry["player_id"])
+                       for entry in due_today_promotions + overdue_promotions
+                       if entry.get("ca_promotion")}
+        wom_mismatches = [line for did, wid, line in wom_mismatches
+                          if (did, wid) not in ca_accounts]
 
         link_audit = self.get_link_audit_entries(
             c,
@@ -6140,14 +6156,13 @@ class TasksCog(commands.Cog):
         conn.commit()
         conn.close()
 
-        ca_lines, ca_status, ca_ingame = [], None, []
+        ca_lines, ca_status = [], None
         if guild.id == NOVUS_GUILD_ID and log_channel_id == NOVUS_MOD_CHAT_CHANNEL_ID:
             rp = self.bot.get_cog("RuneProfileCog")
             try:
                 if rp:
                     ca_result = rp.promotion_report(guild, group_data.get("memberships", []))
                     ca_lines, ca_status = ca_result[:2]
-                    ca_ingame = ca_result[2] if len(ca_result)>2 else []
                 else:
                     logger.warning("RuneProfile audit module unavailable for staff report")
             except Exception:
@@ -6156,7 +6171,6 @@ class TasksCog(commands.Cog):
 
         actionable_items = any((
             ca_lines,
-            ca_ingame,
             automatic_promotions,
             reset_rank_updates,
             reset_names,
@@ -6398,8 +6412,7 @@ class TasksCog(commands.Cog):
             if ca_status is not None:
                 # Keep CA grants and in-game actions distinct; do not silently
                 # truncate the original 13 grants at nine members.
-                for heading,items in (("Automatic Discord CA Promotions",ca_lines),
-                                      ("In-Game CA Promotions Needed",ca_ingame)):
+                for heading,items in (("Automatic Discord CA Promotions",ca_lines),):
                     if not items:
                         continue
                     chunks=[]
@@ -6414,7 +6427,7 @@ class TasksCog(commands.Cog):
                     for index,value in enumerate(chunks):
                         name=f"{heading} ({len(items)})" if index==0 else f"{heading} (continued)"
                         embed.add_field(name=name,value=value,inline=False)
-                if not ca_lines and not ca_ingame and "tenure minimum applied" not in ca_status:
+                if not ca_lines and "tenure minimum applied" not in ca_status:
                     embed.add_field(name="Combat Achievement Audit",value=ca_status,inline=False)
 
             # Discord caps the sum of embed text at 6,000 characters.

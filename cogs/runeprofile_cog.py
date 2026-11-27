@@ -64,6 +64,68 @@ def tenure_gate(sync,cursor,discord_id,memberships,now):
     date=min(add_calendar_months(start,3).date() for start in starts)
     return now.astimezone(ET).date()>=date,date
 
+def ingame_ca_promotion(cursor, member, accounts, today):
+    """Return an outstanding, already-granted CA promotion for the primary RSN.
+
+    Use the actual Discord award date when recorded, subject to the current
+    tenure gate. Otherwise persist the first confirmed pending date.
+    No fresh RuneProfile data is needed to recognize an existing Discord award.
+    """
+    if getattr(member, "bot", False) or not has_novus_member_role(member):
+        return None
+    ids = {role.id for role in member.roles}
+    tier = "Grandmaster" if GRANDMASTER in ids else "Master" if MASTER in ids else None
+    if not tier:
+        return None
+    starts = [a["effective_joined_at"] for a in accounts
+              if a.get("effective_joined_at") and a.get("expected_rank")
+              and a.get("wom_role") not in NOVUS_TRIAL_WOM_RANKS]
+    if not starts:
+        return None
+    eligible_date = min(add_calendar_months(start, 3).date() for start in starts)
+    if eligible_date > today:
+        return None
+    primary = next((a for a in accounts if a.get("account_type") == "primary"), None)
+    if not primary or primary.get("player_id") is None:
+        return None
+    current = primary.get("wom_role")
+    allowed = {"squire", "duellist", "inquisitor", "expert", "knight", "paladin"}
+    if tier == "Grandmaster":
+        allowed.add("master")
+    if current not in allowed:
+        return None
+    cursor.execute("""CREATE TABLE IF NOT EXISTS runeprofile_ingame_ca_due (
+        discord_id INTEGER NOT NULL, wom_id INTEGER NOT NULL, tier TEXT NOT NULL,
+        first_seen TEXT NOT NULL, PRIMARY KEY(discord_id,wom_id,tier))""")
+    key = (member.id, primary["player_id"], tier)
+    cursor.execute("INSERT OR IGNORE INTO runeprofile_ingame_ca_due VALUES (?,?,?,?)",
+                   (*key, today.isoformat()))
+    first_seen = dt.date.fromisoformat(cursor.execute(
+        "SELECT first_seen FROM runeprofile_ingame_ca_due WHERE discord_id=? AND wom_id=? AND tier=?",
+        key).fetchone()[0])
+    due = first_seen
+    if cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runeprofile_ca_awards'").fetchone():
+        grants = cursor.execute("""SELECT awarded_at FROM runeprofile_ca_awards
+            WHERE discord_id=? AND wom_id=? AND tier=? ORDER BY awarded_at DESC""", key).fetchall()
+        for (stamp,) in grants:
+            try:
+                award_date = dt.datetime.fromisoformat(stamp).astimezone(ET).date()
+            except (TypeError, ValueError):
+                continue
+            if award_date <= today:
+                due = award_date
+                break
+    due = min(today, max(due, eligible_date))
+    return {
+        **primary, "member": member,
+        "current_rank": "Master CA" if current == "master" else current,
+        "target_rank": "GrandMaster CA" if tier == "Grandmaster" else "Master CA",
+        "eligible_at": dt.datetime.combine(due, dt.time.min, tzinfo=ET),
+        "overdue_days": (today - due).days,
+        "ca_promotion": True,
+    }
+
+
 def parse_tasks(payload):
     if not isinstance(payload,dict) or not isinstance(payload.get("data"),list) or not payload["data"]:
         return None

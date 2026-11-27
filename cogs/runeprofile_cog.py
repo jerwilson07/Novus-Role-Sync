@@ -668,7 +668,7 @@ class RuneProfileCog(commands.Cog):
             if not sync or guild.id!=GUILD:
                 return
             message_id=1575919164911263836
-            key=f"novus_merge_ca_noon_20261127:{GUILD}"
+            key=f"novus_merge_ca_weekly_noon_20261127:{GUILD}"
             with closing(db()) as conn:
                 if sync._one_time_delivery_sent(conn.cursor(),key):
                     return
@@ -713,7 +713,25 @@ class RuneProfileCog(commands.Cog):
                     chunk.append(line)
                 if chunk:
                     fields.append((f"{heading} ({len(rows)})" if first else heading+" (continued)","\n".join(chunk)))
+            from cogs.tasks_cog import deduplicate_skipped_link_issues
+            import re
+            link_heading="Linked Members With No Active RSN"
+            skipped_heading="Skipped"
+            missing_links=[line for f in old.fields if f.name.startswith(link_heading)
+                           for line in f.value.splitlines()]
+            # A combined missing-tenure warning also owns its missing-RSN issue.
+            for f in old.fields:
+                if f.name.startswith("Member Role Without Tenure"):
+                    for line in f.value.splitlines():
+                        match=re.fullmatch(r"- <@(\d+)> \(no active linked RSN\)",line)
+                        if match:
+                            missing_links.append(f"- <@{match.group(1)}>: no linked RSN is currently active in Novus")
+            promotion_lines={re.sub(r"[\x60*]","",line).split(" (")[0]
+                             for _,value in fields for line in value.splitlines()}
             embed=discord.Embed.from_dict(old.to_dict())
+            note="Unchanged diagnostic warnings are repeated only after 7 days."
+            if note not in (embed.description or ""):
+                embed.description=(embed.description or "")+"\n"+note
             embed.clear_fields()
             inserted=False
             for field in old.fields:
@@ -725,6 +743,21 @@ class RuneProfileCog(commands.Cog):
                     continue
                 if field.name=="No Action Needed" and fields:
                     continue
+                if field.name.startswith(skipped_heading):
+                    lines=deduplicate_skipped_link_issues(field.value.splitlines(),missing_links)
+                    if not lines:
+                        continue
+                    if lines!=field.value.splitlines():
+                        embed.add_field(name=f"{skipped_heading} ({len(lines)})",value="\n".join(lines),inline=field.inline)
+                        continue
+                if field.name.startswith("WOM Tenure Mismatches"):
+                    lines=[line for line in field.value.splitlines()
+                           if re.sub(r"[\x60*]","",line) not in promotion_lines]
+                    if not lines:
+                        continue
+                    if lines!=field.value.splitlines():
+                        embed.add_field(name=f"WOM Tenure Mismatches ({len(lines)})",value="\n".join(lines),inline=field.inline)
+                        continue
                 embed.add_field(name=field.name,value=field.value,inline=field.inline)
             if not inserted:
                 for name,value in fields:
@@ -739,7 +772,34 @@ class RuneProfileCog(commands.Cog):
             if [(f.name,f.value) for f in edited.embeds[0].fields]!=[(f.name,f.value) for f in embed.fields]:
                 logger.warning("Requested November 27 report edit not confirmed")
                 return
-            sync._mark_one_time_delivery(key,message_id)
+            # Seed the actual delivered diagnostic lines, not a new report or
+            # guessed issues. Preserve any existing reminder history.
+            weekly_key=f"weekly_sync_issues_v1:{GUILD}:staff"
+            seeded=0
+            with closing(db()) as conn,conn:
+                row=conn.execute("SELECT value FROM bot_stats WHERE key=?",(weekly_key,)).fetchone()
+                try:
+                    history=json.loads(row[0]) if row else {}
+                    if not isinstance(history,dict):
+                        history={}
+                except (TypeError,ValueError):
+                    history={}
+                for f in edited.embeds[0].fields:
+                    heading=next((h for h in (link_heading,skipped_heading) if f.name.startswith(h)),None)
+                    if not heading:
+                        continue
+                    lines=f.value.splitlines()
+                    if len(f.value)>=1024:
+                        lines=lines[:-1]
+                    for line in lines:
+                        if not re.match(r"^- <@!?\d+>",line) or line.endswith(("…","...")):
+                            continue
+                        history[heading+"\n"+line]=day
+                        seeded+=1
+                conn.execute("INSERT OR REPLACE INTO bot_stats (key,value) VALUES (?,?)",
+                             (weekly_key,json.dumps(history)))
+                conn.execute("INSERT OR REPLACE INTO bot_stats (key,value) VALUES (?,?)",(key,str(message_id)))
+            logger.info("Novus November 27 noon report weekly reminders confirmed message=%s seeded=%s",message_id,seeded)
             logger.info("Novus November 27 noon report merged in place message=%s due_today=%s overdue=%s ca=%s",
                         message_id,len(audit["due_today"]),len(audit["overdue"]),
                         sum(bool(e.get("ca_promotion")) for e in audit["due_today"]+audit["overdue"]))

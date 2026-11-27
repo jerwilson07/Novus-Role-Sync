@@ -748,6 +748,64 @@ def missing_tenure_report_due(member_ids, saved_dates, today):
     return due, last_reported
 
 
+
+def weekly_sync_issues(cursor, guild_id, scope, sections, today):
+    """Show new/changed warnings now and unchanged warnings every seven days.
+
+    Scope is separate for private manual syncs and shared staff reports so
+    a private command cannot silence a warning for the rest of staff.
+    """
+    key = f"weekly_sync_issues_v1:{guild_id}:{scope}"
+    row = cursor.execute("SELECT value FROM bot_stats WHERE key=?", (key,)).fetchone()
+    try:
+        saved = json.loads(row[0]) if row else {}
+        if not isinstance(saved, dict):
+            saved = {}
+    except (TypeError, ValueError):
+        saved = {}
+    due, retained = {}, {}
+    for heading, lines in sections.items():
+        due[heading] = []
+        for line in dict.fromkeys(lines):
+            issue = heading + "\n" + line
+            stamp = saved.get(issue)
+            try:
+                previous = datetime.date.fromisoformat(stamp)
+            except (TypeError, ValueError):
+                previous = None
+            if previous is not None and previous <= today:
+                retained[issue] = previous.isoformat()
+            if previous is None or previous > today or (today-previous).days >= 7:
+                due[heading].append(line)
+    return key, due, retained, saved
+
+
+def acknowledge_weekly_sync_issues(state, visible_lines, today):
+    """Start a cooldown only for complete warning lines actually delivered."""
+    key, due, retained, saved = state
+    visible = set(visible_lines)
+    dates = dict(retained)
+    for heading, lines in due.items():
+        for line in lines:
+            if line in visible:
+                dates[heading+"\n"+line] = today.isoformat()
+    if dates == saved:
+        return
+    with sqlite3.connect("wom_multi.db") as conn:
+        conn.execute("INSERT OR REPLACE INTO bot_stats (key,value) VALUES (?,?)",
+                     (key,json.dumps(dates)))
+
+
+def deduplicate_skipped_link_issues(skipped, missing_links):
+    """A missing-membership warning belongs in the link section, once."""
+    missing_ids = {m.group(1) for line in missing_links
+                   if (m := re.search(r"<@!?(\d+)>", line))}
+    return [line for line in skipped if not (
+        "WOM membership not verified" in line
+        and (m := re.search(r"<@!?(\d+)>", line))
+        and m.group(1) in missing_ids
+    )]
+
 # ============================================================
 # TASK COG
 # ============================================================
@@ -4845,11 +4903,10 @@ class TasksCog(commands.Cog):
             ]
         )
 
-        ca_accounts = {(entry["member"].id, entry["player_id"])
-                       for entry in due_today_promotions + overdue_promotions
-                       if entry.get("ca_promotion")}
+        promotion_accounts = {(entry["member"].id, entry.get("player_id"))
+                              for entry in due_today_promotions + overdue_promotions}
         wom_mismatches = [line for did, wid, line in wom_mismatches
-                          if (did, wid) not in ca_accounts]
+                          if (did, wid) not in promotion_accounts]
 
         link_audit = self.get_link_audit_entries(
             c,
@@ -4866,6 +4923,19 @@ class TasksCog(commands.Cog):
                 "linked_members_without_active_rsn"
             ]
         )
+
+        skipped_members = deduplicate_skipped_link_issues(
+            skipped_members, linked_members_without_active_rsn)
+        issue_day = datetime.datetime.now(ZoneInfo("America/New_York")).date()
+        weekly_state = weekly_sync_issues(c, guild.id, "manual", {
+            "WOM Tenure Mismatches": wom_mismatches,
+            "Linked Members With No Active RSN": linked_members_without_active_rsn,
+            "Skipped": skipped_members,
+        }, issue_day)
+        weekly_due = weekly_state[1]
+        wom_mismatches = weekly_due["WOM Tenure Mismatches"]
+        linked_members_without_active_rsn = weekly_due["Linked Members With No Active RSN"]
+        skipped_members = weekly_due["Skipped"]
 
         now = datetime.datetime.now().isoformat()
 
@@ -5023,6 +5093,10 @@ class TasksCog(commands.Cog):
             response,
             ephemeral=True
         )
+        try:
+            acknowledge_weekly_sync_issues(weekly_state, response.splitlines(), issue_day)
+        except sqlite3.Error:
+            logger.exception("Could not save manual sync warning reminders")
 
     # ========================================================
     # /PROMOTIONS
@@ -6110,6 +6184,16 @@ class TasksCog(commands.Cog):
             linked_members_without_active_rsn = [
                 line for line in linked_members_without_active_rsn if line not in roster_line_to_id
             ]
+        # Keep weekly diagnostics separate from daily actionable promotions/failures.
+        # The missing-tenure section already owns combined no-RSN warnings.
+        skipped_members = deduplicate_skipped_link_issues(skipped_members, linked_members_without_active_rsn)
+        weekly_state = weekly_sync_issues(c, guild.id, "staff", {
+            "Linked Members With No Active RSN": linked_members_without_active_rsn,
+            "Skipped": skipped_members,
+        }, today)
+        weekly_due = weekly_state[1]
+        linked_members_without_active_rsn = weekly_due["Linked Members With No Active RSN"]
+        skipped_members = weekly_due["Skipped"]
         missing_join_dates = list(dict.fromkeys(
             missing_join_dates + [
                 f"- {entry['member'].mention} (`{entry['rsn']}`)"
@@ -6449,6 +6533,13 @@ class TasksCog(commands.Cog):
                     "Sent Novus staff sync report to channel=%s message=%s",
                     log_channel_id, sent_message.id,
                 )
+                try:
+                    visible_lines = [line for field in embed.fields
+                                     if field.name.startswith(("Linked Members With No Active RSN", "Skipped ("))
+                                     for line in field.value.splitlines()]
+                    acknowledge_weekly_sync_issues(weekly_state, visible_lines, today)
+                except sqlite3.Error:
+                    logger.exception("Could not save staff sync warning reminders")
                 if ca_status is not None and rp and hasattr(rp,"mark_reported_awards"):
                     for field in embed.fields:
                         if field.name.startswith("Automatic Discord CA Promotions ("):
